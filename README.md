@@ -144,3 +144,53 @@ The default commit message is `chore(engineering): complete {task_id}`. Override
 `--git-message-template`; available fields are `{task_id}`, `{task_title}`, `{milestone_id}`, and
 `{milestone_title}`. `--push-after-task` implies committing first, then pushing `HEAD` to the current
 branch on `origin` unless `--git-remote` or `--git-branch` is provided.
+
+## Autonomous Implementation Loop
+
+Tasks can now include three phases:
+
+- `implementation`: commands or an agent executor that changes the working tree.
+- `acceptance`: required tests/checks that decide whether the task is done.
+- `repair`: commands or an agent executor used after a failed acceptance run.
+
+The harness executes `implementation`, then `acceptance`. If acceptance fails and `repair` is
+configured, it runs `repair` and retries acceptance until `max_task_iterations` is exhausted.
+
+```json
+{
+  "id": "worker-node-loop",
+  "title": "Implement long-running worker node loop",
+  "max_task_iterations": 3,
+  "file_scope": ["runtime/**", "tests/**"],
+  "implementation": [
+    {
+      "name": "Codex implementation",
+      "executor": "codex",
+      "prompt": "Implement the worker loop described by this task.",
+      "timeout_seconds": 3600
+    }
+  ],
+  "repair": [
+    {
+      "name": "Codex repair",
+      "executor": "codex",
+      "prompt": "Fix the failing acceptance tests for this task.",
+      "timeout_seconds": 1800
+    }
+  ],
+  "acceptance": [
+    {"name": "focused tests", "command": "python3 -m pytest tests/test_worker.py -q"}
+  ]
+}
+```
+
+Agent executors are gated. Use `--allow-agent` when you intentionally want the harness to invoke a
+non-interactive coding agent:
+
+```bash
+engh drive --project-root /home/biostar/work/utopiai --rolling --allow-agent --commit-after-task --push-after-task
+```
+
+The built-in `codex` executor calls `codex exec --full-auto --sandbox workspace-write -C <project>`.
+It is still bounded by the roadmap task, file scope, acceptance commands, time budget, git
+checkpoints, and the command/live/manual gates already enforced by the harness.

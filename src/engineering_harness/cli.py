@@ -136,7 +136,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         if task is None or task.id in seen_task_ids:
             break
         seen_task_ids.add(task.id)
-        result = harness.run_task(task, dry_run=args.dry_run, allow_live=args.allow_live, allow_manual=args.allow_manual)
+        result = harness.run_task(
+            task,
+            dry_run=args.dry_run,
+            allow_live=args.allow_live,
+            allow_manual=args.allow_manual,
+            allow_agent=args.allow_agent,
+        )
         maybe_checkpoint_task(harness, task, result, args, dry_run=args.dry_run)
         results.append(result)
         if args.task or args.dry_run or result["status"] not in COMPLETED_STATUSES:
@@ -293,7 +299,12 @@ def cmd_drive(args: argparse.Namespace) -> int:
             status = "stalled"
             message = continuation["message"]
             break
-        result = harness.run_task(task, allow_live=args.allow_live, allow_manual=args.allow_manual)
+        result = harness.run_task(
+            task,
+            allow_live=args.allow_live,
+            allow_manual=args.allow_manual,
+            allow_agent=args.allow_agent,
+        )
         maybe_checkpoint_task(harness, task, result, args)
         results.append(result)
         if result["status"] not in COMPLETED_STATUSES:
@@ -373,6 +384,7 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--dry-run", action="store_true")
             command.add_argument("--allow-live", action="store_true")
             command.add_argument("--allow-manual", action="store_true")
+            command.add_argument("--allow-agent", action="store_true")
             command.add_argument("--commit-after-task", action="store_true")
             command.add_argument("--push-after-task", action="store_true")
             command.add_argument("--git-remote", default="origin")
@@ -390,6 +402,7 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--no-progress-limit", type=int, default=2)
             command.add_argument("--allow-live", action="store_true")
             command.add_argument("--allow-manual", action="store_true")
+            command.add_argument("--allow-agent", action="store_true")
             command.add_argument("--stop-after-each", action="store_true")
             command.add_argument("--commit-after-task", action="store_true")
             command.add_argument("--push-after-task", action="store_true")

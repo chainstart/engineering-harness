@@ -63,6 +63,72 @@ def test_harness_blocks_non_allowlisted_command(tmp_path):
     assert "allowlisted" in result["message"]
 
 
+def test_harness_runs_implementation_before_acceptance(tmp_path):
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["implementation"] = [
+        {
+            "name": "write implementation marker",
+            "command": "python3 -c \"from pathlib import Path; Path('implemented.txt').write_text('ok')\"",
+        }
+    ]
+    task["acceptance"][0]["command"] = "python3 -c \"from pathlib import Path; assert Path('implemented.txt').read_text() == 'ok'\""
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    result = harness.run_task(harness.next_task(), allow_agent=True)
+
+    assert result["status"] == "passed"
+    assert [run["phase"] for run in result["runs"]] == ["implementation", "acceptance-1"]
+
+
+def test_harness_can_repair_after_failed_acceptance(tmp_path):
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["max_task_iterations"] = 2
+    task["repair"] = [
+        {
+            "name": "repair marker",
+            "command": "python3 -c \"from pathlib import Path; Path('repair.txt').write_text('fixed')\"",
+        }
+    ]
+    task["acceptance"][0]["command"] = "python3 -c \"from pathlib import Path; assert Path('repair.txt').read_text() == 'fixed'\""
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    result = harness.run_task(harness.next_task(), allow_agent=True)
+
+    assert result["status"] == "passed"
+    phases = [run["phase"] for run in result["runs"]]
+    assert phases == ["acceptance-1", "repair-1", "acceptance-2"]
+
+
+def test_harness_blocks_codex_executor_without_agent_approval(tmp_path):
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["implementation"] = [{"name": "agent work", "executor": "codex", "prompt": "Do not change files."}]
+    task["acceptance"][0]["command"] = "python3 -c \"print('ok')\""
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    result = harness.run_task(harness.next_task())
+
+    assert result["status"] == "blocked"
+    assert "allow-agent" in result["message"]
+
+
 def test_discover_projects_finds_configured_and_candidate_projects(tmp_path):
     configured = tmp_path / "configured"
     configured.mkdir()

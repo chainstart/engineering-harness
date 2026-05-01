@@ -48,9 +48,13 @@ class Project:
 @dataclass(frozen=True)
 class AcceptanceCommand:
     name: str
-    command: str
+    command: str | None
     timeout_seconds: int
     required: bool = True
+    executor: str = "shell"
+    prompt: str | None = None
+    model: str | None = None
+    sandbox: str = "workspace-write"
 
 
 @dataclass(frozen=True)
@@ -63,11 +67,16 @@ class HarnessTask:
     max_attempts: int
     file_scope: tuple[str, ...]
     manual_approval_required: bool
+    agent_approval_required: bool
+    max_task_iterations: int
+    implementation: tuple[AcceptanceCommand, ...]
+    repair: tuple[AcceptanceCommand, ...]
     acceptance: tuple[AcceptanceCommand, ...]
 
 
 @dataclass(frozen=True)
 class CommandRun:
+    phase: str
     name: str
     command: str
     status: str
@@ -338,8 +347,12 @@ class Harness:
                     "title": str(task.get("title", task_id)),
                     "status": str(task.get("status", "pending")),
                     "max_attempts": int(task.get("max_attempts", 2)),
+                    "max_task_iterations": int(task.get("max_task_iterations", 1)),
                     "manual_approval_required": bool(task.get("manual_approval_required", False)),
+                    "agent_approval_required": bool(task.get("agent_approval_required", False)),
                     "file_scope": list(task.get("file_scope", [])),
+                    "implementation": task.get("implementation", []),
+                    "repair": task.get("repair", []),
                     "acceptance": acceptance,
                     "generated_by": "engineering-harness-continuation",
                     "generated_at": utc_now(),
@@ -361,16 +374,9 @@ class Harness:
             if str(milestone.get("status", "planned")) in BLOCKED_STATUSES:
                 continue
             for task in milestone.get("tasks", []):
-                acceptance = []
-                for item in task.get("acceptance", []):
-                    acceptance.append(
-                        AcceptanceCommand(
-                            name=str(item.get("name", item.get("command", "acceptance"))),
-                            command=str(item["command"]),
-                            timeout_seconds=int(item.get("timeout_seconds", self.default_timeout)),
-                            required=bool(item.get("required", True)),
-                        )
-                    )
+                implementation = self._parse_task_commands(task.get("implementation", []), default_name="implementation")
+                repair = self._parse_task_commands(task.get("repair", []), default_name="repair")
+                acceptance = self._parse_task_commands(task.get("acceptance", []), default_name="acceptance")
                 tasks.append(
                     HarnessTask(
                         id=str(task["id"]),
@@ -381,10 +387,35 @@ class Harness:
                         max_attempts=int(task.get("max_attempts", 3)),
                         file_scope=tuple(str(scope) for scope in task.get("file_scope", [])),
                         manual_approval_required=bool(task.get("manual_approval_required", False)),
+                        agent_approval_required=bool(task.get("agent_approval_required", bool(implementation or repair))),
+                        max_task_iterations=max(1, int(task.get("max_task_iterations", 1))),
+                        implementation=tuple(implementation),
+                        repair=tuple(repair),
                         acceptance=tuple(acceptance),
                     )
                 )
         return tasks
+
+    def _parse_task_commands(self, items: list[dict[str, Any]] | None, *, default_name: str) -> list[AcceptanceCommand]:
+        commands = []
+        for item in items or []:
+            executor = str(item.get("executor", "shell"))
+            command = item.get("command")
+            prompt = item.get("prompt")
+            name = item.get("name") or command or prompt or default_name
+            commands.append(
+                AcceptanceCommand(
+                    name=str(name),
+                    command=str(command) if command is not None else None,
+                    timeout_seconds=int(item.get("timeout_seconds", self.default_timeout)),
+                    required=bool(item.get("required", True)),
+                    executor=executor,
+                    prompt=str(prompt) if prompt is not None else None,
+                    model=str(item["model"]) if item.get("model") else None,
+                    sandbox=str(item.get("sandbox", "workspace-write")),
+                )
+            )
+        return commands
 
     def task_by_id(self, task_id: str) -> HarnessTask:
         for task in self.iter_tasks():
@@ -448,6 +479,21 @@ class Harness:
     def task_payload(self, task: HarnessTask | None) -> dict[str, Any] | None:
         if task is None:
             return None
+        def command_payload(command: AcceptanceCommand) -> dict[str, Any]:
+            payload = {
+                "name": command.name,
+                "timeout_seconds": command.timeout_seconds,
+                "required": command.required,
+                "executor": command.executor,
+            }
+            if command.command is not None:
+                payload["command"] = command.command
+            if command.prompt is not None:
+                payload["prompt"] = command.prompt
+            if command.model is not None:
+                payload["model"] = command.model
+            return payload
+
         return {
             "id": task.id,
             "title": task.title,
@@ -455,18 +501,16 @@ class Harness:
             "milestone_title": task.milestone_title,
             "file_scope": list(task.file_scope),
             "manual_approval_required": task.manual_approval_required,
-            "acceptance": [
-                {
-                    "name": command.name,
-                    "command": command.command,
-                    "timeout_seconds": command.timeout_seconds,
-                    "required": command.required,
-                }
-                for command in task.acceptance
-            ],
+            "agent_approval_required": task.agent_approval_required,
+            "max_task_iterations": task.max_task_iterations,
+            "implementation": [command_payload(command) for command in task.implementation],
+            "repair": [command_payload(command) for command in task.repair],
+            "acceptance": [command_payload(command) for command in task.acceptance],
         }
 
-    def command_allowed(self, command: str, allow_live: bool = False) -> tuple[bool, str]:
+    def command_allowed(self, command: str | None, allow_live: bool = False) -> tuple[bool, str]:
+        if command is None:
+            return False, "shell command is missing"
         stripped = command.strip()
         for pattern in self.command_policy.get("blocked_patterns", []):
             if pattern in stripped:
@@ -487,6 +531,7 @@ class Harness:
         dry_run: bool = False,
         allow_live: bool = False,
         allow_manual: bool = False,
+        allow_agent: bool = False,
     ) -> dict[str, Any]:
         started_at = utc_now()
         report_path = self.report_dir / f"{slug_now()}-{task.id}.md"
@@ -498,33 +543,95 @@ class Harness:
 
         if task.manual_approval_required and not allow_manual:
             return self._finish_task(state, task, report_path, started_at, [], "blocked", "manual approval required", not dry_run)
+        if task.agent_approval_required and not allow_agent:
+            return self._finish_task(state, task, report_path, started_at, [], "blocked", "agent implementation requires --allow-agent", not dry_run)
         if not task.acceptance:
             return self._finish_task(state, task, report_path, started_at, [], "blocked", "task has no acceptance", not dry_run)
 
         runs: list[CommandRun] = []
-        overall_status = "passed"
-        message = "All required acceptance commands passed."
-        for acceptance in task.acceptance:
-            allowed, reason = self.command_allowed(acceptance.command, allow_live=allow_live)
-            if not allowed:
-                runs.append(
-                    CommandRun(acceptance.name, acceptance.command, "blocked", None, utc_now(), utc_now(), "", reason)
+        implementation_status, message = self._run_command_group(
+            task.implementation,
+            phase="implementation",
+            runs=runs,
+            dry_run=dry_run,
+            allow_live=allow_live,
+            allow_agent=allow_agent,
+            task=task,
+        )
+        overall_status = implementation_status
+
+        if overall_status == "passed":
+            for iteration in range(task.max_task_iterations):
+                acceptance_status, message = self._run_command_group(
+                    task.acceptance,
+                    phase=f"acceptance-{iteration + 1}",
+                    runs=runs,
+                    dry_run=dry_run,
+                    allow_live=allow_live,
+                    allow_agent=allow_agent,
+                    task=task,
                 )
-                overall_status = "blocked"
-                message = reason
-                break
-            if dry_run:
-                runs.append(CommandRun(acceptance.name, acceptance.command, "dry-run", None, utc_now(), utc_now(), "", ""))
-                continue
-            run = self._run_command(acceptance)
-            runs.append(run)
-            if acceptance.required and run.returncode != 0:
-                overall_status = "failed"
-                message = f"Required command failed: {acceptance.name}"
-                break
+                overall_status = acceptance_status
+                if acceptance_status == "passed":
+                    message = "All required acceptance commands passed."
+                    break
+                if acceptance_status == "blocked" or iteration + 1 >= task.max_task_iterations or not task.repair:
+                    break
+                repair_status, message = self._run_command_group(
+                    task.repair,
+                    phase=f"repair-{iteration + 1}",
+                    runs=runs,
+                    dry_run=dry_run,
+                    allow_live=allow_live,
+                    allow_agent=allow_agent,
+                    task=task,
+                )
+                overall_status = repair_status
+                if repair_status != "passed":
+                    break
 
         status = "dry-run" if dry_run and overall_status == "passed" else overall_status
         return self._finish_task(state, task, report_path, started_at, runs, status, message, not dry_run)
+
+    def _run_command_group(
+        self,
+        commands: tuple[AcceptanceCommand, ...],
+        *,
+        phase: str,
+        runs: list[CommandRun],
+        dry_run: bool,
+        allow_live: bool,
+        allow_agent: bool,
+        task: HarnessTask,
+    ) -> tuple[str, str]:
+        if not commands:
+            return "passed", f"No {phase} commands configured."
+        for command in commands:
+            if command.executor == "codex" and not allow_agent:
+                runs.append(
+                    CommandRun(phase, command.name, self._display_command(command, task), "blocked", None, utc_now(), utc_now(), "", "codex executor requires --allow-agent")
+                )
+                return "blocked", "codex executor requires --allow-agent"
+            if command.executor == "shell":
+                allowed, reason = self.command_allowed(command.command, allow_live=allow_live)
+                if not allowed:
+                    runs.append(
+                        CommandRun(phase, command.name, command.command or "", "blocked", None, utc_now(), utc_now(), "", reason)
+                    )
+                    return "blocked", reason
+            elif command.executor != "codex":
+                runs.append(
+                    CommandRun(phase, command.name, self._display_command(command, task), "blocked", None, utc_now(), utc_now(), "", f"unknown executor: {command.executor}")
+                )
+                return "blocked", f"unknown executor: {command.executor}"
+            if dry_run:
+                runs.append(CommandRun(phase, command.name, self._display_command(command, task), "dry-run", None, utc_now(), utc_now(), "", ""))
+                continue
+            run = self._run_command(command, phase=phase, task=task)
+            runs.append(run)
+            if command.required and run.returncode != 0:
+                return "failed", f"Required {phase} command failed: {command.name}"
+        return "passed", f"All required {phase} commands passed."
 
     def git_checkpoint(
         self,
@@ -612,22 +719,67 @@ class Harness:
             "stderr": redact(completed.stderr[-8000:]),
         }
 
-    def _run_command(self, acceptance: AcceptanceCommand) -> CommandRun:
+    def _display_command(self, command: AcceptanceCommand, task: HarnessTask) -> str:
+        if command.executor == "codex":
+            model = f" --model {command.model}" if command.model else ""
+            return f"codex exec --full-auto --sandbox {command.sandbox}{model} -C {self.project_root} <task:{task.id}>"
+        return command.command or ""
+
+    def _codex_prompt(self, command: AcceptanceCommand, task: HarnessTask) -> str:
+        acceptance = "\n".join(f"- {item.name}: {item.command or item.prompt or item.executor}" for item in task.acceptance)
+        file_scope = "\n".join(f"- {scope}" for scope in task.file_scope) or "- repository-scoped, but keep changes minimal"
+        prompt = command.prompt or task.title
+        return (
+            "You are executing one roadmap task for an autonomous engineering harness.\n\n"
+            f"Project root: {self.project_root}\n"
+            f"Milestone: {task.milestone_id} - {task.milestone_title}\n"
+            f"Task: {task.id} - {task.title}\n\n"
+            "Goal:\n"
+            f"{prompt}\n\n"
+            "Allowed file scope:\n"
+            f"{file_scope}\n\n"
+            "Acceptance commands that must pass after your changes:\n"
+            f"{acceptance}\n\n"
+            "Constraints:\n"
+            "- Edit files directly in the working tree.\n"
+            "- Do not commit or push; the harness handles git checkpoints.\n"
+            "- Do not use private keys, paid live deployment, or live trading.\n"
+            "- Prefer focused, test-driven changes that satisfy the acceptance commands.\n"
+            "- If the task cannot be completed locally, write a clear blocker into the relevant project docs.\n"
+        )
+
+    def _run_command(self, acceptance: AcceptanceCommand, *, phase: str, task: HarnessTask) -> CommandRun:
         started_at = utc_now()
+        display_command = self._display_command(acceptance, task)
         try:
-            completed = subprocess.run(
-                acceptance.command,
-                cwd=self.project_root,
-                shell=True,
-                executable="/bin/bash",
-                text=True,
-                capture_output=True,
-                timeout=acceptance.timeout_seconds,
-                env={**os.environ, "ENGINEERING_HARNESS": "1"},
-            )
+            if acceptance.executor == "codex":
+                args = ["codex", "exec", "--full-auto", "--sandbox", acceptance.sandbox, "-C", str(self.project_root)]
+                if acceptance.model:
+                    args.extend(["--model", acceptance.model])
+                args.append(self._codex_prompt(acceptance, task))
+                completed = subprocess.run(
+                    args,
+                    cwd=self.project_root,
+                    text=True,
+                    capture_output=True,
+                    timeout=acceptance.timeout_seconds,
+                    env={**os.environ, "ENGINEERING_HARNESS": "1"},
+                )
+            else:
+                completed = subprocess.run(
+                    acceptance.command or "",
+                    cwd=self.project_root,
+                    shell=True,
+                    executable="/bin/bash",
+                    text=True,
+                    capture_output=True,
+                    timeout=acceptance.timeout_seconds,
+                    env={**os.environ, "ENGINEERING_HARNESS": "1"},
+                )
             return CommandRun(
+                phase,
                 acceptance.name,
-                acceptance.command,
+                display_command,
                 "passed" if completed.returncode == 0 else "failed",
                 completed.returncode,
                 started_at,
@@ -638,8 +790,9 @@ class Harness:
         except subprocess.TimeoutExpired as exc:
             stdout = exc.stdout if isinstance(exc.stdout, str) else ""
             return CommandRun(
+                phase,
                 acceptance.name,
-                acceptance.command,
+                display_command,
                 "failed",
                 None,
                 started_at,
@@ -685,7 +838,13 @@ class Harness:
             "message": message,
             "report": str(report_path.relative_to(self.project_root)),
             "runs": [
-                {"name": run.name, "command": run.command, "status": run.status, "returncode": run.returncode}
+                {
+                    "phase": run.phase,
+                    "name": run.name,
+                    "command": run.command,
+                    "status": run.status,
+                    "returncode": run.returncode,
+                }
                 for run in runs
             ],
         }
@@ -712,15 +871,15 @@ class Harness:
             f"- Finished: {finished_at}",
             f"- Message: {message}",
             "",
-            "## Acceptance Runs",
+            "## Task Runs",
             "",
         ]
         if not runs:
-            lines.append("No acceptance commands were executed.")
+            lines.append("No task commands were executed.")
         for run in runs:
             lines.extend(
                 [
-                    f"### {run.name}",
+                    f"### {run.phase}: {run.name}",
                     "",
                     f"- Status: `{run.status}`",
                     f"- Return code: `{run.returncode}`",
