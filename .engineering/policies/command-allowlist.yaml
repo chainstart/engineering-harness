@@ -1,0 +1,24 @@
+{
+  "allowed_prefixes": [
+    "python3 ",
+    "pytest ",
+    "bash scripts/"
+  ],
+  "blocked_patterns": [
+    "rm -rf /",
+    "git reset --hard",
+    "git checkout --",
+    "git clean -fd",
+    "PRIVATE_KEY=",
+    "MNEMONIC=",
+    "OPENAI_API_KEY=",
+    "ANTHROPIC_API_KEY="
+  ],
+  "profile": "python-agent",
+  "requires_live_flag_patterns": [
+    "--live",
+    "--spend",
+    "--publish"
+  ],
+  "version": 1
+}

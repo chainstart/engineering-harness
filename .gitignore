@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+.engineering/state/*
+!.engineering/state/.gitignore
+!.engineering/state/.gitkeep
+.engineering/reports/*
+!.engineering/reports/.gitignore
+!.engineering/reports/.gitkeep

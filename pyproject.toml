@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "engineering-harness"
+version = "0.1.0"
+description = "Goal-driven engineering harness for multi-repository AI, blockchain, and research projects."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+engh = "engineering_harness.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["engineering_harness*"]

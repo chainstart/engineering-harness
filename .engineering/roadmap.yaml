@@ -1,0 +1,36 @@
+{
+  "decision_log_path": ".engineering/state/decision-log.jsonl",
+  "default_timeout_seconds": 300,
+  "milestones": [
+    {
+      "id": "baseline",
+      "objective": "Verify the project can run its baseline checks under the shared engineering harness.",
+      "status": "active",
+      "tasks": [
+        {
+          "acceptance": [
+            {
+              "command": "python3 -c \"import sys; sys.path.insert(0, 'src'); import pytest; raise SystemExit(pytest.main(['-q']))\"",
+              "name": "Run Python test suite",
+              "required": true,
+              "timeout_seconds": 600
+            }
+          ],
+          "file_scope": [
+            "**"
+          ],
+          "id": "tests",
+          "max_attempts": 2,
+          "status": "pending",
+          "title": "Run Python test suite"
+        }
+      ],
+      "title": "Project Baseline"
+    }
+  ],
+  "profile": "python-agent",
+  "project": "engineering-harness",
+  "report_dir": ".engineering/reports/tasks",
+  "state_path": ".engineering/state/harness-state.json",
+  "version": 1
+}

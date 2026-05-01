@@ -1,0 +1,11 @@
+{
+  "profile": "python-agent",
+  "requires_human_approval": [
+    "mainnet deployment",
+    "contract upgrade or migration",
+    "private key or API key configuration",
+    "real-fund transfer",
+    "live trading"
+  ],
+  "version": 1
+}
