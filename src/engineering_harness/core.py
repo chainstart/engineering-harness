@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -252,6 +252,20 @@ class Harness:
             "next_stage": self._continuation_stage_payload(pending[0]) if pending else None,
         }
 
+    def self_iteration_summary(self) -> dict[str, Any]:
+        config = self.roadmap.get("self_iteration") or {}
+        if not isinstance(config, dict):
+            config = {}
+        planner = config.get("planner") or {}
+        if not isinstance(planner, dict):
+            planner = {}
+        return {
+            "enabled": bool(config.get("enabled", False)),
+            "objective": config.get("objective"),
+            "planner_executor": str(planner.get("executor", "shell")) if planner else None,
+            "max_stages_per_iteration": int(config.get("max_stages_per_iteration", 1)),
+        }
+
     def advance_roadmap(self, *, max_new_milestones: int = 1, reason: str = "queue_empty") -> dict[str, Any]:
         config = self.roadmap.get("continuation") or {}
         if not isinstance(config, dict) or not config.get("enabled", False):
@@ -310,6 +324,249 @@ class Harness:
             "milestones_added": materialized,
             "tasks_added": tasks_added,
         }
+
+    def run_self_iteration(
+        self,
+        *,
+        reason: str = "roadmap_exhausted",
+        allow_agent: bool = False,
+        allow_live: bool = False,
+    ) -> dict[str, Any]:
+        config = self.roadmap.get("self_iteration") or {}
+        if not isinstance(config, dict) or not config.get("enabled", False):
+            return {
+                "status": "disabled",
+                "message": "self_iteration is not enabled",
+                "stage_count_before": self.continuation_summary()["stage_count"],
+                "stage_count_after": self.continuation_summary()["stage_count"],
+                "pending_stage_count_after": self.continuation_summary()["pending_stage_count"],
+                "report": None,
+            }
+        planner = config.get("planner") or {}
+        if not isinstance(planner, dict):
+            return {
+                "status": "error",
+                "message": "self_iteration.planner must be a mapping",
+                "stage_count_before": self.continuation_summary()["stage_count"],
+                "stage_count_after": self.continuation_summary()["stage_count"],
+                "pending_stage_count_after": self.continuation_summary()["pending_stage_count"],
+                "report": None,
+            }
+
+        before = self.continuation_summary()
+        snapshot = {
+            "generated_at": utc_now(),
+            "reason": reason,
+            "status": self.status_summary(),
+            "recent_git": self._git(["log", "--oneline", "-8"]),
+            "git_status": self._git(["status", "--short"]),
+        }
+        assessment_dir = self.report_dir / "assessments"
+        assessment_dir.mkdir(parents=True, exist_ok=True)
+        snapshot_path = assessment_dir / f"{slug_now()}-self-iteration-snapshot.json"
+        write_json(snapshot_path, snapshot)
+        report_path = assessment_dir / f"{slug_now()}-self-iteration.md"
+
+        command = self._parse_task_commands([planner], default_name="self-iteration-planner")[0]
+        if command.executor == "codex" and not allow_agent:
+            run = CommandRun(
+                "self-iteration",
+                command.name,
+                self._display_command(command, self._self_iteration_task(command, snapshot_path, "")),
+                "blocked",
+                None,
+                utc_now(),
+                utc_now(),
+                "",
+                "codex planner requires --allow-agent",
+            )
+            self._write_self_iteration_report(report_path, reason, snapshot_path, before, before, run)
+            return {
+                "status": "blocked",
+                "message": "codex planner requires --allow-agent",
+                "stage_count_before": before["stage_count"],
+                "stage_count_after": before["stage_count"],
+                "pending_stage_count_after": before["pending_stage_count"],
+                "report": str(report_path.relative_to(self.project_root)),
+            }
+        if command.executor == "shell":
+            allowed, block_reason = self.command_allowed(command.command, allow_live=allow_live)
+            if not allowed:
+                run = CommandRun(
+                    "self-iteration",
+                    command.name,
+                    command.command or "",
+                    "blocked",
+                    None,
+                    utc_now(),
+                    utc_now(),
+                    "",
+                    block_reason,
+                )
+                self._write_self_iteration_report(report_path, reason, snapshot_path, before, before, run)
+                return {
+                    "status": "blocked",
+                    "message": block_reason,
+                    "stage_count_before": before["stage_count"],
+                    "stage_count_after": before["stage_count"],
+                    "pending_stage_count_after": before["pending_stage_count"],
+                    "report": str(report_path.relative_to(self.project_root)),
+                }
+        elif command.executor != "codex":
+            run = CommandRun(
+                "self-iteration",
+                command.name,
+                command.command or command.prompt or command.executor,
+                "blocked",
+                None,
+                utc_now(),
+                utc_now(),
+                "",
+                f"unknown executor: {command.executor}",
+            )
+            self._write_self_iteration_report(report_path, reason, snapshot_path, before, before, run)
+            return {
+                "status": "blocked",
+                "message": f"unknown executor: {command.executor}",
+                "stage_count_before": before["stage_count"],
+                "stage_count_after": before["stage_count"],
+                "pending_stage_count_after": before["pending_stage_count"],
+                "report": str(report_path.relative_to(self.project_root)),
+            }
+
+        planner_prompt = self._self_iteration_prompt(config, snapshot_path)
+        planner_task = self._self_iteration_task(command, snapshot_path, planner_prompt)
+        command = replace(command, prompt=planner_prompt)
+        run = self._run_command(command, phase="self-iteration", task=planner_task)
+
+        self.roadmap = load_mapping(self.roadmap_path)
+        after = self.continuation_summary()
+        if run.returncode != 0:
+            status = "failed"
+            message = f"self-iteration planner failed: {command.name}"
+        elif after["stage_count"] > before["stage_count"] or after["pending_stage_count"] > before["pending_stage_count"]:
+            status = "planned"
+            message = "self-iteration planner added continuation stage(s)"
+        else:
+            status = "stalled"
+            message = "self-iteration planner did not add continuation stages"
+
+        self._write_self_iteration_report(report_path, reason, snapshot_path, before, after, run)
+        append_jsonl(
+            self.decision_log_path,
+            {
+                "at": utc_now(),
+                "event": "self_iteration",
+                "reason": reason,
+                "status": status,
+                "message": message,
+                "stage_count_before": before["stage_count"],
+                "stage_count_after": after["stage_count"],
+                "pending_stage_count_after": after["pending_stage_count"],
+                "report": str(report_path.relative_to(self.project_root)),
+            },
+        )
+        return {
+            "status": status,
+            "message": message,
+            "stage_count_before": before["stage_count"],
+            "stage_count_after": after["stage_count"],
+            "pending_stage_count_after": after["pending_stage_count"],
+            "report": str(report_path.relative_to(self.project_root)),
+            "run": {
+                "name": run.name,
+                "command": run.command,
+                "status": run.status,
+                "returncode": run.returncode,
+            },
+        }
+
+    def _self_iteration_task(self, command: AcceptanceCommand, snapshot_path: Path, prompt: str) -> HarnessTask:
+        return HarnessTask(
+            id="self-iteration-planner",
+            title="Self-assess current state and generate the next roadmap stage",
+            milestone_id="self-iteration",
+            milestone_title="Autonomous Self Iteration",
+            status="pending",
+            max_attempts=1,
+            file_scope=tuple(str(scope) for scope in (self.roadmap.get("self_iteration") or {}).get("file_scope", [".engineering/**", "docs/**"])),
+            manual_approval_required=False,
+            agent_approval_required=command.executor == "codex",
+            max_task_iterations=1,
+            implementation=(),
+            repair=(),
+            acceptance=(
+                AcceptanceCommand(
+                    name="roadmap has new continuation stage",
+                    command=f"python3 -c \"import json; from pathlib import Path; x=json.loads(Path('{self.roadmap_path}').read_text()); assert x.get('continuation', {{}}).get('stages')\"",
+                    timeout_seconds=60,
+                ),
+            ),
+        )
+
+    def _self_iteration_prompt(self, config: dict[str, Any], snapshot_path: Path) -> str:
+        custom = str((config.get("planner") or {}).get("prompt", "")).strip()
+        objective = str(config.get("objective", "Assess current project status and plan the next engineering stage."))
+        max_stages = int(config.get("max_stages_per_iteration", 1))
+        base = f"""
+You are the self-iteration planner for an autonomous engineering harness.
+
+Project root: {self.project_root}
+Roadmap file: {self.roadmap_path}
+Status snapshot: {snapshot_path}
+Objective: {objective}
+
+Read the repository, the roadmap file, and the status snapshot. Assess what has just been completed,
+identify the next highest-value engineering stage, and append exactly {max_stages} new unmaterialized
+stage(s) to `continuation.stages` in the roadmap file.
+
+Rules:
+- Do not edit `.engineering/state` or `.engineering/reports`.
+- Do not mark tasks done and do not add generated stages to `milestones`.
+- New stages must be concrete, measurable, and automatable.
+- Each task must include acceptance commands.
+- If code must be written, use an `implementation` entry with `"executor": "codex"` and a focused prompt.
+- Include a `repair` entry for non-trivial implementation tasks.
+- Do not require live private keys, Sepolia writes, mainnet writes, paid services, or external accounts.
+- Prefer the next step that moves the project toward the stated blueprint and vision.
+- Keep scope tight enough that a coding agent can complete the stage in one iteration.
+"""
+        return base if not custom else f"{base}\n\nProject-specific planning guidance:\n{custom}\n"
+
+    def _write_self_iteration_report(
+        self,
+        report_path: Path,
+        reason: str,
+        snapshot_path: Path,
+        before: dict[str, Any],
+        after: dict[str, Any],
+        run: CommandRun,
+    ) -> None:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        lines = [
+            "# Self Iteration Report",
+            "",
+            f"- Reason: `{reason}`",
+            f"- Snapshot: `{snapshot_path.relative_to(self.project_root)}`",
+            f"- Before stages: `{before.get('stage_count')}` pending `{before.get('pending_stage_count')}`",
+            f"- After stages: `{after.get('stage_count')}` pending `{after.get('pending_stage_count')}`",
+            "",
+            "## Planner Run",
+            "",
+            f"- Name: {run.name}",
+            f"- Status: `{run.status}`",
+            f"- Return code: `{run.returncode}`",
+            "",
+            "```bash",
+            run.command,
+            "```",
+            "",
+        ]
+        if run.stdout:
+            lines.extend(["Stdout:", "", "```text", run.stdout, "```", ""])
+        if run.stderr:
+            lines.extend(["Stderr:", "", "```text", run.stderr, "```", ""])
+        report_path.write_text("\n".join(lines), encoding="utf-8")
 
     def _continuation_stage_payload(self, stage: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -474,6 +731,7 @@ class Harness:
             "milestones": list(milestones.values()),
             "next_task": self.task_payload(self.next_task()),
             "continuation": self.continuation_summary(),
+            "self_iteration": self.self_iteration_summary(),
         }
 
     def task_payload(self, task: HarnessTask | None) -> dict[str, Any] | None:

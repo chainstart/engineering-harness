@@ -76,7 +76,8 @@ The first version focuses on:
 - durable state and reports;
 - workspace project discovery.
 
-Coding-agent execution can be added later as an executor plugin.
+Coding-agent execution is available through an explicit gated executor and must be enabled with
+`--allow-agent`.
 
 ## Rolling Continuation
 
@@ -129,6 +130,48 @@ Important controls:
 - `--max-continuations`: maximum generated roadmap stages.
 - `--continuation-batch-size`: number of stages to materialize at a time.
 - `--no-progress-limit`: stop after repeated continuation attempts that add no tasks.
+
+## Self Iteration
+
+When the explicit continuation queue is exhausted, the harness can run a configured self-iteration
+planner. The planner reads the current roadmap, reports, git status, and project docs, then appends
+the next measurable `continuation.stages` entry. `drive --self-iterate --rolling` then materializes
+that new stage and keeps executing.
+
+```json
+{
+  "self_iteration": {
+    "enabled": true,
+    "objective": "Assess current state and append the next safe, testable project stage.",
+    "max_stages_per_iteration": 1,
+    "file_scope": [".engineering/roadmap.yaml", "docs/**", "runtime/**", "tests/**"],
+    "planner": {
+      "name": "Codex self-iteration planner",
+      "executor": "codex",
+      "timeout_seconds": 3600,
+      "sandbox": "workspace-write",
+      "prompt": "Use the project blueprint and latest harness reports to append exactly one new continuation stage."
+    }
+  }
+}
+```
+
+Commands:
+
+```bash
+engh self-iterate --project-root /home/biostar/work/utopiai --allow-agent
+engh drive --project-root /home/biostar/work/utopiai \
+  --rolling \
+  --self-iterate \
+  --allow-agent \
+  --time-budget-seconds 14400 \
+  --commit-after-task
+```
+
+Self-iteration stops when the planner is disabled, blocked, fails, repeatedly makes no progress,
+or the configured task/time/self-iteration budgets are exhausted. The planner is not allowed to mark
+tasks complete, edit state or report artifacts, or require private keys, paid live services, or
+mainnet writes.
 
 ## Git Checkpoints
 

@@ -227,6 +227,20 @@ def write_drive_report(harness: Harness, payload: dict) -> str:
         )
         for milestone in item.get("milestones_added", []):
             lines.append(f"  - Milestone: `{milestone.get('id')}` {milestone.get('title')} ({milestone.get('tasks')} task(s))")
+    self_iterations = payload.get("self_iterations", [])
+    lines.extend(["", "## Self Iterations", ""])
+    if not self_iterations:
+        lines.append("No self-iteration planner was requested.")
+    for item in self_iterations:
+        lines.extend(
+            [
+                f"- `{item['status']}` - {item['message']}",
+                f"  - Stages: `{item.get('stage_count_before')}` -> `{item.get('stage_count_after')}`",
+                f"  - Pending stages after: `{item.get('pending_stage_count_after')}`",
+            ]
+        )
+        if item.get("report"):
+            lines.append(f"  - Report: `{item['report']}`")
     lines.extend(["", "## Final Status", "", "```json", json.dumps(payload["final_status"], indent=2, sort_keys=True), "```", ""])
     report_path.write_text("\n".join(lines), encoding="utf-8")
     return str(report_path.relative_to(harness.project_root))
@@ -246,6 +260,25 @@ def cmd_advance(args: argparse.Namespace) -> int:
     return 0 if result["status"] in {"advanced", "exhausted", "disabled"} else 1
 
 
+def cmd_self_iterate(args: argparse.Namespace) -> int:
+    root = resolve_project_root(args)
+    harness = Harness(root)
+    result = harness.run_self_iteration(
+        reason=args.reason,
+        allow_agent=args.allow_agent,
+        allow_live=args.allow_live,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(f"Self-iteration status: {result['status']} - {result['message']}")
+        print(f"Stages: {result.get('stage_count_before')} -> {result.get('stage_count_after')}")
+        print(f"Pending stages after: {result.get('pending_stage_count_after')}")
+        if result.get("report"):
+            print(f"Report: {result['report']}")
+    return 0 if result["status"] in {"planned", "disabled"} else 1
+
+
 def cmd_drive(args: argparse.Namespace) -> int:
     root = resolve_project_root(args)
     harness = Harness(root)
@@ -253,7 +286,9 @@ def cmd_drive(args: argparse.Namespace) -> int:
     deadline = time.monotonic() + args.time_budget_seconds if args.time_budget_seconds else None
     results = []
     continuations = []
+    self_iterations = []
     continuation_count = 0
+    self_iteration_count = 0
     no_progress_count = 0
     status = "completed"
     message = "No pending task."
@@ -269,24 +304,56 @@ def cmd_drive(args: argparse.Namespace) -> int:
             break
         task = harness.next_task()
         if task is None:
-            if not args.rolling:
+            if not args.rolling and not args.self_iterate:
                 status = "completed"
                 message = "Roadmap queue is empty."
                 break
-            if continuation_count >= args.max_continuations:
-                status = "budget_exhausted"
-                message = f"Continuation budget exhausted after {args.max_continuations} continuation(s)."
+            continuation = None
+            if args.rolling:
+                if continuation_count >= args.max_continuations:
+                    if not args.self_iterate:
+                        status = "budget_exhausted"
+                        message = f"Continuation budget exhausted after {args.max_continuations} continuation(s)."
+                        break
+                else:
+                    continuation = harness.advance_roadmap(
+                        max_new_milestones=args.continuation_batch_size,
+                        reason="rolling_drive_queue_empty",
+                    )
+                    continuations.append(continuation)
+                    if continuation["status"] == "advanced" and continuation.get("tasks_added", 0) > 0:
+                        continuation_count += 1
+                        no_progress_count = 0
+                        harness = Harness(root)
+                        continue
+            if args.self_iterate:
+                if self_iteration_count >= args.max_self_iterations:
+                    status = "budget_exhausted"
+                    message = f"Self-iteration budget exhausted after {args.max_self_iterations} iteration(s)."
+                    break
+                iteration = harness.run_self_iteration(
+                    reason="drive_queue_empty",
+                    allow_agent=args.allow_agent,
+                    allow_live=args.allow_live,
+                )
+                self_iterations.append(iteration)
+                if iteration["status"] == "planned" and int(iteration.get("pending_stage_count_after", 0)) > 0:
+                    self_iteration_count += 1
+                    no_progress_count = 0
+                    harness = Harness(root)
+                    continue
+                no_progress_count += 1
+                if no_progress_count >= args.no_progress_limit:
+                    status = "stalled"
+                    message = f"No-progress limit reached after {no_progress_count} self-iteration attempt(s): {iteration['message']}"
+                    break
+                status = "stalled" if iteration["status"] not in {"disabled"} else "completed"
+                message = iteration["message"]
                 break
-            continuation = harness.advance_roadmap(
-                max_new_milestones=args.continuation_batch_size,
-                reason="rolling_drive_queue_empty",
-            )
-            continuations.append(continuation)
-            if continuation["status"] == "advanced" and continuation.get("tasks_added", 0) > 0:
-                continuation_count += 1
-                no_progress_count = 0
-                harness = Harness(root)
-                continue
+            if continuation is None:
+                status = "completed"
+                message = "Roadmap queue is empty."
+                break
             no_progress_count += 1
             if continuation["status"] in {"disabled", "exhausted"}:
                 status = "completed"
@@ -326,6 +393,7 @@ def cmd_drive(args: argparse.Namespace) -> int:
         "finished_at": utc_now(),
         "results": results,
         "continuations": continuations,
+        "self_iterations": self_iterations,
         "final_status": final_status,
     }
     payload["drive_report"] = write_drive_report(harness, payload)
@@ -336,6 +404,7 @@ def cmd_drive(args: argparse.Namespace) -> int:
         print(f"Drive status: {status} - {message}")
         print(f"Tasks run: {len(results)}")
         print(f"Continuations: {len(continuations)}")
+        print(f"Self-iterations: {len(self_iterations)}")
         print(f"Drive report: {payload['drive_report']}")
         next_task = final_status.get("next_task")
         print(f"Next task: {next_task['id'] if next_task else 'none'}")
@@ -370,6 +439,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("next", "Show the next selected task", cmd_next),
         ("run", "Run the next or selected task acceptance checks", cmd_run),
         ("advance", "Materialize the next continuation milestone into the roadmap", cmd_advance),
+        ("self-iterate", "Assess current state and append the next continuation stage", cmd_self_iterate),
         ("drive", "Continuously run pending roadmap tasks until complete, blocked, failed, or out of budget", cmd_drive),
     ]:
         command = subparsers.add_parser(name, help=help_text)
@@ -393,11 +463,17 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "advance":
             command.add_argument("--max-new-milestones", type=int, default=1)
             command.add_argument("--reason", default="manual_advance")
+        if name == "self-iterate":
+            command.add_argument("--reason", default="manual_self_iteration")
+            command.add_argument("--allow-live", action="store_true")
+            command.add_argument("--allow-agent", action="store_true")
         if name == "drive":
             command.add_argument("--max-tasks", type=int, default=100)
             command.add_argument("--time-budget-seconds", type=int, default=0)
             command.add_argument("--rolling", action="store_true")
+            command.add_argument("--self-iterate", action="store_true")
             command.add_argument("--max-continuations", type=int, default=20)
+            command.add_argument("--max-self-iterations", type=int, default=20)
             command.add_argument("--continuation-batch-size", type=int, default=1)
             command.add_argument("--no-progress-limit", type=int, default=2)
             command.add_argument("--allow-live", action="store_true")

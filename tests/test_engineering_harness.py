@@ -282,3 +282,136 @@ def test_drive_rolling_stops_when_continuation_is_exhausted(tmp_path):
     report = next((project / ".engineering/reports/tasks/drives").glob("*-drive.md"))
     text = report.read_text(encoding="utf-8")
     assert "no unmaterialized continuation stage remains" in text
+
+
+def test_self_iteration_shell_planner_adds_continuation_stage(tmp_path):
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"] = []
+    roadmap["continuation"] = {"enabled": True, "goal": "Continue autonomously.", "stages": []}
+    roadmap["self_iteration"] = {
+        "enabled": True,
+        "objective": "Add the next generated test stage.",
+        "planner": {"name": "test planner", "command": "python3 planner.py"},
+    }
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    (project / "planner.py").write_text(
+        """
+import json
+from pathlib import Path
+
+roadmap_path = Path(".engineering/roadmap.yaml")
+roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+continuation = roadmap.setdefault("continuation", {"enabled": True, "stages": []})
+continuation["enabled"] = True
+continuation.setdefault("stages", []).append(
+    {
+        "id": "self-stage",
+        "title": "Self Stage",
+        "objective": "Create a marker through a generated task.",
+        "tasks": [
+            {
+                "id": "self-generated-test",
+                "title": "Self Generated Test",
+                "file_scope": ["tests/**"],
+                "acceptance": [
+                    {
+                        "name": "write self marker",
+                        "command": "python3 -c \\"from pathlib import Path; Path('self-generated.txt').write_text('ok')\\"",
+                    }
+                ],
+            }
+        ],
+    }
+)
+roadmap_path.write_text(json.dumps(roadmap, indent=2), encoding="utf-8")
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    harness = Harness(project)
+    result = harness.run_self_iteration(reason="test")
+
+    assert result["status"] == "planned"
+    updated = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    assert updated["continuation"]["stages"][0]["id"] == "self-stage"
+    assert list((project / ".engineering/reports/tasks/assessments").glob("*-self-iteration.md"))
+
+
+def test_drive_self_iterates_then_runs_generated_stage(tmp_path):
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"] = []
+    roadmap["continuation"] = {"enabled": True, "goal": "Continue autonomously.", "stages": []}
+    roadmap["self_iteration"] = {
+        "enabled": True,
+        "objective": "Add the next generated test stage.",
+        "planner": {"name": "test planner", "command": "python3 planner.py"},
+    }
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    (project / "planner.py").write_text(
+        """
+import json
+from pathlib import Path
+
+roadmap_path = Path(".engineering/roadmap.yaml")
+roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+continuation = roadmap.setdefault("continuation", {"enabled": True, "stages": []})
+continuation["enabled"] = True
+continuation.setdefault("stages", []).append(
+    {
+        "id": "drive-self-stage",
+        "title": "Drive Self Stage",
+        "objective": "Create a marker through a generated drive task.",
+        "tasks": [
+            {
+                "id": "drive-self-generated-test",
+                "title": "Drive Self Generated Test",
+                "file_scope": ["tests/**"],
+                "acceptance": [
+                    {
+                        "name": "write drive self marker",
+                        "command": "python3 -c \\"from pathlib import Path; Path('drive-self-generated.txt').write_text('ok')\\"",
+                    }
+                ],
+            }
+        ],
+    }
+)
+roadmap_path.write_text(json.dumps(roadmap, indent=2), encoding="utf-8")
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    exit_code = cli_main(
+        [
+            "drive",
+            "--project-root",
+            str(project),
+            "--rolling",
+            "--self-iterate",
+            "--max-self-iterations",
+            "1",
+            "--max-continuations",
+            "2",
+            "--max-tasks",
+            "1",
+        ]
+    )
+
+    assert exit_code == 0
+    assert (project / "drive-self-generated.txt").read_text(encoding="utf-8") == "ok"
+    state = json.loads((project / ".engineering/state/harness-state.json").read_text(encoding="utf-8"))
+    assert state["tasks"]["drive-self-generated-test"]["status"] == "passed"
+    report = next((project / ".engineering/reports/tasks/drives").glob("*-drive.md"))
+    text = report.read_text(encoding="utf-8")
+    assert "Self Iterations" in text
+    assert "drive-self-stage" in roadmap_path.read_text(encoding="utf-8")
