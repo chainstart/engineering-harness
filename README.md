@@ -27,17 +27,17 @@ The shared harness provides a common CLI:
 ```bash
 PYTHONPATH=src python3 -m engineering_harness.cli profiles
 PYTHONPATH=src python3 -m engineering_harness.cli scan --workspace /home/biostar/work
-PYTHONPATH=src python3 -m engineering_harness.cli status --project-root /home/biostar/work/utopiai
-PYTHONPATH=src python3 -m engineering_harness.cli next --project-root /home/biostar/work/utopiai
-PYTHONPATH=src python3 -m engineering_harness.cli run --project-root /home/biostar/work/utopiai --dry-run
-PYTHONPATH=src python3 -m engineering_harness.cli drive --project-root /home/biostar/work/utopiai
-PYTHONPATH=src python3 -m engineering_harness.cli drive --project-root /home/biostar/work/utopiai --rolling
+PYTHONPATH=src python3 -m engineering_harness.cli status --project-root /home/biostar/work/projects/utopiai
+PYTHONPATH=src python3 -m engineering_harness.cli next --project-root /home/biostar/work/projects/utopiai
+PYTHONPATH=src python3 -m engineering_harness.cli run --project-root /home/biostar/work/projects/utopiai --dry-run
+PYTHONPATH=src python3 -m engineering_harness.cli drive --project-root /home/biostar/work/projects/utopiai
+PYTHONPATH=src python3 -m engineering_harness.cli drive --project-root /home/biostar/work/projects/utopiai --rolling
 ```
 
 After installing in editable mode, the same commands are available as `engh`.
 
 ```bash
-python3 -m pip install -e /home/biostar/work/engineering-harness
+python3 -m pip install -e /home/biostar/work/projects/engineering-harness
 engh scan --workspace /home/biostar/work
 ```
 
@@ -57,7 +57,7 @@ Initialize a project:
 
 ```bash
 PYTHONPATH=src python3 -m engineering_harness.cli init \
-  --project-root /home/biostar/work/ara-math \
+  --project-root /home/biostar/work/projects/ara-math \
   --profile python-agent \
   --name ara-math
 ```
@@ -114,8 +114,8 @@ top-level `continuation` block to the project roadmap and run with `--rolling`.
 Commands:
 
 ```bash
-engh advance --project-root /home/biostar/work/utopiai
-engh drive --project-root /home/biostar/work/utopiai --rolling --time-budget-seconds 14400
+engh advance --project-root /home/biostar/work/projects/utopiai
+engh drive --project-root /home/biostar/work/projects/utopiai --rolling --time-budget-seconds 14400
 ```
 
 When the queue is empty, rolling drive materializes the next unstarted continuation stage, executes
@@ -159,8 +159,8 @@ that new stage and keeps executing.
 Commands:
 
 ```bash
-engh self-iterate --project-root /home/biostar/work/utopiai --allow-agent
-engh drive --project-root /home/biostar/work/utopiai \
+engh self-iterate --project-root /home/biostar/work/projects/utopiai --allow-agent
+engh drive --project-root /home/biostar/work/projects/utopiai \
   --rolling \
   --self-iterate \
   --allow-agent \
@@ -179,8 +179,8 @@ For long-running work, `run` and `drive` can create a git checkpoint after each 
 successfully:
 
 ```bash
-engh drive --project-root /home/biostar/work/utopiai --commit-after-task
-engh drive --project-root /home/biostar/work/utopiai --commit-after-task --push-after-task
+engh drive --project-root /home/biostar/work/projects/utopiai --commit-after-task
+engh drive --project-root /home/biostar/work/projects/utopiai --commit-after-task --push-after-task
 ```
 
 The default commit message is `chore(engineering): complete {task_id}`. Override it with
@@ -231,7 +231,7 @@ Agent executors are gated. Use `--allow-agent` when you intentionally want the h
 non-interactive coding agent:
 
 ```bash
-engh drive --project-root /home/biostar/work/utopiai --rolling --allow-agent --commit-after-task --push-after-task
+engh drive --project-root /home/biostar/work/projects/utopiai --rolling --allow-agent --commit-after-task --push-after-task
 ```
 
 The built-in `codex` executor calls `codex exec --full-auto --sandbox workspace-write -C <project>`.
