@@ -413,6 +413,42 @@ def test_advance_materializes_next_continuation_stage(tmp_path):
     assert updated["milestones"][0]["tasks"][0]["id"] == "generated-test"
 
 
+def test_validate_allows_materialized_continuation_stage_task_ids(tmp_path):
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"] = []
+    roadmap["continuation"] = {
+        "enabled": True,
+        "goal": "Materialize and continue validating.",
+        "stages": [
+            {
+                "id": "stage-a",
+                "title": "Stage A",
+                "objective": "Create a generated validation task.",
+                "tasks": [
+                    {
+                        "id": "generated-test",
+                        "title": "Generated Test",
+                        "file_scope": ["tests/**"],
+                        "acceptance": [{"name": "ok", "command": "python3 -c \"print('ok')\""}],
+                    }
+                ],
+            }
+        ],
+    }
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    advance = harness.advance_roadmap()
+    validation = Harness(project).validate_roadmap()
+
+    assert advance["status"] == "advanced"
+    assert validation["status"] == "passed"
+
+
 def test_drive_rolling_advances_and_runs_generated_tasks(tmp_path):
     project = tmp_path / "agent-project"
     project.mkdir()

@@ -757,6 +757,7 @@ Rules:
             milestones = []
 
         seen_task_ids: set[str] = set()
+        materialized_stage_ids: set[str] = set()
         for milestone_index, milestone in enumerate(milestones):
             if not isinstance(milestone, dict):
                 errors.append(f"milestones[{milestone_index}] must be a mapping")
@@ -765,6 +766,7 @@ Rules:
             if not milestone_id:
                 errors.append(f"milestones[{milestone_index}].id is required")
                 milestone_id = f"milestone-{milestone_index}"
+            materialized_stage_ids.add(milestone_id)
             tasks = milestone.get("tasks", [])
             if not isinstance(tasks, list):
                 errors.append(f"milestone `{milestone_id}` tasks must be a list")
@@ -805,11 +807,12 @@ Rules:
                         if not isinstance(tasks, list) or not tasks:
                             errors.append(f"continuation stage `{stage_id}` must define at least one task")
                             continue
+                        task_ids_for_stage = set() if stage_id in materialized_stage_ids else seen_task_ids
                         for task_index, task in enumerate(tasks):
                             self._validate_task_payload(
                                 task,
                                 location=f"continuation stage `{stage_id}` task[{task_index}]",
-                                seen_task_ids=seen_task_ids,
+                                seen_task_ids=task_ids_for_stage,
                                 errors=errors,
                                 warnings=warnings,
                             )
