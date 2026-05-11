@@ -48,9 +48,49 @@ def validate_roadmap_payload(tmp_path: Path, roadmap: dict) -> dict:
     return Harness(project).validate_roadmap()
 
 
+def status_summary_for_roadmap(tmp_path: Path, project_name: str, roadmap: dict) -> dict:
+    project = tmp_path / project_name
+    project.mkdir()
+    engineering_dir = project / ".engineering"
+    engineering_dir.mkdir()
+    roadmap_path = engineering_dir / "roadmap.yaml"
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    return Harness(project).status_summary()
+
+
 def roadmap_fixture_payload(fixture_name: str) -> dict:
     fixture_path = ROADMAP_FIXTURES / fixture_name
     return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
+def roadmap_without_experience(project_name: str, *, profile: str = "python-agent", task_title: str) -> dict:
+    return {
+        "version": 1,
+        "project": project_name,
+        "profile": profile,
+        "milestones": [
+            {
+                "id": "baseline",
+                "title": "Baseline",
+                "objective": task_title,
+                "tasks": [
+                    {
+                        "id": "baseline-task",
+                        "title": task_title,
+                        "status": "pending",
+                        "acceptance": [
+                            {
+                                "name": "baseline validates",
+                                "command": "python3 -c \"print('ok')\"",
+                                "timeout_seconds": 30,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
 
 
 def test_profiles_are_available():
@@ -767,10 +807,82 @@ def test_validate_roadmap_allows_missing_experience_for_backward_compatibility(t
     project.mkdir()
     init_project(project, "python-agent", name="agent-project")
 
-    result = Harness(project).validate_roadmap()
+    harness = Harness(project)
+    result = harness.validate_roadmap()
 
     assert result["status"] == "passed"
     assert result["errors"] == []
+    assert harness.status_summary()["experience"]["source"] == "derived"
+
+
+@pytest.mark.parametrize(
+    ("project_name", "roadmap_updates", "task_title", "expected_kind", "expected_persona", "auth_required"),
+    [
+        (
+            "autonomous-worker",
+            {},
+            "Run the autonomous research worker and inspect latest artifacts.",
+            "dashboard",
+            "operator",
+            False,
+        ),
+        (
+            "student-review",
+            {},
+            "Build the student submission review workflow with reviewer comments and revision decisions.",
+            "submission-review",
+            "student",
+            True,
+        ),
+        (
+            "role-operations",
+            {},
+            "Define a multi-role admin operator approver flow with login, permissions, and audit log.",
+            "multi-role-app",
+            "admin",
+            True,
+        ),
+        (
+            "api-service",
+            {"project_kind": "api"},
+            "Validate REST API OpenAPI endpoints with a documented client example.",
+            "api-only",
+            "api client",
+            False,
+        ),
+        (
+            "cli-tool",
+            {"project_kind": "cli"},
+            "Validate the CLI command-line journey and documented command output.",
+            "cli-only",
+            "developer",
+            False,
+        ),
+    ],
+)
+def test_default_frontend_experience_planner_derives_common_cases(
+    tmp_path,
+    project_name,
+    roadmap_updates,
+    task_title,
+    expected_kind,
+    expected_persona,
+    auth_required,
+):
+    roadmap = roadmap_without_experience(project_name, task_title=task_title)
+    roadmap.update(roadmap_updates)
+
+    summary = status_summary_for_roadmap(tmp_path, project_name, roadmap)
+    experience = summary["experience"]
+
+    assert experience["source"] == "derived"
+    assert experience["derived"] is True
+    assert experience["kind"] == expected_kind
+    assert experience["recommendation"] == expected_kind
+    assert expected_persona in experience["personas"]
+    assert experience["auth"]["required"] is auth_required
+    assert experience["primary_surfaces"]
+    assert experience["e2e_journeys"]
 
 
 @pytest.mark.parametrize(

@@ -3,7 +3,9 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import os
+import re
 import subprocess
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -26,6 +28,156 @@ BLOCKED_STATUSES = {"blocked", "paused"}
 CONFIG_CANDIDATES = (".engineering/roadmap.yaml", ".engineering/roadmap.json", "ops/engineering/roadmap.yaml")
 PRUNE_DIRS = {".git", "node_modules", ".venv", "venv", ".pytest_cache", "dist", "out", "cache", "artifacts"}
 EXPERIENCE_KINDS = {"dashboard", "submission-review", "multi-role-app", "api-only", "cli-only"}
+DEFAULT_EXPERIENCE_PLANS: dict[str, dict[str, Any]] = {
+    "dashboard": {
+        "kind": "dashboard",
+        "personas": ["operator"],
+        "primary_surfaces": ["operator dashboard", "run queue", "artifact viewer"],
+        "auth": {"required": False, "roles": []},
+        "e2e_journeys": [
+            {
+                "id": "operator-observes-run",
+                "persona": "operator",
+                "goal": "Inspect queued work, follow run status, and review latest artifacts or errors.",
+            }
+        ],
+    },
+    "submission-review": {
+        "kind": "submission-review",
+        "personas": ["student", "reviewer"],
+        "primary_surfaces": ["submission portal", "review console", "revision upload", "status timeline"],
+        "auth": {"required": True, "roles": ["student", "reviewer"]},
+        "e2e_journeys": [
+            {
+                "id": "student-submit-review-revise",
+                "persona": "student",
+                "goal": "Submit work, receive reviewer comments, upload a revision, and view the decision.",
+            }
+        ],
+    },
+    "multi-role-app": {
+        "kind": "multi-role-app",
+        "personas": ["admin", "operator", "approver"],
+        "primary_surfaces": ["login", "admin console", "operator queue", "approval screen", "audit log"],
+        "auth": {"required": True, "roles": ["admin", "operator", "approver"]},
+        "e2e_journeys": [
+            {
+                "id": "operator-requests-approval",
+                "persona": "operator",
+                "goal": "Create a work item, request approval, and verify role boundaries and audit history.",
+            }
+        ],
+    },
+    "api-only": {
+        "kind": "api-only",
+        "personas": ["api client"],
+        "primary_surfaces": ["API docs", "OpenAPI schema", "example client journey", "service status"],
+        "auth": {"required": False, "roles": []},
+        "e2e_journeys": [
+            {
+                "id": "client-runs-api-example",
+                "persona": "api client",
+                "goal": "Run the documented API example and verify the expected response.",
+            }
+        ],
+    },
+    "cli-only": {
+        "kind": "cli-only",
+        "personas": ["developer"],
+        "primary_surfaces": ["command line", "documented examples", "generated reports"],
+        "auth": {"required": False, "roles": []},
+        "e2e_journeys": [
+            {
+                "id": "developer-runs-cli",
+                "persona": "developer",
+                "goal": "Run the documented command and inspect the generated output or report.",
+            }
+        ],
+    },
+}
+EXPERIENCE_KIND_ALIASES: dict[str, tuple[str, ...]] = {
+    "submission-review": (
+        "submission-review",
+        "submission review",
+        "student review",
+        "paper review",
+        "review workflow",
+    ),
+    "multi-role-app": ("multi-role-app", "multi-role", "multi role", "role-specific", "role based"),
+    "api-only": ("api-only", "api only", "api-first", "api first", "rest api", "openapi", "api"),
+    "cli-only": ("cli-only", "cli only", "command line", "command-line", "cli"),
+    "dashboard": ("dashboard", "operator console", "run queue"),
+}
+EXPERIENCE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "submission-review": (
+        "submission",
+        "submit",
+        "student",
+        "reviewer",
+        "review",
+        "revision",
+        "paper",
+        "assignment",
+        "comments",
+        "decision",
+        "grade",
+    ),
+    "multi-role-app": (
+        "role",
+        "roles",
+        "rbac",
+        "permission",
+        "permissions",
+        "admin",
+        "operator",
+        "approver",
+        "approval",
+        "audit",
+        "login",
+        "auth",
+        "authenticated",
+    ),
+    "api-only": (
+        "api",
+        "rest",
+        "openapi",
+        "swagger",
+        "endpoint",
+        "endpoints",
+        "graphql",
+        "client",
+        "http",
+        "curl",
+        "sdk",
+    ),
+    "cli-only": (
+        "cli",
+        "command-line",
+        "command line",
+        "terminal",
+        "argparse",
+        "typer",
+        "click",
+        "subcommand",
+        "documented command",
+    ),
+    "dashboard": (
+        "dashboard",
+        "autonomous",
+        "agent",
+        "worker",
+        "research",
+        "run queue",
+        "status",
+        "artifact",
+        "artifacts",
+        "theorem",
+        "proof",
+        "backtest",
+        "monitor",
+        "observability",
+    ),
+}
 
 
 def utc_now() -> str:
@@ -768,10 +920,144 @@ Rules:
             "state": str(self.state_path),
             "milestones": list(milestones.values()),
             "next_task": self.task_payload(self.next_task()),
+            "experience": self.frontend_experience_plan(),
             "continuation": self.continuation_summary(),
             "self_iteration": self.self_iteration_summary(),
             "manifest_index": self.manifest_index_summary(),
         }
+
+    def frontend_experience_plan(self) -> dict[str, Any]:
+        experience = self.roadmap.get("experience")
+        if isinstance(experience, dict):
+            plan = deepcopy(experience)
+            plan["source"] = "explicit"
+            plan["derived"] = False
+            plan["recommendation"] = str(plan.get("kind", "")).strip() or None
+            plan["rationale"] = ["roadmap declares an explicit experience block"]
+            return plan
+        if experience is not None:
+            return {
+                "source": "explicit-invalid",
+                "derived": False,
+                "recommendation": None,
+                "kind": None,
+                "rationale": ["roadmap declares an experience block, but it is not a mapping"],
+            }
+
+        kind, rationale = self._derive_default_experience_kind()
+        plan = deepcopy(DEFAULT_EXPERIENCE_PLANS[kind])
+        plan["source"] = "derived"
+        plan["derived"] = True
+        plan["recommendation"] = kind
+        plan["rationale"] = rationale
+        return plan
+
+    def _derive_default_experience_kind(self) -> tuple[str, list[str]]:
+        profile = str(self.roadmap.get("profile", "") or "").strip().lower()
+        project_kind = self._roadmap_project_kind()
+        hint_text = self._roadmap_hint_text(profile=profile, project_kind=project_kind)
+
+        for kind in ("submission-review", "multi-role-app", "api-only", "cli-only", "dashboard"):
+            aliases = EXPERIENCE_KIND_ALIASES[kind]
+            alias_matches = self._keyword_matches(hint_text, aliases)
+            if alias_matches:
+                return kind, self._experience_rationale(
+                    profile=profile,
+                    project_kind=project_kind,
+                    matched=alias_matches,
+                    decision=f"matched {kind} roadmap hint",
+                )
+
+        matches = {
+            kind: self._keyword_matches(hint_text, keywords)
+            for kind, keywords in EXPERIENCE_KEYWORDS.items()
+        }
+        scores = {kind: len(kind_matches) for kind, kind_matches in matches.items()}
+        if profile in {"python-agent", "agent-monorepo"}:
+            scores["dashboard"] += 1
+        if profile in {"trading-research", "evm-security-research", "lean-formalization"}:
+            scores["dashboard"] += 2
+        if project_kind in {"python", "agent", "evm"}:
+            scores["dashboard"] += 1
+
+        thresholds = {
+            "submission-review": 2,
+            "multi-role-app": 2,
+            "api-only": 2,
+            "cli-only": 2,
+            "dashboard": 1,
+        }
+        priority = ["submission-review", "multi-role-app", "api-only", "cli-only", "dashboard"]
+        candidates = [kind for kind in priority if scores[kind] >= thresholds[kind]]
+        if candidates:
+            chosen = max(candidates, key=lambda kind: (scores[kind], -priority.index(kind)))
+            return chosen, self._experience_rationale(
+                profile=profile,
+                project_kind=project_kind,
+                matched=matches[chosen],
+                decision=f"matched {chosen} roadmap signals",
+            )
+
+        return "dashboard", self._experience_rationale(
+            profile=profile,
+            project_kind=project_kind,
+            matched=[],
+            decision="defaulted to the operator dashboard plan",
+        )
+
+    def _experience_rationale(
+        self,
+        *,
+        profile: str,
+        project_kind: str,
+        matched: list[str],
+        decision: str,
+    ) -> list[str]:
+        rationale = [decision]
+        if profile:
+            rationale.append(f"profile: {profile}")
+        if project_kind:
+            rationale.append(f"project kind: {project_kind}")
+        if matched:
+            rationale.append("matched hints: " + ", ".join(matched[:6]))
+        return rationale
+
+    def _roadmap_project_kind(self) -> str:
+        for key in ("project_kind", "kind", "category"):
+            value = self.roadmap.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip().lower()
+        _, project_kind = guess_profile(self.project_root)
+        return project_kind
+
+    def _roadmap_hint_text(self, *, profile: str, project_kind: str) -> str:
+        values: list[str] = [profile, project_kind]
+
+        def visit(value: Any) -> None:
+            if isinstance(value, dict):
+                for child in value.values():
+                    visit(child)
+                return
+            if isinstance(value, list):
+                for child in value:
+                    visit(child)
+                return
+            if isinstance(value, str):
+                text = value.strip()
+                if text:
+                    values.append(text)
+
+        visit(self.roadmap)
+        return " ".join(values).lower()
+
+    def _keyword_matches(self, text: str, keywords: tuple[str, ...]) -> list[str]:
+        matches: list[str] = []
+        for keyword in keywords:
+            expression = re.escape(keyword.lower()).replace(r"\ ", r"\s+")
+            pattern = rf"(?<![a-z0-9]){expression}(?![a-z0-9])"
+            if re.search(pattern, text):
+                matches.append(keyword)
+        return matches
 
     def manifest_index(self) -> dict[str, Any]:
         if self.manifest_index_path.exists():
