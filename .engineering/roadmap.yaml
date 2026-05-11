@@ -455,24 +455,64 @@
           {
             "id": "executor-contract",
             "title": "Define executor interface and normalized result contract",
+            "max_task_iterations": 2,
             "file_scope": [
               "src/engineering_harness/**",
               "tests/**",
               "docs/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 1800,
+                "prompt": "Define a small executor contract for the harness that can represent shell, codex, and future adapters without changing task semantics. Preserve current behavior, keep reports/manifests compatible, and add tests for normalized executor metadata and results. Keep changes scoped to src/engineering_harness, tests, and docs."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 1200,
+                "prompt": "Fix failing executor contract tests while preserving existing shell and codex task behavior."
+              }
             ],
             "acceptance": [
               {
                 "name": "executor contract tests",
                 "command": "python3 -m pytest tests/test_engineering_harness.py -q"
               }
+            ],
+            "e2e": [
+              {
+                "name": "roadmap validates after executor contract",
+                "command": "bin/engh validate --project-root ."
+              }
             ]
           },
           {
             "id": "shell-codex-executors",
             "title": "Refactor shell and codex into executor adapters",
+            "max_task_iterations": 2,
             "file_scope": [
               "src/engineering_harness/**",
               "tests/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 1800,
+                "prompt": "Refactor shell and codex command execution into executor adapter classes or functions behind the executor contract. Preserve CLI output, report content, manifests, allow-agent gating, dry-run behavior, timeouts, and tests. Add focused tests that shell and codex executors are selected through the adapter path."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 1200,
+                "prompt": "Fix failing executor adapter tests while keeping the public CLI and task behavior backward compatible."
+              }
             ],
             "acceptance": [
               {
@@ -484,15 +524,122 @@
           {
             "id": "dagger-executor-design",
             "title": "Document and stub a Dagger executor adapter",
+            "max_task_iterations": 2,
             "file_scope": [
               "src/engineering_harness/**",
               "tests/**",
               "docs/**"
             ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 1800,
+                "prompt": "Document and stub a Dagger executor adapter that is discoverable through the executor contract but safely blocked unless Dagger support is explicitly configured. Add tests for validation/selection behavior and docs explaining the local-first Dagger integration path."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 1200,
+                "prompt": "Fix failing Dagger executor stub tests and keep the adapter safe-by-default."
+              }
+            ],
             "acceptance": [
               {
                 "name": "dagger adapter smoke tests",
                 "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+              }
+            ],
+            "e2e": [
+              {
+                "name": "status remains available after executor work",
+                "command": "bin/engh status --project-root . --json"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "default-frontend-visualization",
+        "title": "Default Frontend Visualization Module",
+        "objective": "Ensure every substantial developed object gets a domain-appropriate default visual surface or explicit frontend exemption.",
+        "tasks": [
+          {
+            "id": "default-experience-planner",
+            "title": "Derive default frontend experience plans when roadmaps omit experience",
+            "max_task_iterations": 2,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 1800,
+                "prompt": "Implement a default frontend experience planner for roadmaps without an explicit experience block. Derive dashboard, submission-review, multi-role-app, api-only, or cli-only recommendations from profile, project kind, tasks, and roadmap hints. Expose the derived plan in status_summary without making legacy roadmaps invalid. Add tests for autonomous worker, student review, multi-role, api-only, and cli-only cases."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 1200,
+                "prompt": "Fix failing default frontend planner tests while keeping explicit experience blocks authoritative."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "default frontend planner tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+              }
+            ],
+            "e2e": [
+              {
+                "name": "status exposes frontend plan",
+                "command": "bin/engh status --project-root . --json"
+              }
+            ]
+          },
+          {
+            "id": "frontend-task-generator",
+            "title": "Generate frontend roadmap tasks from experience plans",
+            "max_task_iterations": 2,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**",
+              "templates/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 1800,
+                "prompt": "Add a safe roadmap helper that can propose or materialize frontend tasks from an explicit or derived experience plan. The generated tasks should include file_scope, acceptance, and e2e journey checks appropriate to dashboard, submission-review, multi-role, api-only, and cli-only projects. Add tests and docs; avoid forcing a specific frontend stack."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 1200,
+                "prompt": "Fix failing frontend task generator tests while keeping generated tasks conservative and project-specific."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "frontend task generator tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+              }
+            ],
+            "e2e": [
+              {
+                "name": "roadmap validates after frontend planning",
+                "command": "bin/engh validate --project-root ."
               }
             ]
           }

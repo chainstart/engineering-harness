@@ -68,6 +68,8 @@ Engineering Harness should evolve into these modules:
 6. Frontend experience module
    - Each project defines an experience spec describing target users, roles, UI surfaces, state
      views, workflows, authentication needs, and E2E journeys.
+   - If a substantial project does not define an experience spec, the harness should derive a
+     default visualization plan from its profile, task shape, and project kind.
    - The harness uses that spec to create frontend roadmap tasks, UI acceptance gates, and E2E tests.
 
 7. E2E and user simulation
@@ -112,6 +114,15 @@ Every substantial project can define an `experience` block in its roadmap:
   }
 }
 ```
+
+If a project has no explicit `experience` block, the harness should still provide a default
+visualization plan instead of leaving the frontend undefined. Defaults should be conservative:
+
+- autonomous or research workers get an operator dashboard;
+- submission and review systems get a submission/review workflow;
+- multi-role systems get authenticated role-specific views;
+- API-first projects get API docs, example journeys, and optional operational status pages;
+- CLI-only projects get documented command journeys and optional report viewers.
 
 Recommended frontend archetypes:
 
@@ -231,6 +242,7 @@ Goal: make every substantial generated project define the right frontend for its
 Tasks:
 
 - Add `experience` schema and validation.
+- Add default frontend visualization plans for projects without explicit experience specs.
 - Add profile defaults for dashboard-only, submission-review, multi-role app, API-only, and CLI-only.
 - Add commands to summarize the required frontend and E2E journeys.
 - Add roadmap generators that create frontend tasks from the experience spec.
