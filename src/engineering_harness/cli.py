@@ -85,7 +85,8 @@ def cmd_status(args: argparse.Namespace) -> int:
                     continue
                 next_task = summary.get("next_task")
                 next_id = next_task["id"] if next_task else "none"
-                print(f"{summary['project']}: next={next_id} root={summary['root']}")
+                manifest_count = summary.get("manifest_index", {}).get("manifest_count", 0)
+                print(f"{summary['project']}: next={next_id} manifests={manifest_count} root={summary['root']}")
         return 0
 
     root = resolve_project_root(args)
@@ -97,6 +98,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"Profile: {summary.get('profile') or 'unknown'}")
         print(f"Root: {summary['root']}")
         print(f"Roadmap: {summary['roadmap']}")
+        print(f"Run manifests: {summary.get('manifest_index', {}).get('manifest_count', 0)}")
         print("")
         for milestone in summary["milestones"]:
             print(

@@ -144,6 +144,83 @@ def test_harness_runs_task_and_writes_matching_manifest(tmp_path):
     assert state["tasks"]["tests"]["last_manifest"] == result["manifest"]
 
 
+def test_manifest_index_lists_multiple_task_run_manifests_deterministically(tmp_path):
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    first_task = roadmap["milestones"][0]["tasks"][0]
+    first_task["acceptance"][0]["command"] = "python3 -c \"print('first')\""
+    roadmap["milestones"][0]["tasks"].append(
+        {
+            "id": "zz-second",
+            "title": "Second indexed task",
+            "file_scope": ["tests/**"],
+            "acceptance": [{"name": "second", "command": "python3 -c \"print('second')\""}],
+        }
+    )
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    first_result = harness.run_task(harness.next_task())
+    harness = Harness(project)
+    second_result = harness.run_task(harness.next_task())
+
+    index_path = project / ".engineering/reports/tasks/manifest-index.json"
+    index = Harness(project).manifest_index()
+    reread_index = Harness(project).manifest_index()
+    on_disk_index = json.loads(index_path.read_text(encoding="utf-8"))
+
+    assert first_result["status"] == "passed"
+    assert second_result["status"] == "passed"
+    assert index_path.exists()
+    assert index == reread_index == on_disk_index
+    assert index["kind"] == "engineering-harness.task-run-manifest-index"
+    assert index["manifest_index_path"] == ".engineering/reports/tasks/manifest-index.json"
+    assert index["manifest_count"] == 2
+    assert index["status_counts"] == {"passed": 2}
+    assert [item["task_id"] for item in index["manifests"]] == ["tests", "zz-second"]
+    assert [item["manifest_path"] for item in index["manifests"]] == [
+        first_result["manifest"],
+        second_result["manifest"],
+    ]
+    assert index["latest_manifest"] == second_result["manifest"]
+    assert index["latest_by_task"] == {
+        "tests": first_result["manifest"],
+        "zz-second": second_result["manifest"],
+    }
+    assert Harness(project).status_summary()["manifest_index"]["manifest_count"] == 2
+
+
+def test_manifest_index_keeps_repeated_task_runs_with_same_slug(tmp_path, monkeypatch):
+    monkeypatch.setattr("engineering_harness.core.slug_now", lambda: "20240101T000000Z")
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0]["command"] = "python3 -c \"print('repeat')\""
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    task = harness.next_task()
+    first_result = harness.run_task(task)
+    second_result = Harness(project).run_task(task)
+    index = Harness(project).manifest_index()
+
+    assert first_result["status"] == "passed"
+    assert second_result["status"] == "passed"
+    assert first_result["manifest"] == ".engineering/reports/tasks/20240101T000000Z-tests.json"
+    assert second_result["manifest"] == ".engineering/reports/tasks/20240101T000000Z-tests_2.json"
+    assert [item["manifest_path"] for item in index["manifests"]] == [
+        first_result["manifest"],
+        second_result["manifest"],
+    ]
+    assert [item["attempt"] for item in index["manifests"]] == [1, 2]
+    assert index["latest_by_task"] == {"tests": second_result["manifest"]}
+
+
 def test_harness_blocks_non_allowlisted_command(tmp_path):
     project = tmp_path / "agent-project"
     project.mkdir()

@@ -209,6 +209,12 @@ class Harness:
             self.roadmap.get("decision_log_path", ".engineering/state/decision-log.jsonl")
         )
         self.report_dir = self.project_root / str(self.roadmap.get("report_dir", ".engineering/reports/tasks"))
+        manifest_index_path = self.roadmap.get("manifest_index_path")
+        self.manifest_index_path = (
+            self.project_root / str(manifest_index_path)
+            if manifest_index_path
+            else self.report_dir / "manifest-index.json"
+        )
         self.command_policy = self._load_command_policy()
 
     def _load_command_policy(self) -> dict[str, Any]:
@@ -739,7 +745,124 @@ Rules:
             "next_task": self.task_payload(self.next_task()),
             "continuation": self.continuation_summary(),
             "self_iteration": self.self_iteration_summary(),
+            "manifest_index": self.manifest_index_summary(),
         }
+
+    def manifest_index(self) -> dict[str, Any]:
+        if self.manifest_index_path.exists():
+            return load_mapping(self.manifest_index_path)
+        return self._build_manifest_index()
+
+    def manifest_index_summary(self) -> dict[str, Any]:
+        index = self.manifest_index()
+        return {
+            "path": index["manifest_index_path"],
+            "manifest_count": index["manifest_count"],
+            "latest_manifest": index["latest_manifest"],
+            "status_counts": index["status_counts"],
+        }
+
+    def rebuild_manifest_index(self) -> dict[str, Any]:
+        index = self._build_manifest_index()
+        write_json(self.manifest_index_path, index)
+        return index
+
+    def _build_manifest_index(self) -> dict[str, Any]:
+        manifests = []
+        for manifest_path in sorted(
+            self.report_dir.rglob("*.json"),
+            key=lambda path: self._project_relative_path(path),
+        ):
+            if manifest_path.resolve() == self.manifest_index_path.resolve():
+                continue
+            payload = load_mapping(manifest_path)
+            if payload.get("kind") != "engineering-harness.task-run-manifest":
+                continue
+            manifests.append(self._manifest_index_entry(manifest_path, payload))
+
+        manifests.sort(
+            key=lambda item: (
+                str(item.get("started_at") or ""),
+                str(item.get("finished_at") or ""),
+                str(item.get("task_id") or ""),
+                int(item.get("attempt") or 0),
+                str(item.get("manifest_path") or ""),
+            )
+        )
+        status_counts: dict[str, int] = {}
+        latest_by_task: dict[str, str] = {}
+        for item in manifests:
+            status = str(item.get("status") or "unknown")
+            status_counts[status] = status_counts.get(status, 0) + 1
+            latest_by_task[str(item["task_id"])] = str(item["manifest_path"])
+
+        latest_manifest = manifests[-1]["manifest_path"] if manifests else None
+        latest_finished_at = max((str(item.get("finished_at") or "") for item in manifests), default="") or None
+        return {
+            "schema_version": 1,
+            "kind": "engineering-harness.task-run-manifest-index",
+            "project": str(self.roadmap.get("project", self.project_root.name)),
+            "project_root": str(self.project_root),
+            "roadmap_path": self._project_relative_path(self.roadmap_path) if self.roadmap_path else None,
+            "report_dir": self._project_relative_path(self.report_dir),
+            "manifest_index_path": self._project_relative_path(self.manifest_index_path),
+            "updated_at": latest_finished_at,
+            "manifest_count": len(manifests),
+            "status_counts": dict(sorted(status_counts.items())),
+            "latest_manifest": latest_manifest,
+            "latest_by_task": dict(sorted(latest_by_task.items())),
+            "manifests": manifests,
+        }
+
+    def _new_task_report_path(self, task: HarnessTask) -> Path:
+        base = self.report_dir / f"{slug_now()}-{task.id}.md"
+        candidate = base
+        counter = 2
+        while candidate.exists() or candidate.with_suffix(".json").exists():
+            candidate = base.with_name(f"{base.stem}_{counter}{base.suffix}")
+            counter += 1
+        return candidate
+
+    def _manifest_index_entry(self, manifest_path: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+        task = manifest.get("task") if isinstance(manifest.get("task"), dict) else {}
+        milestone = manifest.get("milestone") if isinstance(manifest.get("milestone"), dict) else {}
+        runs = manifest.get("runs") if isinstance(manifest.get("runs"), list) else []
+        git = manifest.get("git") if isinstance(manifest.get("git"), dict) else {}
+        return {
+            "manifest_path": str(manifest.get("manifest_path") or self._project_relative_path(manifest_path)),
+            "report_path": str(manifest.get("report_path") or ""),
+            "task_id": str(manifest.get("task_id") or task.get("id") or ""),
+            "task_title": str(task.get("title") or ""),
+            "milestone_id": str(manifest.get("milestone_id") or milestone.get("id") or ""),
+            "milestone_title": str(milestone.get("title") or ""),
+            "status": str(manifest.get("status") or "unknown"),
+            "message": str(manifest.get("message") or ""),
+            "started_at": manifest.get("started_at"),
+            "finished_at": manifest.get("finished_at"),
+            "dry_run": bool(manifest.get("dry_run", False)),
+            "attempt": manifest.get("attempt"),
+            "run_count": len(runs),
+            "runs": [
+                {
+                    "phase": str(run.get("phase") or ""),
+                    "name": str(run.get("name") or ""),
+                    "executor": str(run.get("executor") or ""),
+                    "status": str(run.get("status") or "unknown"),
+                    "returncode": run.get("returncode"),
+                }
+                for run in runs
+                if isinstance(run, dict)
+            ],
+            "git": {
+                "is_repository": bool(git.get("is_repository", False)),
+                "head": git.get("head"),
+            },
+        }
+
+    def _project_relative_path(self, path: Path) -> str:
+        if path.is_relative_to(self.project_root):
+            return str(path.relative_to(self.project_root))
+        return str(path)
 
     def validate_roadmap(self) -> dict[str, Any]:
         errors: list[str] = []
@@ -1211,7 +1334,7 @@ Rules:
         allow_agent: bool = False,
     ) -> dict[str, Any]:
         started_at = utc_now()
-        report_path = self.report_dir / f"{slug_now()}-{task.id}.md"
+        report_path = self._new_task_report_path(task)
         state = self.load_state()
         task_state = state.setdefault("tasks", {}).setdefault(task.id, {})
         task_state["attempts"] = int(task_state.get("attempts", 0)) + (0 if dry_run else 1)
@@ -1622,6 +1745,7 @@ Rules:
             allow_manual=allow_manual,
             allow_agent=allow_agent,
         )
+        self.rebuild_manifest_index()
         if persist:
             task_state = state.setdefault("tasks", {}).setdefault(task.id, {})
             task_state["status"] = status
