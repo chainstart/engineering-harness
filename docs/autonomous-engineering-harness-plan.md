@@ -151,7 +151,7 @@ Tasks:
 Acceptance:
 
 - Invalid roadmap shapes fail validation with actionable errors.
-- Valid roadmap examples for dashboard, submission-review, multi-role app, and cli-only projects pass.
+- Valid roadmap examples for dashboard, submission-review, multi-role app, api-only, and cli-only projects pass.
 - Existing projects continue to load without migration.
 
 ### Stage 2: Run Manifest and Evidence Model
@@ -350,4 +350,3 @@ Acceptance:
 - Every implementation task should define file scope, acceptance commands, and E2E commands when a
   user-visible experience is affected.
 - Every agent task should define allowed file scope, timeout, model expectations, and repair path.
-

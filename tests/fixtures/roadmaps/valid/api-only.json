@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "project": "fixture-api-only",
+  "profile": "python-agent",
+  "default_timeout_seconds": 120,
+  "state_path": ".engineering/state/harness-state.json",
+  "decision_log_path": ".engineering/state/decision-log.jsonl",
+  "report_dir": ".engineering/reports/tasks",
+  "experience": {
+    "kind": "api-only",
+    "personas": ["api client"],
+    "primary_surfaces": ["REST API", "OpenAPI schema"],
+    "auth": {
+      "required": true,
+      "roles": ["service-client"]
+    },
+    "e2e_journeys": [
+      {
+        "id": "client-creates-and-reads-resource",
+        "persona": "api client",
+        "goal": "Authenticate, create a resource through the API, and read it back."
+      }
+    ]
+  },
+  "milestones": [
+    {
+      "id": "api-baseline",
+      "title": "API Baseline",
+      "status": "active",
+      "objective": "Validate the API contract and user journey.",
+      "tasks": [
+        {
+          "id": "api-contract-smoke",
+          "title": "Add API contract smoke check",
+          "status": "pending",
+          "max_attempts": 2,
+          "file_scope": ["src/**", "tests/**", "docs/**"],
+          "acceptance": [
+            {
+              "name": "api contract validates",
+              "command": "python3 -c \"print('api contract ok')\"",
+              "required": true,
+              "timeout_seconds": 30
+            }
+          ],
+          "e2e": [
+            {
+              "name": "authenticated client journey validates",
+              "command": "python3 -c \"print('api journey ok')\"",
+              "timeout_seconds": 30
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

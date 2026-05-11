@@ -26,6 +26,22 @@ def validate_roadmap_fixture(tmp_path: Path, fixture_name: str) -> dict:
     return Harness(project).validate_roadmap()
 
 
+def validate_roadmap_payload(tmp_path: Path, roadmap: dict) -> dict:
+    project = tmp_path / "payload-project"
+    project.mkdir()
+    engineering_dir = project / ".engineering"
+    engineering_dir.mkdir()
+    roadmap_path = engineering_dir / "roadmap.yaml"
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    return Harness(project).validate_roadmap()
+
+
+def roadmap_fixture_payload(fixture_name: str) -> dict:
+    fixture_path = ROADMAP_FIXTURES / fixture_name
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
 def test_profiles_are_available():
     profile_ids = {item["id"] for item in list_profiles()}
 
@@ -318,9 +334,21 @@ def test_validate_roadmap_catches_missing_acceptance(tmp_path):
     assert any("acceptance" in error for error in result["errors"])
 
 
+def test_validate_roadmap_allows_missing_experience_for_backward_compatibility(tmp_path):
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+
+    result = Harness(project).validate_roadmap()
+
+    assert result["status"] == "passed"
+    assert result["errors"] == []
+
+
 @pytest.mark.parametrize(
     "fixture_name",
     [
+        "valid/api-only.json",
         "valid/dashboard.json",
         "valid/submission-review.json",
         "valid/multi-role-app.json",
@@ -332,6 +360,93 @@ def test_valid_roadmap_fixtures_pass_validation(tmp_path, fixture_name):
 
     assert result["status"] == "passed"
     assert result["errors"] == []
+
+
+@pytest.mark.parametrize(
+    ("experience", "expected_error"),
+    [
+        ("dashboard", "top-level `experience` must be a mapping"),
+        (
+            {
+                "kind": "desktop-app",
+                "personas": ["operator"],
+                "primary_surfaces": ["operator dashboard"],
+                "auth": {"required": False, "roles": []},
+                "e2e_journeys": [
+                    {"id": "operator-checks-status", "persona": "operator", "goal": "Check status."}
+                ],
+            },
+            "experience.kind `desktop-app` is not supported",
+        ),
+        (
+            {
+                "kind": "dashboard",
+                "personas": [],
+                "primary_surfaces": ["operator dashboard"],
+                "auth": {"required": False, "roles": []},
+                "e2e_journeys": [
+                    {"id": "operator-checks-status", "persona": "operator", "goal": "Check status."}
+                ],
+            },
+            "experience.personas must include at least one item",
+        ),
+        (
+            {
+                "kind": "dashboard",
+                "personas": ["operator"],
+                "primary_surfaces": [""],
+                "auth": {"required": False, "roles": []},
+                "e2e_journeys": [
+                    {"id": "operator-checks-status", "persona": "operator", "goal": "Check status."}
+                ],
+            },
+            "experience.primary_surfaces[0] must be a non-empty string",
+        ),
+        (
+            {
+                "kind": "multi-role-app",
+                "personas": ["operator"],
+                "primary_surfaces": ["operator dashboard"],
+                "auth": {"required": True, "roles": []},
+                "e2e_journeys": [
+                    {"id": "operator-checks-status", "persona": "operator", "goal": "Check status."}
+                ],
+            },
+            "experience.auth.roles must include at least one role when auth.required is true",
+        ),
+        (
+            {
+                "kind": "dashboard",
+                "personas": ["operator"],
+                "primary_surfaces": ["operator dashboard"],
+                "auth": {"required": False, "roles": []},
+                "e2e_journeys": [],
+            },
+            "experience.e2e_journeys must define at least one journey",
+        ),
+        (
+            {
+                "kind": "submission-review",
+                "personas": ["student"],
+                "primary_surfaces": ["submission portal"],
+                "auth": {"required": True, "roles": ["student"]},
+                "e2e_journeys": [
+                    {"id": "reviewer-checks-work", "persona": "reviewer", "goal": "Review submitted work."}
+                ],
+            },
+            "experience.e2e_journeys[0].persona `reviewer` must match one of experience.personas",
+        ),
+    ],
+)
+def test_invalid_experience_shapes_fail_validation(tmp_path, experience, expected_error):
+    roadmap = roadmap_fixture_payload("valid/dashboard.json")
+    roadmap["experience"] = experience
+
+    result = validate_roadmap_payload(tmp_path, roadmap)
+
+    assert result["status"] == "failed"
+    assert result["error_count"] >= 1
+    assert any(expected_error in error for error in result["errors"]), result["errors"]
 
 
 @pytest.mark.parametrize(

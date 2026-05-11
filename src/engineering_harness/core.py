@@ -17,6 +17,7 @@ COMPLETED_STATUSES = {"done", "passed", "skipped"}
 BLOCKED_STATUSES = {"blocked", "paused"}
 CONFIG_CANDIDATES = (".engineering/roadmap.yaml", ".engineering/roadmap.json", "ops/engineering/roadmap.yaml")
 PRUNE_DIRS = {".git", "node_modules", ".venv", "venv", ".pytest_cache", "dist", "out", "cache", "artifacts"}
+EXPERIENCE_KINDS = {"dashboard", "submission-review", "multi-role-app", "api-only", "cli-only"}
 
 
 def utc_now() -> str:
@@ -751,6 +752,8 @@ Rules:
         if not str(self.roadmap.get("profile", "")).strip():
             warnings.append("top-level `profile` is missing")
 
+        self._validate_experience_payload(self.roadmap.get("experience"), errors=errors)
+
         milestones = self.roadmap.get("milestones", [])
         if not isinstance(milestones, list):
             errors.append("`milestones` must be a list")
@@ -825,6 +828,125 @@ Rules:
             "errors": errors,
             "warnings": warnings,
         }
+
+    def _validate_experience_payload(
+        self,
+        experience: Any,
+        *,
+        errors: list[str],
+    ) -> None:
+        if experience is None:
+            return
+        if not isinstance(experience, dict):
+            errors.append("top-level `experience` must be a mapping")
+            return
+
+        kind = str(experience.get("kind", "")).strip()
+        if not kind:
+            errors.append("experience.kind is required")
+        elif kind not in EXPERIENCE_KINDS:
+            allowed = ", ".join(sorted(EXPERIENCE_KINDS))
+            errors.append(f"experience.kind `{kind}` is not supported; expected one of: {allowed}")
+
+        personas = self._validate_string_list(
+            experience.get("personas"),
+            location="experience.personas",
+            errors=errors,
+            required=True,
+            non_empty=True,
+        )
+        persona_names = set(personas)
+
+        self._validate_string_list(
+            experience.get("primary_surfaces"),
+            location="experience.primary_surfaces",
+            errors=errors,
+            required=True,
+            non_empty=True,
+        )
+
+        auth = experience.get("auth")
+        if auth is None:
+            errors.append("experience.auth is required")
+        elif not isinstance(auth, dict):
+            errors.append("experience.auth must be a mapping")
+        else:
+            auth_required = auth.get("required", False)
+            if not isinstance(auth_required, bool):
+                errors.append("experience.auth.required must be true or false")
+            roles = self._validate_string_list(
+                auth.get("roles"),
+                location="experience.auth.roles",
+                errors=errors,
+                required=True,
+                non_empty=False,
+            )
+            if auth_required is True and not roles:
+                errors.append("experience.auth.roles must include at least one role when auth.required is true")
+
+        journeys = experience.get("e2e_journeys")
+        if journeys is None:
+            errors.append("experience.e2e_journeys is required")
+            return
+        if not isinstance(journeys, list):
+            errors.append("experience.e2e_journeys must be a list")
+            return
+        if not journeys:
+            errors.append("experience.e2e_journeys must define at least one journey")
+            return
+
+        seen_journey_ids: set[str] = set()
+        for journey_index, journey in enumerate(journeys):
+            location = f"experience.e2e_journeys[{journey_index}]"
+            if not isinstance(journey, dict):
+                errors.append(f"{location} must be a mapping")
+                continue
+            journey_id = str(journey.get("id", "")).strip()
+            if not journey_id:
+                errors.append(f"{location}.id is required")
+            elif journey_id in seen_journey_ids:
+                errors.append(f"duplicate experience e2e journey id: {journey_id}")
+            seen_journey_ids.add(journey_id)
+
+            persona = str(journey.get("persona", "")).strip()
+            if not persona:
+                errors.append(f"{location}.persona is required")
+            elif persona_names and persona not in persona_names:
+                errors.append(f"{location}.persona `{persona}` must match one of experience.personas")
+
+            if not str(journey.get("goal", "")).strip():
+                errors.append(f"{location}.goal is required")
+
+    def _validate_string_list(
+        self,
+        value: Any,
+        *,
+        location: str,
+        errors: list[str],
+        required: bool,
+        non_empty: bool,
+    ) -> list[str]:
+        if value is None:
+            if required:
+                errors.append(f"{location} is required")
+            return []
+        if not isinstance(value, list):
+            errors.append(f"{location} must be a list")
+            return []
+        if non_empty and not value:
+            errors.append(f"{location} must include at least one item")
+        items: list[str] = []
+        seen_items: set[str] = set()
+        for item_index, item in enumerate(value):
+            text = str(item).strip() if isinstance(item, str) else ""
+            if not text:
+                errors.append(f"{location}[{item_index}] must be a non-empty string")
+                continue
+            if text in seen_items:
+                errors.append(f"{location} contains duplicate item `{text}`")
+            seen_items.add(text)
+            items.append(text)
+        return items
 
     def _validate_task_payload(
         self,
