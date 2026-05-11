@@ -404,6 +404,93 @@
           "generated_at": "2026-05-11T22:58:41Z"
         }
       ]
+    },
+    {
+      "id": "default-frontend-visualization",
+      "title": "Default Frontend Visualization Module",
+      "status": "planned",
+      "objective": "Ensure every substantial developed object gets a domain-appropriate default visual surface or explicit frontend exemption.",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-11T23:24:26Z",
+      "tasks": [
+        {
+          "id": "default-experience-planner",
+          "title": "Derive default frontend experience plans when roadmaps omit experience",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 2,
+          "manual_approval_required": false,
+          "agent_approval_required": false,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 1800,
+              "prompt": "Implement a default frontend experience planner for roadmaps without an explicit experience block. Derive dashboard, submission-review, multi-role-app, api-only, or cli-only recommendations from profile, project kind, tasks, and roadmap hints. Expose the derived plan in status_summary without making legacy roadmaps invalid. Add tests for autonomous worker, student review, multi-role, api-only, and cli-only cases."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 1200,
+              "prompt": "Fix failing default frontend planner tests while keeping explicit experience blocks authoritative."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "default frontend planner tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-11T23:24:26Z"
+        },
+        {
+          "id": "frontend-task-generator",
+          "title": "Generate frontend roadmap tasks from experience plans",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 2,
+          "manual_approval_required": false,
+          "agent_approval_required": false,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**",
+            "templates/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 1800,
+              "prompt": "Add a safe roadmap helper that can propose or materialize frontend tasks from an explicit or derived experience plan. The generated tasks should include file_scope, acceptance, and e2e journey checks appropriate to dashboard, submission-review, multi-role, api-only, and cli-only projects. Add tests and docs; avoid forcing a specific frontend stack."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 1200,
+              "prompt": "Fix failing frontend task generator tests while keeping generated tasks conservative and project-specific."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "frontend task generator tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-11T23:24:26Z"
+        }
+      ]
     }
   ],
   "continuation": {
