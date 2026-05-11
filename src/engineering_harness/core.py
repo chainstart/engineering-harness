@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import fnmatch
+import hashlib
 import os
 import subprocess
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .io import append_jsonl, load_mapping, write_json, write_mapping
@@ -734,6 +736,166 @@ Rules:
             "self_iteration": self.self_iteration_summary(),
         }
 
+    def validate_roadmap(self) -> dict[str, Any]:
+        errors: list[str] = []
+        warnings: list[str] = []
+
+        if int(self.roadmap.get("version", 0) or 0) <= 0:
+            warnings.append("top-level `version` is missing or not positive")
+        if not str(self.roadmap.get("project", "")).strip():
+            errors.append("top-level `project` is required")
+        if not str(self.roadmap.get("profile", "")).strip():
+            warnings.append("top-level `profile` is missing")
+
+        milestones = self.roadmap.get("milestones", [])
+        if not isinstance(milestones, list):
+            errors.append("`milestones` must be a list")
+            milestones = []
+
+        seen_task_ids: set[str] = set()
+        for milestone_index, milestone in enumerate(milestones):
+            if not isinstance(milestone, dict):
+                errors.append(f"milestones[{milestone_index}] must be a mapping")
+                continue
+            milestone_id = str(milestone.get("id", "")).strip()
+            if not milestone_id:
+                errors.append(f"milestones[{milestone_index}].id is required")
+                milestone_id = f"milestone-{milestone_index}"
+            tasks = milestone.get("tasks", [])
+            if not isinstance(tasks, list):
+                errors.append(f"milestone `{milestone_id}` tasks must be a list")
+                continue
+            for task_index, task in enumerate(tasks):
+                self._validate_task_payload(
+                    task,
+                    location=f"milestone `{milestone_id}` task[{task_index}]",
+                    seen_task_ids=seen_task_ids,
+                    errors=errors,
+                    warnings=warnings,
+                )
+
+        continuation = self.roadmap.get("continuation")
+        if continuation is not None:
+            if not isinstance(continuation, dict):
+                errors.append("`continuation` must be a mapping")
+            else:
+                stages = continuation.get("stages", [])
+                if stages is None:
+                    stages = []
+                if not isinstance(stages, list):
+                    errors.append("`continuation.stages` must be a list")
+                else:
+                    seen_stage_ids: set[str] = set()
+                    for stage_index, stage in enumerate(stages):
+                        if not isinstance(stage, dict):
+                            errors.append(f"continuation.stages[{stage_index}] must be a mapping")
+                            continue
+                        stage_id = str(stage.get("id", "")).strip()
+                        if not stage_id:
+                            errors.append(f"continuation.stages[{stage_index}].id is required")
+                            stage_id = f"stage-{stage_index}"
+                        elif stage_id in seen_stage_ids:
+                            errors.append(f"duplicate continuation stage id: {stage_id}")
+                        seen_stage_ids.add(stage_id)
+                        tasks = stage.get("tasks", [])
+                        if not isinstance(tasks, list) or not tasks:
+                            errors.append(f"continuation stage `{stage_id}` must define at least one task")
+                            continue
+                        for task_index, task in enumerate(tasks):
+                            self._validate_task_payload(
+                                task,
+                                location=f"continuation stage `{stage_id}` task[{task_index}]",
+                                seen_task_ids=seen_task_ids,
+                                errors=errors,
+                                warnings=warnings,
+                            )
+
+        status = "passed" if not errors else "failed"
+        return {
+            "status": status,
+            "error_count": len(errors),
+            "warning_count": len(warnings),
+            "errors": errors,
+            "warnings": warnings,
+        }
+
+    def _validate_task_payload(
+        self,
+        task: Any,
+        *,
+        location: str,
+        seen_task_ids: set[str],
+        errors: list[str],
+        warnings: list[str],
+    ) -> None:
+        if not isinstance(task, dict):
+            errors.append(f"{location} must be a mapping")
+            return
+        task_id = str(task.get("id", "")).strip()
+        if not task_id:
+            errors.append(f"{location}.id is required")
+            task_id = location
+        elif task_id in seen_task_ids:
+            errors.append(f"duplicate task id: {task_id}")
+        seen_task_ids.add(task_id)
+        if not str(task.get("title", task_id)).strip():
+            warnings.append(f"task `{task_id}` title is empty")
+        file_scope = task.get("file_scope", [])
+        if file_scope is not None and not isinstance(file_scope, list):
+            errors.append(f"task `{task_id}` file_scope must be a list")
+        for group_name in ("implementation", "repair", "acceptance"):
+            group = task.get(group_name, [])
+            if group_name == "acceptance" and not group:
+                errors.append(f"task `{task_id}` must define at least one acceptance command")
+            if group is None:
+                group = []
+            if not isinstance(group, list):
+                errors.append(f"task `{task_id}` {group_name} must be a list")
+                continue
+            for command_index, item in enumerate(group):
+                self._validate_command_payload(
+                    item,
+                    location=f"task `{task_id}` {group_name}[{command_index}]",
+                    errors=errors,
+                    warnings=warnings,
+                )
+        try:
+            if int(task.get("max_task_iterations", 1)) < 1:
+                errors.append(f"task `{task_id}` max_task_iterations must be positive")
+        except (TypeError, ValueError):
+            errors.append(f"task `{task_id}` max_task_iterations must be an integer")
+
+    def _validate_command_payload(
+        self,
+        item: Any,
+        *,
+        location: str,
+        errors: list[str],
+        warnings: list[str],
+    ) -> None:
+        if not isinstance(item, dict):
+            errors.append(f"{location} must be a mapping")
+            return
+        executor = str(item.get("executor", "shell"))
+        if executor not in {"shell", "codex"}:
+            errors.append(f"{location} has unknown executor `{executor}`")
+            return
+        if executor == "shell":
+            command = item.get("command")
+            if not str(command or "").strip():
+                errors.append(f"{location} shell command is required")
+            else:
+                allowed, reason = self.command_allowed(str(command))
+                if not allowed:
+                    warnings.append(f"{location} command is not currently allowlisted: {reason}")
+        if executor == "codex" and not str(item.get("prompt", "") or item.get("command", "")).strip():
+            errors.append(f"{location} codex prompt is required")
+        try:
+            if int(item.get("timeout_seconds", self.default_timeout)) <= 0:
+                errors.append(f"{location} timeout_seconds must be positive")
+        except (TypeError, ValueError):
+            errors.append(f"{location} timeout_seconds must be an integer")
+
     def task_payload(self, task: HarnessTask | None) -> dict[str, Any] | None:
         if task is None:
             return None
@@ -782,6 +944,133 @@ Rules:
             return False, "command prefix is not allowlisted"
         return True, "allowed"
 
+    def _git_status_paths(self) -> list[str]:
+        if not self._is_git_repo():
+            return []
+        result = self._git(["status", "--porcelain"])
+        if result["returncode"] != 0:
+            return []
+        paths: list[str] = []
+        for line in result["stdout"].splitlines():
+            if len(line) < 4:
+                continue
+            path = line[3:].strip()
+            if " -> " in path:
+                _, _, path = path.partition(" -> ")
+            normalized = self._normalize_repo_path(path)
+            if normalized:
+                paths.append(normalized)
+        return sorted(dict.fromkeys(paths))
+
+    def _normalize_repo_path(self, path: str) -> str:
+        normalized = path.replace("\\", "/").strip()
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
+        return normalized
+
+    def _path_in_scope(self, path: str, scopes: tuple[str, ...]) -> bool:
+        normalized = self._normalize_repo_path(path)
+        normalized_scopes = tuple(self._normalize_repo_path(scope) for scope in scopes if str(scope).strip())
+        if not normalized_scopes or any(scope in {"**", "**/*"} for scope in normalized_scopes):
+            return True
+        for scope in normalized_scopes:
+            if scope.endswith("/**"):
+                prefix = scope[:-3].rstrip("/")
+                if normalized == prefix or normalized.startswith(f"{prefix}/"):
+                    return True
+            if fnmatch.fnmatchcase(normalized, scope):
+                return True
+            try:
+                if PurePosixPath(normalized).match(scope):
+                    return True
+            except ValueError:
+                continue
+        return False
+
+    def _scope_violations(self, paths: list[str] | set[str], scopes: tuple[str, ...]) -> list[str]:
+        return sorted(path for path in paths if not self._path_in_scope(path, scopes))
+
+    def _git_safety_preflight(self, task: HarnessTask) -> dict[str, Any]:
+        if not self._is_git_repo():
+            return {
+                "status": "skipped",
+                "message": "project root is not inside a git repository",
+                "dirty_before_paths": [],
+                "dirty_before_fingerprints": {},
+                "dirty_before_out_of_scope_paths": [],
+            }
+        dirty_before = self._git_status_paths()
+        out_of_scope = self._scope_violations(dirty_before, task.file_scope)
+        return {
+            "status": "dirty" if dirty_before else "clean",
+            "message": "worktree has pre-existing changes" if dirty_before else "worktree is clean",
+            "dirty_before_paths": dirty_before,
+            "dirty_before_fingerprints": self._file_fingerprints(dirty_before),
+            "dirty_before_out_of_scope_paths": out_of_scope,
+        }
+
+    def _file_fingerprints(self, paths: list[str] | set[str]) -> dict[str, str]:
+        fingerprints: dict[str, str] = {}
+        for path in paths:
+            normalized = self._normalize_repo_path(path)
+            file_path = self.project_root / normalized
+            if not file_path.exists():
+                fingerprints[normalized] = "<missing>"
+                continue
+            if file_path.is_dir():
+                fingerprints[normalized] = "<directory>"
+                continue
+            try:
+                fingerprints[normalized] = hashlib.sha256(file_path.read_bytes()).hexdigest()
+            except OSError:
+                fingerprints[normalized] = "<unreadable>"
+        return fingerprints
+
+    def _file_scope_guard(
+        self,
+        task: HarnessTask,
+        *,
+        dirty_before_paths: list[str],
+        dirty_before_fingerprints: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        if not self._is_git_repo():
+            return {
+                "status": "skipped",
+                "message": "project root is not inside a git repository",
+                "dirty_after_paths": [],
+                "new_dirty_paths": [],
+                "changed_preexisting_dirty_paths": [],
+                "new_or_changed_dirty_paths": [],
+                "violations": [],
+            }
+        dirty_before = set(dirty_before_paths)
+        dirty_after = set(self._git_status_paths())
+        after_fingerprints = self._file_fingerprints(dirty_after)
+        new_dirty = sorted(dirty_after - dirty_before)
+        before_fingerprints = dirty_before_fingerprints or {}
+        changed_preexisting = sorted(
+            path
+            for path in dirty_after & dirty_before
+            if after_fingerprints.get(path) != before_fingerprints.get(path)
+        )
+        new_or_changed = sorted(dict.fromkeys([*new_dirty, *changed_preexisting]))
+        violations = self._scope_violations(new_or_changed, task.file_scope)
+        status = "passed" if not violations else "failed"
+        message = (
+            "new or changed task paths are inside file_scope"
+            if not violations
+            else f"new or changed task paths outside file_scope: {', '.join(violations[:8])}"
+        )
+        return {
+            "status": status,
+            "message": message,
+            "dirty_after_paths": sorted(dirty_after),
+            "new_dirty_paths": new_dirty,
+            "changed_preexisting_dirty_paths": changed_preexisting,
+            "new_or_changed_dirty_paths": new_or_changed,
+            "violations": violations,
+        }
+
     def run_task(
         self,
         task: HarnessTask,
@@ -798,13 +1087,34 @@ Rules:
         task_state["attempts"] = int(task_state.get("attempts", 0)) + (0 if dry_run else 1)
         task_state["last_started_at"] = started_at
         task_state["last_dry_run"] = dry_run
+        safety: dict[str, Any] = {
+            "git_preflight": self._git_safety_preflight(task),
+            "file_scope_guard": {
+                "status": "not_run",
+                "message": "task did not reach post-run scope guard",
+                "dirty_after_paths": [],
+                "new_dirty_paths": [],
+                "violations": [],
+            },
+        }
+        task_state["last_dirty_before_paths"] = safety["git_preflight"].get("dirty_before_paths", [])
 
         if task.manual_approval_required and not allow_manual:
-            return self._finish_task(state, task, report_path, started_at, [], "blocked", "manual approval required", not dry_run)
+            return self._finish_task(state, task, report_path, started_at, [], "blocked", "manual approval required", not dry_run, safety=safety)
         if task.agent_approval_required and not allow_agent:
-            return self._finish_task(state, task, report_path, started_at, [], "blocked", "agent implementation requires --allow-agent", not dry_run)
+            return self._finish_task(
+                state,
+                task,
+                report_path,
+                started_at,
+                [],
+                "blocked",
+                "agent implementation requires --allow-agent",
+                not dry_run,
+                safety=safety,
+            )
         if not task.acceptance:
-            return self._finish_task(state, task, report_path, started_at, [], "blocked", "task has no acceptance", not dry_run)
+            return self._finish_task(state, task, report_path, started_at, [], "blocked", "task has no acceptance", not dry_run, safety=safety)
 
         runs: list[CommandRun] = []
         implementation_status, message = self._run_command_group(
@@ -848,8 +1158,21 @@ Rules:
                 if repair_status != "passed":
                     break
 
+        if not dry_run:
+            safety["file_scope_guard"] = self._file_scope_guard(
+                task,
+                dirty_before_paths=list(safety["git_preflight"].get("dirty_before_paths", [])),
+                dirty_before_fingerprints=dict(safety["git_preflight"].get("dirty_before_fingerprints", {})),
+            )
+            task_state["last_dirty_after_paths"] = safety["file_scope_guard"].get("dirty_after_paths", [])
+            task_state["last_new_dirty_paths"] = safety["file_scope_guard"].get("new_dirty_paths", [])
+            task_state["last_file_scope_violations"] = safety["file_scope_guard"].get("violations", [])
+            if overall_status == "passed" and safety["file_scope_guard"].get("status") == "failed":
+                overall_status = "failed"
+                message = safety["file_scope_guard"]["message"]
+
         status = "dry-run" if dry_run and overall_status == "passed" else overall_status
-        return self._finish_task(state, task, report_path, started_at, runs, status, message, not dry_run)
+        return self._finish_task(state, task, report_path, started_at, runs, status, message, not dry_run, safety=safety)
 
     def _run_command_group(
         self,
@@ -903,12 +1226,29 @@ Rules:
         if not self._is_git_repo():
             return {"status": "skipped", "message": "project root is not inside a git repository"}
 
+        task_state = self.load_state().get("tasks", {}).get(task.id, {})
+        dirty_before = [str(path) for path in task_state.get("last_dirty_before_paths", [])]
+        if dirty_before:
+            return {
+                "status": "skipped",
+                "message": "dirty worktree existed before the task; refusing to checkpoint mixed changes",
+                "dirty_before_paths": dirty_before,
+            }
+
         status_before = self._git(["status", "--porcelain"])
         if status_before["returncode"] != 0:
             return {
                 "status": "failed",
                 "message": "could not inspect git status",
                 "stderr": status_before["stderr"],
+            }
+        current_paths = self._git_status_paths()
+        scope_violations = self._scope_violations(current_paths, task.file_scope)
+        if scope_violations:
+            return {
+                "status": "skipped",
+                "message": "dirty files are outside task file_scope; refusing checkpoint",
+                "violations": scope_violations,
             }
         if not status_before["stdout"].strip():
             return {"status": "skipped", "message": "no git changes to commit"}
@@ -1069,9 +1409,11 @@ Rules:
         status: str,
         message: str,
         persist: bool,
+        *,
+        safety: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         finished_at = utc_now()
-        self._write_report(report_path, task, started_at, finished_at, runs, status, message)
+        self._write_report(report_path, task, started_at, finished_at, runs, status, message, safety=safety)
         if persist:
             task_state = state.setdefault("tasks", {}).setdefault(task.id, {})
             task_state["status"] = status
@@ -1105,6 +1447,7 @@ Rules:
                 }
                 for run in runs
             ],
+            "safety": safety or {},
         }
 
     def _write_report(
@@ -1116,6 +1459,8 @@ Rules:
         runs: list[CommandRun],
         status: str,
         message: str,
+        *,
+        safety: dict[str, Any] | None = None,
     ) -> None:
         report_path.parent.mkdir(parents=True, exist_ok=True)
         lines = [
@@ -1152,4 +1497,25 @@ Rules:
                 lines.extend(["Stdout:", "", "```text", run.stdout, "```", ""])
             if run.stderr:
                 lines.extend(["Stderr:", "", "```text", run.stderr, "```", ""])
+        if safety:
+            git_preflight = safety.get("git_preflight", {})
+            file_scope_guard = safety.get("file_scope_guard", {})
+            lines.extend(
+                [
+                    "## Safety",
+                    "",
+                    f"- Git preflight: `{git_preflight.get('status', 'unknown')}` - {git_preflight.get('message', '')}",
+                    f"- Dirty before: `{len(git_preflight.get('dirty_before_paths', []))}`",
+                    f"- File-scope guard: `{file_scope_guard.get('status', 'unknown')}` - {file_scope_guard.get('message', '')}",
+                    f"- New dirty paths: `{len(file_scope_guard.get('new_dirty_paths', []))}`",
+                    f"- Changed pre-existing dirty paths: `{len(file_scope_guard.get('changed_preexisting_dirty_paths', []))}`",
+                    f"- File-scope violations: `{len(file_scope_guard.get('violations', []))}`",
+                    "",
+                ]
+            )
+            violations = file_scope_guard.get("violations", [])
+            if violations:
+                lines.extend(["Violations:", ""])
+                lines.extend(f"- `{path}`" for path in violations[:40])
+                lines.append("")
         report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")

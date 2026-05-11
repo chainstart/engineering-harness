@@ -111,6 +111,146 @@ def test_harness_can_repair_after_failed_acceptance(tmp_path):
     assert phases == ["acceptance-1", "repair-1", "acceptance-2"]
 
 
+def test_file_scope_guard_allows_in_scope_changes(tmp_path):
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    subprocess.run(["git", "init"], cwd=project, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "harness@example.invalid"], cwd=project, check=True)
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=project, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=project, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=project, check=True, capture_output=True, text=True)
+
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["file_scope"] = ["src/**"]
+    task["implementation"] = [
+        {
+            "name": "write scoped file",
+            "command": "python3 -c \"from pathlib import Path; Path('src').mkdir(exist_ok=True); Path('src/ok.txt').write_text('ok')\"",
+        }
+    ]
+    task["acceptance"][0]["command"] = "python3 -c \"from pathlib import Path; assert Path('src/ok.txt').read_text() == 'ok'\""
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    result = harness.run_task(harness.next_task(), allow_agent=True)
+
+    assert result["status"] == "passed"
+    assert result["safety"]["file_scope_guard"]["status"] == "passed"
+
+
+def test_file_scope_guard_blocks_out_of_scope_changes(tmp_path):
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    subprocess.run(["git", "init"], cwd=project, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "harness@example.invalid"], cwd=project, check=True)
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=project, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=project, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=project, check=True, capture_output=True, text=True)
+
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["file_scope"] = ["src/**"]
+    task["implementation"] = [
+        {
+            "name": "write unscoped file",
+            "command": "python3 -c \"from pathlib import Path; Path('outside.txt').write_text('outside')\"",
+        }
+    ]
+    task["acceptance"][0]["command"] = "python3 -c \"print('acceptance ok')\""
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    result = harness.run_task(harness.next_task(), allow_agent=True)
+
+    assert result["status"] == "failed"
+    assert result["safety"]["file_scope_guard"]["violations"] == ["outside.txt"]
+    assert "outside file_scope" in result["message"]
+
+
+def test_file_scope_guard_blocks_changed_preexisting_dirty_out_of_scope_file(tmp_path):
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    subprocess.run(["git", "init"], cwd=project, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "harness@example.invalid"], cwd=project, check=True)
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=project, check=True)
+    (project / "outside.txt").write_text("tracked", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=project, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=project, check=True, capture_output=True, text=True)
+    (project / "outside.txt").write_text("dirty before", encoding="utf-8")
+
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["file_scope"] = ["src/**"]
+    task["implementation"] = [
+        {
+            "name": "modify preexisting dirty file",
+            "command": "python3 -c \"from pathlib import Path; Path('outside.txt').write_text('dirty after')\"",
+        }
+    ]
+    task["acceptance"][0]["command"] = "python3 -c \"print('acceptance ok')\""
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    result = harness.run_task(harness.next_task(), allow_agent=True)
+
+    assert result["status"] == "failed"
+    assert result["safety"]["file_scope_guard"]["changed_preexisting_dirty_paths"] == ["outside.txt"]
+    assert result["safety"]["file_scope_guard"]["violations"] == ["outside.txt"]
+
+
+def test_git_checkpoint_refuses_dirty_worktree_that_predates_task(tmp_path):
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    subprocess.run(["git", "init"], cwd=project, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "harness@example.invalid"], cwd=project, check=True)
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=project, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=project, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=project, check=True, capture_output=True, text=True)
+
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task_payload = roadmap["milestones"][0]["tasks"][0]
+    task_payload["acceptance"][0]["command"] = "python3 -c \"from pathlib import Path; Path('done.txt').write_text('done')\""
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=project, check=True)
+    subprocess.run(["git", "commit", "-m", "configure task"], cwd=project, check=True, capture_output=True, text=True)
+    (project / "preexisting.txt").write_text("dirty before task", encoding="utf-8")
+
+    harness = Harness(project)
+    task = harness.next_task()
+    result = harness.run_task(task)
+    checkpoint = harness.git_checkpoint(task)
+
+    assert result["status"] == "passed"
+    assert result["safety"]["git_preflight"]["dirty_before_paths"] == ["preexisting.txt"]
+    assert checkpoint["status"] == "skipped"
+    assert "dirty worktree existed before the task" in checkpoint["message"]
+
+
+def test_validate_roadmap_catches_missing_acceptance(tmp_path):
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"][0]["acceptance"] = []
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    result = harness.validate_roadmap()
+
+    assert result["status"] == "failed"
+    assert any("acceptance" in error for error in result["errors"])
+
+
 def test_harness_blocks_codex_executor_without_agent_approval(tmp_path):
     project = tmp_path / "agent-project"
     project.mkdir()

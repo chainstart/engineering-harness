@@ -109,6 +109,23 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_validate(args: argparse.Namespace) -> int:
+    root = resolve_project_root(args)
+    harness = Harness(root)
+    payload = harness.validate_roadmap()
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"Validation: {payload['status']}")
+        print(f"Errors: {payload['error_count']}")
+        for error in payload["errors"]:
+            print(f"- error: {error}")
+        print(f"Warnings: {payload['warning_count']}")
+        for warning in payload["warnings"]:
+            print(f"- warning: {warning}")
+    return 0 if payload["status"] == "passed" else 1
+
+
 def cmd_next(args: argparse.Namespace) -> int:
     root = resolve_project_root(args)
     harness = Harness(root)
@@ -436,6 +453,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     for name, help_text, func in [
         ("status", "Show project or workspace status", cmd_status),
+        ("validate", "Validate the engineering roadmap schema and task commands", cmd_validate),
         ("next", "Show the next selected task", cmd_next),
         ("run", "Run the next or selected task acceptance checks", cmd_run),
         ("advance", "Materialize the next continuation milestone into the roadmap", cmd_advance),
