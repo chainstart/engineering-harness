@@ -1230,7 +1230,20 @@ Rules:
         task_state["last_dirty_before_paths"] = safety["git_preflight"].get("dirty_before_paths", [])
 
         if task.manual_approval_required and not allow_manual:
-            return self._finish_task(state, task, report_path, started_at, [], "blocked", "manual approval required", not dry_run, safety=safety)
+            return self._finish_task(
+                state,
+                task,
+                report_path,
+                started_at,
+                [],
+                "blocked",
+                "manual approval required",
+                not dry_run,
+                safety=safety,
+                allow_live=allow_live,
+                allow_manual=allow_manual,
+                allow_agent=allow_agent,
+            )
         if task.agent_approval_required and not allow_agent:
             return self._finish_task(
                 state,
@@ -1242,9 +1255,25 @@ Rules:
                 "agent implementation requires --allow-agent",
                 not dry_run,
                 safety=safety,
+                allow_live=allow_live,
+                allow_manual=allow_manual,
+                allow_agent=allow_agent,
             )
         if not task.acceptance:
-            return self._finish_task(state, task, report_path, started_at, [], "blocked", "task has no acceptance", not dry_run, safety=safety)
+            return self._finish_task(
+                state,
+                task,
+                report_path,
+                started_at,
+                [],
+                "blocked",
+                "task has no acceptance",
+                not dry_run,
+                safety=safety,
+                allow_live=allow_live,
+                allow_manual=allow_manual,
+                allow_agent=allow_agent,
+            )
 
         runs: list[CommandRun] = []
         implementation_status, message = self._run_command_group(
@@ -1316,7 +1345,20 @@ Rules:
                 message = safety["file_scope_guard"]["message"]
 
         status = "dry-run" if dry_run and overall_status == "passed" else overall_status
-        return self._finish_task(state, task, report_path, started_at, runs, status, message, not dry_run, safety=safety)
+        return self._finish_task(
+            state,
+            task,
+            report_path,
+            started_at,
+            runs,
+            status,
+            message,
+            not dry_run,
+            safety=safety,
+            allow_live=allow_live,
+            allow_manual=allow_manual,
+            allow_agent=allow_agent,
+        )
 
     def _run_command_group(
         self,
@@ -1557,14 +1599,35 @@ Rules:
         persist: bool,
         *,
         safety: dict[str, Any] | None = None,
+        allow_live: bool = False,
+        allow_manual: bool = False,
+        allow_agent: bool = False,
     ) -> dict[str, Any]:
         finished_at = utc_now()
+        manifest_path = report_path.with_suffix(".json")
         self._write_report(report_path, task, started_at, finished_at, runs, status, message, safety=safety)
+        self._write_task_manifest(
+            manifest_path,
+            report_path,
+            task,
+            started_at,
+            finished_at,
+            runs,
+            status,
+            message,
+            persist,
+            int(state.get("tasks", {}).get(task.id, {}).get("attempts", 0)),
+            safety=safety,
+            allow_live=allow_live,
+            allow_manual=allow_manual,
+            allow_agent=allow_agent,
+        )
         if persist:
             task_state = state.setdefault("tasks", {}).setdefault(task.id, {})
             task_state["status"] = status
             task_state["last_finished_at"] = finished_at
             task_state["last_report"] = str(report_path.relative_to(self.project_root))
+            task_state["last_manifest"] = str(manifest_path.relative_to(self.project_root))
             self.save_state(state)
         append_jsonl(
             self.decision_log_path,
@@ -1576,6 +1639,7 @@ Rules:
                 "status": status,
                 "dry_run": not persist,
                 "report": str(report_path.relative_to(self.project_root)),
+                "manifest": str(manifest_path.relative_to(self.project_root)),
             },
         )
         return {
@@ -1583,6 +1647,7 @@ Rules:
             "status": status,
             "message": message,
             "report": str(report_path.relative_to(self.project_root)),
+            "manifest": str(manifest_path.relative_to(self.project_root)),
             "runs": [
                 {
                     "phase": run.phase,
@@ -1595,6 +1660,243 @@ Rules:
             ],
             "safety": safety or {},
         }
+
+    def _write_task_manifest(
+        self,
+        manifest_path: Path,
+        report_path: Path,
+        task: HarnessTask,
+        started_at: str,
+        finished_at: str,
+        runs: list[CommandRun],
+        status: str,
+        message: str,
+        persist: bool,
+        attempt: int,
+        *,
+        safety: dict[str, Any] | None = None,
+        allow_live: bool = False,
+        allow_manual: bool = False,
+        allow_agent: bool = False,
+    ) -> None:
+        manifest_relative = str(manifest_path.relative_to(self.project_root))
+        report_relative = str(report_path.relative_to(self.project_root))
+        payload = {
+            "schema_version": 1,
+            "kind": "engineering-harness.task-run-manifest",
+            "project": str(self.roadmap.get("project", self.project_root.name)),
+            "project_root": str(self.project_root),
+            "profile": self.roadmap.get("profile"),
+            "roadmap_path": str(self.roadmap_path.relative_to(self.project_root))
+            if self.roadmap_path and self.roadmap_path.is_relative_to(self.project_root)
+            else str(self.roadmap_path),
+            "task_id": task.id,
+            "milestone_id": task.milestone_id,
+            "task": self.task_payload(task),
+            "milestone": {
+                "id": task.milestone_id,
+                "title": task.milestone_title,
+            },
+            "status": status,
+            "message": message,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "dry_run": not persist,
+            "attempt": attempt,
+            "report_path": report_relative,
+            "manifest_path": manifest_relative,
+            "artifacts": [
+                {"kind": "markdown_report", "path": report_relative},
+                {"kind": "json_manifest", "path": manifest_relative},
+            ],
+            "runs": [self._command_run_manifest(task, run) for run in runs],
+            "safety": safety or {},
+            "policy_decisions": self._policy_decisions(
+                task,
+                safety=safety or {},
+                allow_live=allow_live,
+                allow_manual=allow_manual,
+                allow_agent=allow_agent,
+            ),
+            "git": self._git_context(safety or {}),
+        }
+        write_json(manifest_path, payload)
+
+    def _command_run_manifest(self, task: HarnessTask, run: CommandRun) -> dict[str, Any]:
+        metadata = self._configured_command_metadata(task, run)
+        return {
+            "phase": run.phase,
+            "name": run.name,
+            "executor": metadata["executor"],
+            "command": run.command,
+            "status": run.status,
+            "returncode": run.returncode,
+            "started_at": run.started_at,
+            "finished_at": run.finished_at,
+            "required": metadata.get("required"),
+            "timeout_seconds": metadata.get("timeout_seconds"),
+            "model": metadata.get("model"),
+            "sandbox": metadata.get("sandbox"),
+            "stdout": self._stream_summary(run.stdout),
+            "stderr": self._stream_summary(run.stderr),
+        }
+
+    def _configured_command_metadata(self, task: HarnessTask, run: CommandRun) -> dict[str, Any]:
+        for command in (*task.implementation, *task.repair, *task.acceptance, *task.e2e):
+            if command.name == run.name and self._display_command(command, task) == run.command:
+                return {
+                    "executor": command.executor,
+                    "required": command.required,
+                    "timeout_seconds": command.timeout_seconds,
+                    "model": command.model,
+                    "sandbox": command.sandbox,
+                }
+        return {
+            "executor": "codex" if run.command.startswith("codex exec ") else "shell",
+            "required": None,
+            "timeout_seconds": None,
+            "model": None,
+            "sandbox": None,
+        }
+
+    def _stream_summary(self, text: str) -> dict[str, Any]:
+        encoded = text.encode("utf-8")
+        return {
+            "bytes": len(encoded),
+            "sha256": hashlib.sha256(encoded).hexdigest() if text else None,
+        }
+
+    def _policy_decisions(
+        self,
+        task: HarnessTask,
+        *,
+        safety: dict[str, Any],
+        allow_live: bool,
+        allow_manual: bool,
+        allow_agent: bool,
+    ) -> list[dict[str, Any]]:
+        decisions: list[dict[str, Any]] = [
+            {
+                "kind": "manual_approval",
+                "scope": "task",
+                "outcome": "allowed" if not task.manual_approval_required or allow_manual else "denied",
+                "reason": self._approval_reason(task.manual_approval_required, allow_manual, "manual approval"),
+            },
+            {
+                "kind": "agent_approval",
+                "scope": "task",
+                "outcome": "allowed" if not task.agent_approval_required or allow_agent else "denied",
+                "reason": self._approval_reason(task.agent_approval_required, allow_agent, "agent approval"),
+            },
+        ]
+        for phase, commands in (
+            ("implementation", task.implementation),
+            ("repair", task.repair),
+            ("acceptance", task.acceptance),
+            ("e2e", task.e2e),
+        ):
+            for command in commands:
+                if command.executor == "shell":
+                    allowed, reason = self.command_allowed(command.command, allow_live=allow_live)
+                    decisions.append(
+                        {
+                            "kind": "command_policy",
+                            "scope": "command",
+                            "phase": phase,
+                            "name": command.name,
+                            "executor": command.executor,
+                            "outcome": "allowed" if allowed else "denied",
+                            "reason": reason,
+                        }
+                    )
+                elif command.executor == "codex":
+                    decisions.append(
+                        {
+                            "kind": "executor_approval",
+                            "scope": "command",
+                            "phase": phase,
+                            "name": command.name,
+                            "executor": command.executor,
+                            "outcome": "allowed" if allow_agent else "denied",
+                            "reason": "codex executor requires --allow-agent" if not allow_agent else "agent approval satisfied",
+                        }
+                    )
+                else:
+                    decisions.append(
+                        {
+                            "kind": "executor_policy",
+                            "scope": "command",
+                            "phase": phase,
+                            "name": command.name,
+                            "executor": command.executor,
+                            "outcome": "denied",
+                            "reason": f"unknown executor: {command.executor}",
+                        }
+                    )
+
+        git_preflight = safety.get("git_preflight", {})
+        file_scope_guard = safety.get("file_scope_guard", {})
+        decisions.extend(
+            [
+                {
+                    "kind": "git_preflight",
+                    "scope": "worktree",
+                    "outcome": str(git_preflight.get("status", "unknown")),
+                    "reason": str(git_preflight.get("message", "")),
+                },
+                {
+                    "kind": "file_scope_guard",
+                    "scope": "worktree",
+                    "outcome": str(file_scope_guard.get("status", "unknown")),
+                    "reason": str(file_scope_guard.get("message", "")),
+                },
+            ]
+        )
+        return decisions
+
+    def _approval_reason(self, required: bool, allowed: bool, label: str) -> str:
+        if not required:
+            return f"{label} not required"
+        return f"{label} satisfied" if allowed else f"{label} required"
+
+    def _git_context(self, safety: dict[str, Any]) -> dict[str, Any]:
+        git_preflight = safety.get("git_preflight", {})
+        file_scope_guard = safety.get("file_scope_guard", {})
+        context: dict[str, Any] = {
+            "is_repository": False,
+            "root": None,
+            "branch": None,
+            "head": None,
+            "short_head": None,
+            "dirty_before_paths": git_preflight.get("dirty_before_paths", []),
+            "dirty_after_paths": file_scope_guard.get("dirty_after_paths", []),
+            "dirty_before_out_of_scope_paths": git_preflight.get("dirty_before_out_of_scope_paths", []),
+            "file_scope_violations": file_scope_guard.get("violations", []),
+            "status_short": "",
+        }
+        if not self._is_git_repo():
+            return context
+
+        root = self._git(["rev-parse", "--show-toplevel"])
+        head = self._git(["rev-parse", "HEAD"])
+        short_head = self._git(["rev-parse", "--short", "HEAD"])
+        status = self._git(["status", "--porcelain"])
+        context.update(
+            {
+                "is_repository": True,
+                "root": root["stdout"].strip() if root["returncode"] == 0 else None,
+                "branch": self._current_branch(),
+                "head": head["stdout"].strip() if head["returncode"] == 0 else None,
+                "short_head": short_head["stdout"].strip() if short_head["returncode"] == 0 else None,
+                "status_short": status["stdout"] if status["returncode"] == 0 else "",
+            }
+        )
+        context["refs"] = {
+            "head": context["head"],
+            "short_head": context["short_head"],
+            "branch": context["branch"],
+        }
+        return context
 
     def _write_report(
         self,

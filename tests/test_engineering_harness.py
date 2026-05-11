@@ -80,6 +80,70 @@ def test_harness_runs_task_and_writes_state(tmp_path):
     assert (project / state["tasks"]["tests"]["last_report"]).exists()
 
 
+def test_harness_runs_task_and_writes_matching_manifest(tmp_path):
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0]["command"] = (
+        "python3 -c \"from pathlib import Path; Path('done.txt').write_text('done'); print('manifest ok')\""
+    )
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    subprocess.run(["git", "init"], cwd=project, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "harness@example.invalid"], cwd=project, check=True)
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=project, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=project, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=project, check=True, capture_output=True, text=True)
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=project, text=True).strip()
+
+    harness = Harness(project)
+    result = harness.run_task(harness.next_task())
+
+    assert result["status"] == "passed"
+    report_path = project / result["report"]
+    manifest_path = project / result["manifest"]
+    assert manifest_path == report_path.with_suffix(".json")
+    assert manifest_path.exists()
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["project"] == "agent-project"
+    assert manifest["task_id"] == "tests"
+    assert manifest["task"]["id"] == "tests"
+    assert manifest["milestone"]["id"] == "baseline"
+    assert manifest["status"] == "passed"
+    assert manifest["message"] == result["message"]
+    assert manifest["started_at"]
+    assert manifest["finished_at"]
+    assert manifest["attempt"] == 1
+    assert manifest["report_path"] == result["report"]
+    assert manifest["manifest_path"] == result["manifest"]
+    assert manifest["artifacts"] == [
+        {"kind": "markdown_report", "path": result["report"]},
+        {"kind": "json_manifest", "path": result["manifest"]},
+    ]
+    assert manifest["runs"][0]["phase"] == "acceptance-1"
+    assert manifest["runs"][0]["executor"] == "shell"
+    assert manifest["runs"][0]["status"] == "passed"
+    assert manifest["runs"][0]["returncode"] == 0
+    assert manifest["runs"][0]["stdout"]["bytes"] > 0
+    assert manifest["runs"][0]["stdout"]["sha256"]
+    assert manifest["safety"]["git_preflight"]["status"] == "clean"
+    assert manifest["safety"]["file_scope_guard"]["status"] == "passed"
+    assert manifest["git"]["is_repository"] is True
+    assert manifest["git"]["head"] == head
+    assert manifest["git"]["dirty_before_paths"] == []
+    assert manifest["git"]["dirty_after_paths"] == ["done.txt"]
+    assert any(
+        decision["kind"] == "command_policy" and decision["outcome"] == "allowed"
+        for decision in manifest["policy_decisions"]
+    )
+
+    state = json.loads((project / ".engineering/state/harness-state.json").read_text(encoding="utf-8"))
+    assert state["tasks"]["tests"]["last_manifest"] == result["manifest"]
+
+
 def test_harness_blocks_non_allowlisted_command(tmp_path):
     project = tmp_path / "agent-project"
     project.mkdir()
