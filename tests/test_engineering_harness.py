@@ -886,6 +886,125 @@ def test_default_frontend_experience_planner_derives_common_cases(
 
 
 @pytest.mark.parametrize(
+    ("fixture_name", "expected_kind", "expected_scope", "expected_term"),
+    [
+        ("valid/dashboard.json", "dashboard", "frontend/**", "artifact"),
+        ("valid/submission-review.json", "submission-review", "frontend/**", "revision"),
+        ("valid/multi-role-app.json", "multi-role-app", "frontend/**", "audit"),
+        ("valid/api-only.json", "api-only", "openapi/**", "openapi"),
+        ("valid/cli-only.json", "cli-only", "cli/**", "documented commands"),
+    ],
+)
+def test_frontend_task_generator_proposes_kind_specific_tasks(
+    tmp_path,
+    fixture_name,
+    expected_kind,
+    expected_scope,
+    expected_term,
+):
+    project = tmp_path / expected_kind
+    project.mkdir()
+    engineering_dir = project / ".engineering"
+    engineering_dir.mkdir()
+    roadmap_path = engineering_dir / "roadmap.yaml"
+    roadmap_path.write_text((ROADMAP_FIXTURES / fixture_name).read_text(encoding="utf-8"), encoding="utf-8")
+
+    result = Harness(project).frontend_task_plan()
+
+    assert result["status"] == "proposed"
+    assert result["materialized"] is False
+    assert result["experience"]["kind"] == expected_kind
+    assert result["milestone"]["id"] == "frontend-visualization"
+    assert result["milestone"]["generated_by"] == "engineering-harness-frontend-task-generator"
+    assert len(result["tasks"]) == 1 + len(result["experience"]["e2e_journeys"])
+
+    contract_task = result["tasks"][0]
+    assert contract_task["frontend"]["task_kind"] == "experience-contract"
+    assert contract_task["file_scope"] == ["docs/**", "tests/**", "templates/**"]
+    assert contract_task["acceptance"][0]["command"].startswith("python3 ")
+    assert contract_task["e2e"]
+
+    journey_task = next(task for task in result["tasks"] if task["frontend"]["task_kind"] == "journey-check")
+    assert expected_scope in journey_task["file_scope"]
+    assert journey_task["acceptance"][0]["command"].startswith("python3 ")
+    assert journey_task["e2e"][0]["command"].startswith("python3 ")
+    assert expected_term in json.dumps(journey_task).lower()
+    assert "use existing project conventions" in journey_task["frontend"]["stack_policy"]
+
+
+def test_frontend_task_generator_materializes_derived_plan_and_validates(tmp_path):
+    project = tmp_path / "api-service"
+    project.mkdir()
+    engineering_dir = project / ".engineering"
+    engineering_dir.mkdir()
+    roadmap_path = engineering_dir / "roadmap.yaml"
+    roadmap = roadmap_without_experience(
+        "api-service",
+        task_title="Validate REST API OpenAPI endpoints with a documented client example.",
+    )
+    roadmap["project_kind"] = "api"
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    proposal = Harness(project).frontend_task_plan()
+    assert proposal["status"] == "proposed"
+    assert proposal["experience"]["source"] == "derived"
+    assert "frontend-visualization" not in roadmap_path.read_text(encoding="utf-8")
+
+    result = Harness(project).materialize_frontend_tasks(reason="test")
+
+    assert result["status"] == "materialized"
+    assert result["materialized"] is True
+    assert result["tasks_added"] == 2
+    updated = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    generated = updated["milestones"][-1]
+    assert generated["id"] == "frontend-visualization"
+    assert generated["experience_kind"] == "api-only"
+    assert generated["experience_source"] == "derived"
+    assert generated["tasks"][1]["file_scope"] == [
+        "src/**",
+        "api/**",
+        "openapi/**",
+        "docs/**",
+        "examples/**",
+        "tests/**",
+        "templates/**",
+        "package.json",
+        "pyproject.toml",
+    ]
+    assert generated["tasks"][1]["frontend"]["candidate_check_paths"]
+    assert Harness(project).validate_roadmap()["status"] == "passed"
+
+    log_path = project / ".engineering/state/decision-log.jsonl"
+    assert "frontend_task_generation" in log_path.read_text(encoding="utf-8")
+    assert Harness(project).materialize_frontend_tasks()["status"] == "skipped"
+
+
+def test_frontend_tasks_cli_proposes_by_default_and_materializes_on_flag(tmp_path):
+    project = tmp_path / "cli-tool"
+    project.mkdir()
+    init_project(project, "python-agent", name="cli-tool")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"][0]["title"] = "Validate CLI command output and generated reports."
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0]["command"] = "python3 -c \"print('ok')\""
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    before = roadmap_path.read_text(encoding="utf-8")
+
+    propose_exit = cli_main(["frontend-tasks", "--project-root", str(project), "--json"])
+    after_proposal = roadmap_path.read_text(encoding="utf-8")
+    materialize_exit = cli_main(["frontend-tasks", "--project-root", str(project), "--materialize", "--json"])
+
+    assert propose_exit == 0
+    assert after_proposal == before
+    assert materialize_exit == 0
+    updated = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    generated = updated["milestones"][-1]
+    assert generated["id"] == "frontend-visualization"
+    assert generated["experience_kind"] == "cli-only"
+    assert any("cli/**" in task["file_scope"] for task in generated["tasks"])
+
+
+@pytest.mark.parametrize(
     "fixture_name",
     [
         "valid/api-only.json",

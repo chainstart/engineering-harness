@@ -279,6 +279,33 @@ def cmd_advance(args: argparse.Namespace) -> int:
     return 0 if result["status"] in {"advanced", "exhausted", "disabled"} else 1
 
 
+def cmd_frontend_tasks(args: argparse.Namespace) -> int:
+    root = resolve_project_root(args)
+    harness = Harness(root)
+    if args.materialize:
+        result = harness.materialize_frontend_tasks(milestone_id=args.milestone_id, reason=args.reason)
+    else:
+        result = harness.frontend_task_plan(milestone_id=args.milestone_id)
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(f"Frontend tasks: {result['status']} - {result['message']}")
+        experience = result.get("experience") or {}
+        if experience:
+            print(f"Experience: {experience.get('kind') or 'unknown'} ({experience.get('source') or 'unknown'})")
+        milestone = result.get("milestone") or {}
+        if milestone:
+            print(f"Milestone: {milestone.get('id')} - {milestone.get('title')}")
+        for task in result.get("tasks", []):
+            print(f"- {task.get('id')}: {task.get('title')}")
+            print(f"  file_scope: {', '.join(task.get('file_scope', []))}")
+            print(f"  acceptance: {len(task.get('acceptance', []))} check(s)")
+            print(f"  e2e: {len(task.get('e2e', []))} journey check(s)")
+        if not args.materialize and result.get("status") == "proposed":
+            print("Run again with --materialize to append the milestone to the roadmap.")
+    return 0 if result["status"] in {"proposed", "materialized", "skipped"} else 1
+
+
 def cmd_self_iterate(args: argparse.Namespace) -> int:
     root = resolve_project_root(args)
     harness = Harness(root)
@@ -459,6 +486,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("next", "Show the next selected task", cmd_next),
         ("run", "Run the next or selected task acceptance checks", cmd_run),
         ("advance", "Materialize the next continuation milestone into the roadmap", cmd_advance),
+        ("frontend-tasks", "Propose or materialize frontend roadmap tasks from the experience plan", cmd_frontend_tasks),
         ("self-iterate", "Assess current state and append the next continuation stage", cmd_self_iterate),
         ("drive", "Continuously run pending roadmap tasks until complete, blocked, failed, or out of budget", cmd_drive),
     ]:
@@ -483,6 +511,10 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "advance":
             command.add_argument("--max-new-milestones", type=int, default=1)
             command.add_argument("--reason", default="manual_advance")
+        if name == "frontend-tasks":
+            command.add_argument("--materialize", action="store_true")
+            command.add_argument("--milestone-id", default="frontend-visualization")
+            command.add_argument("--reason", default="manual_frontend_task_generation")
         if name == "self-iterate":
             command.add_argument("--reason", default="manual_self_iteration")
             command.add_argument("--allow-live", action="store_true")

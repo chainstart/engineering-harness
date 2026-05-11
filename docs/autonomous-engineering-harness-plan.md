@@ -254,6 +254,16 @@ Acceptance:
 - `engh status` exposes frontend readiness and missing E2E journeys.
 - Frontend-related tasks are generated with file scope and acceptance commands.
 
+Current helper:
+
+- `engh frontend-tasks` proposes a `frontend-visualization` milestone from the explicit
+  `experience` block or the derived default plan.
+- `engh frontend-tasks --materialize` appends that milestone to the roadmap and records a decision
+  log event.
+- Generated tasks remain framework-neutral. Dashboard, submission-review, and multi-role projects
+  may use browser E2E checks if the project already has them; API-only and CLI-only projects can use
+  documented examples, API tests, CLI tests, or local scripts instead.
+
 ### Stage 7: Frontend Templates and UI Workflows
 
 Goal: provide practical frontend starting points without forcing every project into one stack.

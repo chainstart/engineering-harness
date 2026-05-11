@@ -250,3 +250,17 @@ its domain. Some projects only need a dashboard for autonomous worker state, som
 and review portal, and some need multi-role authenticated workflows. Roadmap tasks can model those
 surfaces explicitly and use `e2e` commands to exercise the real user path after normal unit and
 integration checks pass.
+
+`engh frontend-tasks` turns an explicit or derived `experience` plan into stack-neutral roadmap
+tasks. The command proposes by default and does not edit the roadmap unless `--materialize` is
+provided.
+
+```bash
+engh frontend-tasks --project-root /home/biostar/work/projects/utopiai
+engh frontend-tasks --project-root /home/biostar/work/projects/utopiai --materialize
+```
+
+Generated tasks include `file_scope`, local acceptance commands, and E2E journey checks for
+dashboard, submission-review, multi-role, API-only, and CLI-only projects. The tasks ask the project
+to use its existing UI, API, or CLI conventions; the harness does not require a specific frontend
+framework or browser test runner.

@@ -463,7 +463,8 @@
             "src/engineering_harness/**",
             "tests/**",
             "docs/**",
-            "templates/**"
+            "templates/**",
+            "README.md"
           ],
           "implementation": [
             {
@@ -822,7 +823,8 @@
               "src/engineering_harness/**",
               "tests/**",
               "docs/**",
-              "templates/**"
+              "templates/**",
+              "README.md"
             ],
             "implementation": [
               {

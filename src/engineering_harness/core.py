@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import fnmatch
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -177,6 +179,150 @@ EXPERIENCE_KEYWORDS: dict[str, tuple[str, ...]] = {
         "monitor",
         "observability",
     ),
+}
+FRONTEND_TASK_MILESTONE_ID = "frontend-visualization"
+FRONTEND_TASK_GENERATOR = "engineering-harness-frontend-task-generator"
+FRONTEND_KIND_LABELS = {
+    "dashboard": "operator dashboard",
+    "submission-review": "submission review workflow",
+    "multi-role-app": "multi-role application",
+    "api-only": "API-first experience",
+    "cli-only": "CLI-first experience",
+}
+FRONTEND_KIND_TASK_GUIDANCE: dict[str, dict[str, Any]] = {
+    "dashboard": {
+        "file_scope": [
+            "src/**",
+            "app/**",
+            "web/**",
+            "frontend/**",
+            "ui/**",
+            "components/**",
+            "tests/**",
+            "docs/**",
+            "templates/**",
+            "package.json",
+            "pyproject.toml",
+        ],
+        "acceptance_terms": ["dashboard", "status", "queue", "artifact", "loading", "empty", "error"],
+        "implementation_focus": (
+            "Build or document the operator dashboard using the project's existing UI conventions. "
+            "Cover status, queue/detail state, artifacts, loading, empty, and error states."
+        ),
+        "journey_candidates": (
+            "tests/e2e/{slug}.spec.ts",
+            "tests/e2e/{slug}.spec.js",
+            "tests/e2e/{slug}.test.ts",
+            "tests/e2e/{slug}.py",
+            "e2e/{slug}.spec.ts",
+            "docs/e2e/{slug}.md",
+        ),
+    },
+    "submission-review": {
+        "file_scope": [
+            "src/**",
+            "app/**",
+            "web/**",
+            "frontend/**",
+            "ui/**",
+            "components/**",
+            "tests/**",
+            "docs/**",
+            "templates/**",
+            "package.json",
+            "pyproject.toml",
+        ],
+        "acceptance_terms": ["submission", "reviewer", "revision", "comments", "decision", "status timeline"],
+        "implementation_focus": (
+            "Build or document the student and reviewer surfaces using the project's existing stack. "
+            "Cover submission upload, reviewer comments, revision upload, decision state, and timeline states."
+        ),
+        "journey_candidates": (
+            "tests/e2e/{slug}.spec.ts",
+            "tests/e2e/{slug}.spec.js",
+            "tests/e2e/{slug}.test.ts",
+            "tests/e2e/{slug}.py",
+            "e2e/{slug}.spec.ts",
+            "docs/e2e/{slug}.md",
+        ),
+    },
+    "multi-role-app": {
+        "file_scope": [
+            "src/**",
+            "app/**",
+            "web/**",
+            "frontend/**",
+            "ui/**",
+            "components/**",
+            "tests/**",
+            "docs/**",
+            "templates/**",
+            "package.json",
+            "pyproject.toml",
+        ],
+        "acceptance_terms": ["role", "login", "permission", "approval", "audit", "denied"],
+        "implementation_focus": (
+            "Build or document authenticated role-specific surfaces using the project's existing stack. "
+            "Cover login, role routes, permission denial, approval handoff, and audit history."
+        ),
+        "journey_candidates": (
+            "tests/e2e/{slug}.spec.ts",
+            "tests/e2e/{slug}.spec.js",
+            "tests/e2e/{slug}.test.ts",
+            "tests/e2e/{slug}.py",
+            "e2e/{slug}.spec.ts",
+            "docs/e2e/{slug}.md",
+        ),
+    },
+    "api-only": {
+        "file_scope": [
+            "src/**",
+            "api/**",
+            "openapi/**",
+            "docs/**",
+            "examples/**",
+            "tests/**",
+            "templates/**",
+            "package.json",
+            "pyproject.toml",
+        ],
+        "acceptance_terms": ["api", "openapi", "example", "request", "response", "status"],
+        "implementation_focus": (
+            "Build or document the API-first user path without requiring a browser UI. "
+            "Cover API reference, example client flow, request/response expectations, auth if required, and service status."
+        ),
+        "journey_candidates": (
+            "tests/e2e/{slug}.py",
+            "tests/api/{slug}.py",
+            "tests/e2e/{slug}.sh",
+            "examples/{slug}.md",
+            "docs/e2e/{slug}.md",
+        ),
+    },
+    "cli-only": {
+        "file_scope": [
+            "src/**",
+            "cli/**",
+            "docs/**",
+            "examples/**",
+            "tests/**",
+            "templates/**",
+            "package.json",
+            "pyproject.toml",
+        ],
+        "acceptance_terms": ["cli", "command", "example", "output", "report"],
+        "implementation_focus": (
+            "Build or document the CLI-first user path without requiring a browser UI. "
+            "Cover documented commands, inputs, output/report inspection, failure messages, and repeatable examples."
+        ),
+        "journey_candidates": (
+            "tests/e2e/{slug}.py",
+            "tests/cli/{slug}.py",
+            "tests/e2e/{slug}.sh",
+            "examples/{slug}.md",
+            "docs/e2e/{slug}.md",
+        ),
+    },
 }
 
 
@@ -1058,6 +1204,422 @@ Rules:
             if re.search(pattern, text):
                 matches.append(keyword)
         return matches
+
+    def frontend_task_plan(
+        self,
+        *,
+        milestone_id: str = FRONTEND_TASK_MILESTONE_ID,
+    ) -> dict[str, Any]:
+        experience = self.frontend_experience_plan()
+        errors: list[str] = []
+        self._validate_experience_payload(experience, errors=errors)
+        if errors:
+            return {
+                "status": "error",
+                "message": "frontend experience plan is invalid",
+                "errors": errors,
+                "materialized": False,
+                "experience": experience,
+                "milestone": None,
+                "tasks": [],
+            }
+
+        existing_task_ids = {task.id for task in self.iter_tasks()}
+        milestone = self._build_frontend_milestone(
+            experience,
+            milestone_id=milestone_id,
+            existing_task_ids=existing_task_ids,
+        )
+        tasks = milestone.get("tasks", []) if isinstance(milestone.get("tasks"), list) else []
+        return {
+            "status": "proposed",
+            "message": f"proposed {len(tasks)} frontend task(s) from {experience.get('source')} experience plan",
+            "materialized": False,
+            "project": str(self.roadmap.get("project", self.project_root.name)),
+            "roadmap": str(self.roadmap_path),
+            "experience": experience,
+            "milestone": milestone,
+            "tasks": tasks,
+            "tasks_added": 0,
+        }
+
+    def materialize_frontend_tasks(
+        self,
+        *,
+        milestone_id: str = FRONTEND_TASK_MILESTONE_ID,
+        reason: str = "manual_frontend_task_generation",
+    ) -> dict[str, Any]:
+        milestones = self.roadmap.get("milestones")
+        if milestones is not None and not isinstance(milestones, list):
+            return {
+                "status": "error",
+                "message": "`milestones` must be a list before frontend tasks can be materialized",
+                "materialized": False,
+                "experience": self.frontend_experience_plan(),
+                "milestone": None,
+                "tasks": [],
+            }
+
+        existing_milestone = None
+        for milestone in milestones or []:
+            if isinstance(milestone, dict) and str(milestone.get("id", "")) == milestone_id:
+                existing_milestone = milestone
+                break
+        if existing_milestone is not None:
+            tasks = existing_milestone.get("tasks", []) if isinstance(existing_milestone.get("tasks"), list) else []
+            return {
+                "status": "skipped",
+                "message": f"milestone `{milestone_id}` already exists",
+                "materialized": False,
+                "project": str(self.roadmap.get("project", self.project_root.name)),
+                "roadmap": str(self.roadmap_path),
+                "experience": self.frontend_experience_plan(),
+                "milestone": existing_milestone,
+                "tasks": tasks,
+                "tasks_added": 0,
+            }
+
+        proposal = self.frontend_task_plan(milestone_id=milestone_id)
+        if proposal["status"] != "proposed":
+            return proposal
+
+        if milestones is None:
+            milestones = []
+            self.roadmap["milestones"] = milestones
+        milestone = proposal["milestone"]
+        milestones.append(milestone)
+        self.save_roadmap()
+        tasks = milestone.get("tasks", []) if isinstance(milestone, dict) else []
+        event = {
+            "at": utc_now(),
+            "event": "frontend_task_generation",
+            "reason": reason,
+            "milestone_id": milestone_id,
+            "tasks_added": len(tasks),
+            "experience_kind": proposal["experience"].get("kind"),
+            "experience_source": proposal["experience"].get("source"),
+        }
+        append_jsonl(self.decision_log_path, event)
+        return {
+            **proposal,
+            "status": "materialized",
+            "message": f"materialized {len(tasks)} frontend task(s)",
+            "materialized": True,
+            "tasks_added": len(tasks),
+        }
+
+    def _build_frontend_milestone(
+        self,
+        experience: dict[str, Any],
+        *,
+        milestone_id: str,
+        existing_task_ids: set[str],
+    ) -> dict[str, Any]:
+        kind = str(experience.get("kind", "dashboard"))
+        label = FRONTEND_KIND_LABELS.get(kind, kind.replace("-", " "))
+        generated_at = utc_now()
+        task_ids = set(existing_task_ids)
+        tasks = [
+            self._frontend_contract_task(
+                experience,
+                kind=kind,
+                label=label,
+                task_ids=task_ids,
+                generated_at=generated_at,
+            )
+        ]
+        for journey in experience.get("e2e_journeys", []):
+            if isinstance(journey, dict):
+                tasks.append(
+                    self._frontend_journey_task(
+                        experience,
+                        journey,
+                        kind=kind,
+                        label=label,
+                        task_ids=task_ids,
+                        generated_at=generated_at,
+                    )
+                )
+        return {
+            "id": milestone_id,
+            "title": "Frontend Visualization",
+            "status": "planned",
+            "objective": f"Create stack-neutral {label} tasks and E2E journey gates from the roadmap experience plan.",
+            "generated_by": FRONTEND_TASK_GENERATOR,
+            "generated_at": generated_at,
+            "experience_kind": kind,
+            "experience_source": experience.get("source"),
+            "tasks": tasks,
+        }
+
+    def _frontend_contract_task(
+        self,
+        experience: dict[str, Any],
+        *,
+        kind: str,
+        label: str,
+        task_ids: set[str],
+        generated_at: str,
+    ) -> dict[str, Any]:
+        task_id = self._unique_frontend_task_id(f"frontend-{kind}-experience-contract", task_ids)
+        personas = self._string_items(experience.get("personas"))
+        surfaces = self._string_items(experience.get("primary_surfaces"))
+        journeys = [
+            journey
+            for journey in experience.get("e2e_journeys", [])
+            if isinstance(journey, dict)
+        ]
+        required_terms = [kind, *personas, *surfaces, *[str(journey.get("id", "")) for journey in journeys]]
+        return {
+            "id": task_id,
+            "title": f"Define {label} experience contract",
+            "status": "pending",
+            "max_attempts": 2,
+            "max_task_iterations": 2,
+            "manual_approval_required": False,
+            "agent_approval_required": True,
+            "file_scope": ["docs/**", "tests/**", "templates/**"],
+            "implementation": [
+                {
+                    "name": "Draft stack-neutral experience contract",
+                    "executor": "codex",
+                    "prompt": self._frontend_contract_prompt(experience, label=label),
+                    "timeout_seconds": 3600,
+                    "sandbox": "workspace-write",
+                }
+            ],
+            "acceptance": [
+                {
+                    "name": f"{label} experience contract is documented",
+                    "command": self._content_check_command(
+                        "docs/frontend-experience.md",
+                        required_terms,
+                        missing_label="missing frontend experience terms",
+                    ),
+                    "timeout_seconds": 60,
+                }
+            ],
+            "e2e": [
+                {
+                    "name": f"{journey.get('id')} journey is represented in the experience contract",
+                    "command": self._content_check_command(
+                        "docs/frontend-experience.md",
+                        [str(journey.get("id", "")), str(journey.get("persona", ""))],
+                        missing_label="missing frontend journey terms",
+                    ),
+                    "timeout_seconds": 60,
+                }
+                for journey in journeys
+            ],
+            "frontend": self._frontend_task_metadata(experience, task_kind="experience-contract"),
+            "generated_by": FRONTEND_TASK_GENERATOR,
+            "generated_at": generated_at,
+        }
+
+    def _frontend_journey_task(
+        self,
+        experience: dict[str, Any],
+        journey: dict[str, Any],
+        *,
+        kind: str,
+        label: str,
+        task_ids: set[str],
+        generated_at: str,
+    ) -> dict[str, Any]:
+        guidance = FRONTEND_KIND_TASK_GUIDANCE[kind]
+        journey_id = str(journey.get("id", "")).strip()
+        journey_slug = self._slugify(journey_id or "journey")
+        task_id = self._unique_frontend_task_id(f"frontend-{kind}-{journey_slug}", task_ids)
+        persona = str(journey.get("persona", "")).strip()
+        auth = experience.get("auth") if isinstance(experience.get("auth"), dict) else {}
+        roles = self._string_items(auth.get("roles") if isinstance(auth, dict) else [])
+        surfaces = self._string_items(experience.get("primary_surfaces"))
+        acceptance_terms = [
+            kind,
+            journey_id,
+            persona,
+            *roles,
+            *surfaces[:4],
+            *self._string_items(guidance.get("acceptance_terms")),
+        ]
+        candidates = [str(pattern).format(slug=journey_slug) for pattern in guidance["journey_candidates"]]
+        return {
+            "id": task_id,
+            "title": f"Add {label} journey check for {journey_id}",
+            "status": "pending",
+            "max_attempts": 2,
+            "max_task_iterations": 2,
+            "manual_approval_required": False,
+            "agent_approval_required": True,
+            "file_scope": list(guidance["file_scope"]),
+            "implementation": [
+                {
+                    "name": f"Implement {journey_id} experience check",
+                    "executor": "codex",
+                    "prompt": self._frontend_journey_prompt(
+                        experience,
+                        journey,
+                        label=label,
+                        guidance=str(guidance["implementation_focus"]),
+                        candidates=candidates,
+                    ),
+                    "timeout_seconds": 3600,
+                    "sandbox": "workspace-write",
+                }
+            ],
+            "acceptance": [
+                {
+                    "name": f"{label} acceptance criteria cover {journey_id}",
+                    "command": self._content_check_command(
+                        "docs/frontend-experience.md",
+                        acceptance_terms,
+                        missing_label="missing frontend acceptance terms",
+                    ),
+                    "timeout_seconds": 60,
+                }
+            ],
+            "e2e": [
+                {
+                    "name": f"{journey_id} e2e journey check exists",
+                    "command": self._candidate_content_check_command(
+                        candidates,
+                        [journey_id, persona],
+                        missing_label="missing e2e journey check",
+                    ),
+                    "timeout_seconds": 120,
+                }
+            ],
+            "frontend": self._frontend_task_metadata(
+                experience,
+                task_kind="journey-check",
+                journey=journey,
+                candidate_paths=candidates,
+            ),
+            "generated_by": FRONTEND_TASK_GENERATOR,
+            "generated_at": generated_at,
+        }
+
+    def _frontend_contract_prompt(self, experience: dict[str, Any], *, label: str) -> str:
+        return (
+            "Create or update `docs/frontend-experience.md` as a stack-neutral experience contract.\n"
+            f"Experience kind: {experience.get('kind')} ({label}).\n"
+            f"Personas: {', '.join(self._string_items(experience.get('personas')))}.\n"
+            f"Primary surfaces: {', '.join(self._string_items(experience.get('primary_surfaces')))}.\n"
+            f"Auth: {json.dumps(experience.get('auth', {}), sort_keys=True)}.\n"
+            f"E2E journeys: {json.dumps(experience.get('e2e_journeys', []), sort_keys=True)}.\n"
+            "Document expected screens or non-browser surfaces, loading/empty/error states, role or auth boundaries, "
+            "and the files or commands that will exercise each journey. Use the existing project conventions; "
+            "do not introduce a frontend framework solely to satisfy this task."
+        )
+
+    def _frontend_journey_prompt(
+        self,
+        experience: dict[str, Any],
+        journey: dict[str, Any],
+        *,
+        label: str,
+        guidance: str,
+        candidates: list[str],
+    ) -> str:
+        return (
+            f"Implement or document the `{journey.get('id')}` {label} journey check using the project's existing stack.\n"
+            f"Persona: {journey.get('persona')}.\n"
+            f"Goal: {journey.get('goal')}.\n"
+            f"Experience kind: {experience.get('kind')}.\n"
+            f"Guidance: {guidance}\n"
+            "Keep the work local and deterministic. Browser projects may use their existing browser test framework; "
+            "API-only and CLI-only projects may use documented examples, API tests, CLI tests, or shell/Python checks.\n"
+            f"Place journey evidence or executable checks in one of: {', '.join(candidates)}.\n"
+            "Update `docs/frontend-experience.md` with the acceptance criteria and the selected E2E command. "
+            "Do not require private services, live deployments, paid accounts, or a specific frontend framework."
+        )
+
+    def _frontend_task_metadata(
+        self,
+        experience: dict[str, Any],
+        *,
+        task_kind: str,
+        journey: dict[str, Any] | None = None,
+        candidate_paths: list[str] | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "task_kind": task_kind,
+            "experience_kind": experience.get("kind"),
+            "experience_source": experience.get("source"),
+            "personas": self._string_items(experience.get("personas")),
+            "primary_surfaces": self._string_items(experience.get("primary_surfaces")),
+            "auth": experience.get("auth") if isinstance(experience.get("auth"), dict) else {},
+            "stack_policy": "use existing project conventions; no required frontend framework",
+        }
+        if journey is not None:
+            payload["e2e_journey"] = {
+                "id": str(journey.get("id", "")),
+                "persona": str(journey.get("persona", "")),
+                "goal": str(journey.get("goal", "")),
+            }
+        if candidate_paths is not None:
+            payload["candidate_check_paths"] = candidate_paths
+        return payload
+
+    def _unique_frontend_task_id(self, base: str, task_ids: set[str]) -> str:
+        base = self._slugify(base)
+        candidate = base
+        counter = 2
+        while candidate in task_ids:
+            candidate = f"{base}-{counter}"
+            counter += 1
+        task_ids.add(candidate)
+        return candidate
+
+    def _slugify(self, value: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
+        return slug or "item"
+
+    def _string_items(self, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value if isinstance(item, str) and str(item).strip()]
+
+    def _content_check_command(
+        self,
+        path: str,
+        required_terms: list[str],
+        *,
+        missing_label: str,
+    ) -> str:
+        terms = [term for term in dict.fromkeys(required_terms) if str(term).strip()]
+        encoded_terms = self._b64_json(terms)
+        return (
+            "python3 -c \"import base64,json; from pathlib import Path; "
+            f"p=Path('{path}'); assert p.exists(), 'missing {path}'; "
+            "text=p.read_text(encoding='utf-8', errors='ignore').lower(); "
+            f"terms=json.loads(base64.b64decode('{encoded_terms}')); "
+            "missing=[term for term in terms if str(term).lower() not in text]; "
+            f"assert not missing, '{missing_label}: ' + ', '.join(missing)\""
+        )
+
+    def _candidate_content_check_command(
+        self,
+        candidates: list[str],
+        required_terms: list[str],
+        *,
+        missing_label: str,
+    ) -> str:
+        encoded_candidates = self._b64_json(candidates)
+        encoded_terms = self._b64_json([term for term in dict.fromkeys(required_terms) if str(term).strip()])
+        return (
+            "python3 -c \"import base64,json; from pathlib import Path; "
+            f"candidates=json.loads(base64.b64decode('{encoded_candidates}')); "
+            "paths=[Path(item) for item in candidates if Path(item).exists()]; "
+            f"assert paths, '{missing_label}; expected one of: ' + ', '.join(candidates); "
+            "text='\\n'.join(path.read_text(encoding='utf-8', errors='ignore').lower() for path in paths); "
+            f"terms=json.loads(base64.b64decode('{encoded_terms}')); "
+            "missing=[term for term in terms if str(term).lower() not in text]; "
+            f"assert not missing, '{missing_label} terms: ' + ', '.join(missing)\""
+        )
+
+    def _b64_json(self, value: Any) -> str:
+        return base64.b64encode(json.dumps(value).encode("utf-8")).decode("ascii")
 
     def manifest_index(self) -> dict[str, Any]:
         if self.manifest_index_path.exists():
