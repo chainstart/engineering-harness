@@ -195,6 +195,92 @@
           "generated_at": "2026-05-11T13:28:43Z"
         }
       ]
+    },
+    {
+      "id": "run-manifest-evidence",
+      "title": "Run Manifest and Evidence Model",
+      "status": "planned",
+      "objective": "Record every task run as auditable machine-readable evidence.",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-11T14:04:06Z",
+      "tasks": [
+        {
+          "id": "run-manifest-writer",
+          "title": "Write JSON run manifests beside Markdown reports",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 2,
+          "manual_approval_required": false,
+          "agent_approval_required": false,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 1800,
+              "prompt": "Implement machine-readable JSON task run manifests beside Markdown task reports. Include project, task, milestone, status, message, started/finished timestamps, command run summaries, safety data, report path, and enough git context to audit the run. Add focused pytest coverage that runs a task and asserts a matching manifest exists and contains the expected fields. Keep changes scoped to src/engineering_harness, tests, and docs."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 1200,
+              "prompt": "Fix failing manifest writer tests while preserving the JSON manifest contract and backward-compatible Markdown reports."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "manifest tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-11T14:04:06Z"
+        },
+        {
+          "id": "manifest-index",
+          "title": "Index run manifests for dashboards and CI summaries",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 2,
+          "manual_approval_required": false,
+          "agent_approval_required": false,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 1800,
+              "prompt": "Implement a manifest index that lists task run manifests for dashboard and CI summary use. Add a Harness API and CLI/status-facing behavior if appropriate, with tests that create multiple task runs and assert the index can be read deterministically. Keep changes scoped to src/engineering_harness, tests, and docs."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 1200,
+              "prompt": "Fix failing manifest index tests while keeping the index deterministic and suitable for dashboards and CI summaries."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "manifest index tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-11T14:04:06Z"
+        }
+      ]
     }
   ],
   "continuation": {
