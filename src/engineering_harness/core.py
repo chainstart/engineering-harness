@@ -1161,16 +1161,16 @@ Rules:
             errors.append(f"{location} has unknown executor `{executor}`")
             return
         executor_metadata = executor_adapter.metadata
-        if executor_metadata.uses_command_policy:
+        if executor_metadata.input_mode == "command":
             command = item.get("command")
             if not str(command or "").strip():
-                errors.append(f"{location} shell command is required")
-            else:
+                errors.append(f"{location} {executor} command is required")
+            elif executor_metadata.uses_command_policy:
                 allowed, reason = self.command_allowed(str(command))
                 if not allowed:
                     warnings.append(f"{location} command is not currently allowlisted: {reason}")
         if executor_metadata.input_mode == "prompt" and not str(item.get("prompt", "") or item.get("command", "")).strip():
-            errors.append(f"{location} codex prompt is required")
+            errors.append(f"{location} {executor} prompt is required")
         try:
             if int(item.get("timeout_seconds", self.default_timeout)) <= 0:
                 errors.append(f"{location} timeout_seconds must be positive")
@@ -1600,6 +1600,8 @@ Rules:
                 continue
             run = self._run_command(command, phase=phase, task=task)
             runs.append(run)
+            if command.required and run.status == "blocked":
+                return "blocked", run.stderr or f"Required {phase} command blocked: {command.name}"
             if command.required and run.returncode != 0:
                 return "failed", f"Required {phase} command failed: {command.name}"
         return "passed", f"All required {phase} commands passed."

@@ -4,11 +4,20 @@ import json
 import subprocess
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from engineering_harness.core import Harness, discover_projects, init_project
-from engineering_harness.executors import ExecutorMetadata, ExecutorRegistry, ExecutorResult
+from engineering_harness.executors import (
+    DAGGER_ENABLE_ENV,
+    DaggerExecutorAdapter,
+    ExecutorInvocation,
+    ExecutorMetadata,
+    ExecutorRegistry,
+    ExecutorResult,
+    default_executor_registry,
+)
 from engineering_harness.cli import main as cli_main
 from engineering_harness.profiles import list_profiles
 
@@ -373,6 +382,102 @@ def test_codex_executor_selection_uses_registered_adapter_and_preparation(tmp_pa
     assert result["runs"][0]["command"] == "recording-codex <task:tests>"
     assert result["runs"][0]["executor_metadata"]["adapter"] == "test.recording-codex"
     assert result["runs"][0]["executor_result"]["metadata"] == {"selected": "codex"}
+
+
+def test_dagger_executor_is_discoverable_and_validates_command_payload(tmp_path):
+    registry = default_executor_registry()
+    assert "dagger" in registry.ids()
+    assert registry.metadata_for("dagger")["adapter"] == "builtin.dagger"
+
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0] = {
+        "name": "dagger smoke",
+        "executor": "dagger",
+        "command": "call test --source=.",
+    }
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    assert Harness(project).validate_roadmap()["status"] == "passed"
+
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0].pop("command")
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    invalid = Harness(project).validate_roadmap()
+
+    assert invalid["status"] == "failed"
+    assert any("dagger command is required" in error for error in invalid["errors"])
+
+
+def test_dagger_executor_selection_blocks_until_explicitly_enabled(tmp_path, monkeypatch):
+    monkeypatch.delenv(DAGGER_ENABLE_ENV, raising=False)
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0] = {
+        "name": "dagger smoke",
+        "executor": "dagger",
+        "command": "call test --source=.",
+    }
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    result = harness.run_task(harness.next_task())
+
+    assert result["status"] == "blocked"
+    assert DAGGER_ENABLE_ENV in result["message"]
+    run = result["runs"][0]
+    assert run["executor"] == "dagger"
+    assert run["command"] == "dagger call test --source=. <task:tests>"
+    assert run["executor_metadata"]["kind"] == "container"
+    assert run["executor_metadata"]["capabilities"][-1] == "requires_explicit_configuration"
+    assert run["executor_result"]["status"] == "blocked"
+    assert run["executor_result"]["metadata"] == {
+        "configured": False,
+        "required_environment": DAGGER_ENABLE_ENV,
+    }
+
+
+def test_dagger_executor_invokes_local_cli_when_enabled(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(args, cwd, text, capture_output, timeout, env):
+        calls.append(
+            {
+                "args": args,
+                "cwd": cwd,
+                "text": text,
+                "capture_output": capture_output,
+                "timeout": timeout,
+                "env": env,
+            }
+        )
+        return SimpleNamespace(returncode=0, stdout="dagger ok\n", stderr="")
+
+    monkeypatch.setenv(DAGGER_ENABLE_ENV, "1")
+    monkeypatch.setattr("engineering_harness.executors.subprocess.run", fake_run)
+    invocation = ExecutorInvocation(
+        project_root=tmp_path,
+        task_id="dagger-task",
+        name="dagger smoke",
+        command="dagger call smoke --source=.",
+        prompt=None,
+        timeout_seconds=15,
+    )
+
+    result = DaggerExecutorAdapter().execute(invocation)
+
+    assert result.status == "passed"
+    assert result.stdout == "dagger ok\n"
+    assert result.metadata == {"configured": True}
+    assert calls[0]["args"] == ["dagger", "call", "smoke", "--source=."]
+    assert calls[0]["cwd"] == tmp_path
+    assert calls[0]["env"]["ENGINEERING_HARNESS"] == "1"
+    assert calls[0]["env"][DAGGER_ENABLE_ENV] == "1"
 
 
 def test_manifest_index_keeps_repeated_task_runs_with_same_slug(tmp_path, monkeypatch):

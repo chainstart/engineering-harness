@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -10,6 +11,7 @@ from typing import Any, Protocol
 
 EXECUTOR_CONTRACT_VERSION = 1
 EXECUTOR_RESULT_CONTRACT_VERSION = 1
+DAGGER_ENABLE_ENV = "ENGINEERING_HARNESS_ENABLE_DAGGER"
 
 
 def _utc_now() -> str:
@@ -259,8 +261,132 @@ class CodexExecutorAdapter:
             )
 
 
+class DaggerExecutorAdapter:
+    metadata = ExecutorMetadata(
+        id="dagger",
+        name="Dagger",
+        kind="container",
+        adapter="builtin.dagger",
+        input_mode="command",
+        capabilities=(
+            "local_dagger_cli",
+            "containerized_execution",
+            "exit_code",
+            "stdout",
+            "stderr",
+            "requires_explicit_configuration",
+        ),
+    )
+
+    def prepare_invocation(
+        self,
+        invocation: ExecutorInvocation,
+        task_context: ExecutorTaskContext,
+    ) -> ExecutorInvocation:
+        return invocation
+
+    def display_command(self, invocation: ExecutorInvocation) -> str:
+        command = (invocation.command or "").strip()
+        if command.startswith("dagger "):
+            return f"{command} <task:{invocation.task_id}>"
+        if command:
+            return f"dagger {command} <task:{invocation.task_id}>"
+        return f"dagger <task:{invocation.task_id}>"
+
+    def execute(self, invocation: ExecutorInvocation) -> ExecutorResult:
+        started_at = _utc_now()
+        env = invocation.env()
+        if env.get(DAGGER_ENABLE_ENV, "").lower() not in {"1", "true", "yes", "on"}:
+            return ExecutorResult(
+                status="blocked",
+                returncode=None,
+                started_at=started_at,
+                finished_at=_utc_now(),
+                stdout="",
+                stderr=(
+                    "Dagger executor is disabled. Set "
+                    f"{DAGGER_ENABLE_ENV}=1 to enable local Dagger CLI execution."
+                ),
+                metadata={
+                    "configured": False,
+                    "required_environment": DAGGER_ENABLE_ENV,
+                },
+            )
+
+        try:
+            args = self._dagger_args(invocation.command or "")
+        except ValueError as exc:
+            return ExecutorResult(
+                status="failed",
+                returncode=2,
+                started_at=started_at,
+                finished_at=_utc_now(),
+                stdout="",
+                stderr=f"Invalid Dagger command: {exc}",
+                metadata={"configured": True},
+            )
+
+        if not args:
+            return ExecutorResult(
+                status="failed",
+                returncode=2,
+                started_at=started_at,
+                finished_at=_utc_now(),
+                stdout="",
+                stderr="Dagger command is missing.",
+                metadata={"configured": True},
+            )
+
+        try:
+            completed = subprocess.run(
+                ["dagger", *args],
+                cwd=invocation.project_root,
+                text=True,
+                capture_output=True,
+                timeout=invocation.timeout_seconds,
+                env=env,
+            )
+            return ExecutorResult(
+                status="passed" if completed.returncode == 0 else "failed",
+                returncode=completed.returncode,
+                started_at=started_at,
+                finished_at=_utc_now(),
+                stdout=redact(completed.stdout[-8000:]),
+                stderr=redact(completed.stderr[-8000:]),
+                metadata={"configured": True},
+            )
+        except FileNotFoundError:
+            return ExecutorResult(
+                status="blocked",
+                returncode=None,
+                started_at=started_at,
+                finished_at=_utc_now(),
+                stdout="",
+                stderr="Dagger CLI was not found on PATH.",
+                metadata={"configured": True, "missing_binary": "dagger"},
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+            return ExecutorResult(
+                status="failed",
+                returncode=None,
+                started_at=started_at,
+                finished_at=_utc_now(),
+                stdout=redact(stdout[-8000:]),
+                stderr=f"Dagger command timed out after {invocation.timeout_seconds} seconds.",
+                metadata={"configured": True, "timed_out": True},
+            )
+
+    def _dagger_args(self, command: str) -> list[str]:
+        args = shlex.split(command)
+        if args[:1] == ["dagger"]:
+            return args[1:]
+        return args
+
+
 ShellExecutor = ShellExecutorAdapter
 CodexExecutor = CodexExecutorAdapter
+DaggerExecutor = DaggerExecutorAdapter
 
 
 class ExecutorRegistry:
@@ -291,4 +417,4 @@ class ExecutorRegistry:
 
 
 def default_executor_registry() -> ExecutorRegistry:
-    return ExecutorRegistry((ShellExecutorAdapter(), CodexExecutorAdapter()))
+    return ExecutorRegistry((ShellExecutorAdapter(), CodexExecutorAdapter(), DaggerExecutorAdapter()))

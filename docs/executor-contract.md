@@ -17,6 +17,8 @@ Built-in executors are registered in `default_executor_registry()`:
 
 - `shell`: local `/bin/bash` process execution. It uses the command allowlist policy.
 - `codex`: `codex exec` agent execution. It requires `--allow-agent`.
+- `dagger`: local Dagger CLI execution. It is discoverable by roadmap validation, but execution is
+  blocked unless Dagger support is explicitly enabled.
 
 Tests and future integrations can pass a custom registry to `Harness(..., executor_registry=...)`.
 Unknown executor ids fail roadmap validation and task preflight with the same clear messages used
@@ -46,3 +48,30 @@ Each run also includes normalized executor fields:
 
 This keeps reports and manifest readers compatible while giving future adapters a stable place to
 record capabilities and result details.
+
+## Dagger Adapter Stub
+
+The Dagger adapter is intentionally local-first. Roadmaps select it with `executor: "dagger"` and
+provide a Dagger CLI command in `command`. The command may be written either as arguments after the
+binary, such as `call test --source=.`, or with the leading binary, such as
+`dagger call test --source=.`. The adapter records the auditable display command as `dagger ...`,
+runs from the project root, captures stdout/stderr into the standard manifest fields, and does not
+execute through a shell.
+
+By default the adapter returns a blocked executor result:
+
+- status: `blocked`
+- return code: `null`
+- metadata: `{"configured": false, "required_environment": "ENGINEERING_HARNESS_ENABLE_DAGGER"}`
+
+To opt into local Dagger execution, set `ENGINEERING_HARNESS_ENABLE_DAGGER=1` in the harness
+environment and ensure the `dagger` binary is on `PATH`. If the flag is enabled but the binary is
+missing, the adapter still blocks and records `{"configured": true, "missing_binary": "dagger"}`.
+
+This keeps the current harness safe while leaving a clear integration path for later work:
+
+- add project-level Dagger module discovery;
+- map roadmap task metadata into Dagger function arguments;
+- define cache, network, and secret policies before enabling remote or deployment-oriented runs;
+- keep all Dagger outcomes flowing through the same executor metadata and result contract used by
+  shell and Codex.
