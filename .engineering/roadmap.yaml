@@ -1,36 +1,463 @@
 {
-  "decision_log_path": ".engineering/state/decision-log.jsonl",
+  "version": 1,
+  "project": "engineering-harness",
+  "profile": "python-agent",
   "default_timeout_seconds": 300,
+  "state_path": ".engineering/state/harness-state.json",
+  "decision_log_path": ".engineering/state/decision-log.jsonl",
+  "report_dir": ".engineering/reports/tasks",
+  "vision": "Build a local-first autonomous engineering control layer for roadmap-driven software work, safety policy, coding-agent execution, project-specific frontends, and realistic end-to-end user validation.",
+  "blueprint": "docs/autonomous-engineering-harness-plan.md",
+  "experience": {
+    "kind": "dashboard",
+    "personas": ["operator", "project owner", "reviewer"],
+    "primary_surfaces": ["workspace dashboard", "project task board", "run report viewer", "approval queue"],
+    "auth": {
+      "required": false,
+      "roles": ["operator", "admin", "reviewer"]
+    },
+    "e2e_journeys": [
+      {
+        "id": "operator-runs-roadmap-task",
+        "persona": "operator",
+        "goal": "Inspect the next task, run it, and review the generated report."
+      },
+      {
+        "id": "reviewer-inspects-e2e-evidence",
+        "persona": "reviewer",
+        "goal": "Open a completed run and verify acceptance, E2E, policy, and git evidence."
+      }
+    ]
+  },
   "milestones": [
     {
       "id": "baseline",
-      "objective": "Verify the project can run its baseline checks under the shared engineering harness.",
+      "title": "Project Baseline",
       "status": "active",
+      "objective": "Verify the project can run its baseline checks under the shared engineering harness.",
       "tasks": [
         {
+          "id": "tests",
+          "title": "Run Python test suite",
+          "status": "pending",
+          "max_attempts": 2,
+          "file_scope": ["**"],
           "acceptance": [
             {
-              "command": "python3 -c \"import sys; sys.path.insert(0, 'src'); import pytest; raise SystemExit(pytest.main(['-q']))\"",
               "name": "Run Python test suite",
+              "command": "python3 -c \"import sys; sys.path.insert(0, 'src'); import pytest; raise SystemExit(pytest.main(['-q']))\"",
+              "required": true,
+              "timeout_seconds": 600
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "self-evolution-kickoff",
+      "title": "Self-Evolution Kickoff",
+      "status": "active",
+      "objective": "Turn the researched long-range plan into repository artifacts and add the first execution feature needed for realistic user-path validation.",
+      "tasks": [
+        {
+          "id": "e2e-phase-support",
+          "title": "Add first-class E2E task phase and strategic development plan",
+          "status": "pending",
+          "max_attempts": 2,
+          "file_scope": [
+            ".engineering/**",
+            "README.md",
+            "docs/**",
+            "src/engineering_harness/**",
+            "tests/**"
+          ],
+          "acceptance": [
+            {
+              "name": "roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 120
+            },
+            {
+              "name": "unit tests",
+              "command": "python3 -m pytest -q",
               "required": true,
               "timeout_seconds": 600
             }
           ],
-          "file_scope": [
-            "**"
-          ],
-          "id": "tests",
-          "max_attempts": 2,
-          "status": "pending",
-          "title": "Run Python test suite"
+          "e2e": [
+            {
+              "name": "dry-run selected task with e2e metadata",
+              "command": "bin/engh next --project-root . --json",
+              "required": true,
+              "timeout_seconds": 120
+            }
+          ]
         }
-      ],
-      "title": "Project Baseline"
+      ]
     }
   ],
-  "profile": "python-agent",
-  "project": "engineering-harness",
-  "report_dir": ".engineering/reports/tasks",
-  "state_path": ".engineering/state/harness-state.json",
-  "version": 1
+  "continuation": {
+    "enabled": true,
+    "goal": "Ship the autonomous engineering harness described in the blueprint, including mature executor, policy, frontend, E2E, observability, CI, and agent-integration capabilities.",
+    "blueprint": "docs/autonomous-engineering-harness-plan.md",
+    "stages": [
+      {
+        "id": "schema-validation-foundation",
+        "title": "Schema and Validation Foundation",
+        "objective": "Make roadmap validation expressive enough for mature autonomous engineering projects.",
+        "tasks": [
+          {
+            "id": "schema-fixtures",
+            "title": "Add valid and invalid roadmap fixtures",
+            "file_scope": ["tests/**", "docs/**"],
+            "max_task_iterations": 2,
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 1800,
+                "prompt": "Add valid and invalid roadmap fixture files for the harness validation model. Update focused pytest coverage so the fixtures are loaded through Harness.validate_roadmap and assert clear pass/fail behavior. Keep changes scoped to tests and docs."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 1200,
+                "prompt": "Fix the failing schema fixture tests while preserving the intended validation behavior and file scope."
+              }
+            ],
+            "acceptance": [
+              {"name": "schema fixture tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ]
+          },
+          {
+            "id": "experience-schema-validation",
+            "title": "Validate project experience specs and E2E journeys",
+            "file_scope": ["src/engineering_harness/**", "tests/**", "docs/**"],
+            "max_task_iterations": 2,
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 1800,
+                "prompt": "Implement roadmap validation for the top-level experience block, including kind, personas, primary_surfaces, auth roles, and e2e_journeys. Add tests for valid dashboard, submission-review, multi-role, api-only, and cli-only examples plus actionable invalid cases. Keep the validation backward compatible for roadmaps without experience."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 1200,
+                "prompt": "Fix failing experience validation tests and keep the roadmap validation errors actionable."
+              }
+            ],
+            "acceptance": [
+              {"name": "experience validation tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ],
+            "e2e": [
+              {"name": "validate this roadmap", "command": "bin/engh validate --project-root ."}
+            ]
+          }
+        ]
+      },
+      {
+        "id": "run-manifest-evidence",
+        "title": "Run Manifest and Evidence Model",
+        "objective": "Record every task run as auditable machine-readable evidence.",
+        "tasks": [
+          {
+            "id": "run-manifest-writer",
+            "title": "Write JSON run manifests beside Markdown reports",
+            "file_scope": ["src/engineering_harness/**", "tests/**", "docs/**"],
+            "acceptance": [
+              {"name": "manifest tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ]
+          },
+          {
+            "id": "manifest-index",
+            "title": "Index run manifests for dashboards and CI summaries",
+            "file_scope": ["src/engineering_harness/**", "tests/**", "docs/**"],
+            "acceptance": [
+              {"name": "manifest index tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ]
+          }
+        ]
+      },
+      {
+        "id": "executor-plugin-framework",
+        "title": "Executor Plugin Framework",
+        "objective": "Make shell, coding-agent, CI, and container executors replaceable behind one contract.",
+        "tasks": [
+          {
+            "id": "executor-contract",
+            "title": "Define executor interface and normalized result contract",
+            "file_scope": ["src/engineering_harness/**", "tests/**", "docs/**"],
+            "acceptance": [
+              {"name": "executor contract tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ]
+          },
+          {
+            "id": "shell-codex-executors",
+            "title": "Refactor shell and codex into executor adapters",
+            "file_scope": ["src/engineering_harness/**", "tests/**"],
+            "acceptance": [
+              {"name": "executor adapter tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ]
+          },
+          {
+            "id": "dagger-executor-design",
+            "title": "Document and stub a Dagger executor adapter",
+            "file_scope": ["src/engineering_harness/**", "tests/**", "docs/**"],
+            "acceptance": [
+              {"name": "dagger adapter smoke tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ]
+          }
+        ]
+      },
+      {
+        "id": "policy-engine-v2",
+        "title": "Policy Engine V2",
+        "objective": "Move from prefix-only allowlists to structured policy decisions.",
+        "tasks": [
+          {
+            "id": "policy-input-schema",
+            "title": "Define structured policy input and decision schema",
+            "file_scope": ["src/engineering_harness/**", "tests/**", "docs/**"],
+            "acceptance": [
+              {"name": "policy schema tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ]
+          },
+          {
+            "id": "policy-decision-reports",
+            "title": "Persist policy decisions in task reports and manifests",
+            "file_scope": ["src/engineering_harness/**", "tests/**"],
+            "acceptance": [
+              {"name": "policy report tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ]
+          },
+          {
+            "id": "opa-compatibility-design",
+            "title": "Add optional OPA/Rego compatibility design",
+            "file_scope": ["docs/**", "src/engineering_harness/**", "tests/**"],
+            "acceptance": [
+              {"name": "policy docs and tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ]
+          }
+        ]
+      },
+      {
+        "id": "durable-drive-engine",
+        "title": "Durable Drive Engine",
+        "objective": "Make long autonomous runs resumable, cancellable, and inspectable.",
+        "tasks": [
+          {
+            "id": "phase-level-state",
+            "title": "Persist phase-level state for implementation, acceptance, repair, and E2E",
+            "file_scope": ["src/engineering_harness/**", "tests/**"],
+            "acceptance": [
+              {"name": "phase state tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ]
+          },
+          {
+            "id": "pause-resume-cancel",
+            "title": "Add pause, resume, cancel, and approval queue commands",
+            "file_scope": ["src/engineering_harness/**", "tests/**", "docs/**"],
+            "acceptance": [
+              {"name": "durable command tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ]
+          }
+        ]
+      },
+      {
+        "id": "frontend-experience-planning",
+        "title": "Frontend Experience Planning",
+        "objective": "Require each substantial project to define the right frontend or operator surface for its domain.",
+        "tasks": [
+          {
+            "id": "experience-profile-defaults",
+            "title": "Add frontend experience archetypes to profiles",
+            "file_scope": ["src/engineering_harness/**", "tests/**", "docs/**"],
+            "acceptance": [
+              {"name": "profile experience tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ]
+          },
+          {
+            "id": "experience-status-summary",
+            "title": "Expose frontend readiness and E2E journeys in status output",
+            "file_scope": ["src/engineering_harness/**", "tests/**"],
+            "acceptance": [
+              {"name": "status experience tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ],
+            "e2e": [
+              {"name": "status json includes experience", "command": "bin/engh status --project-root . --json"}
+            ]
+          }
+        ]
+      },
+      {
+        "id": "frontend-templates",
+        "title": "Frontend Templates and UI Workflows",
+        "objective": "Generate project-specific frontend plans and starter tasks without forcing one UI stack.",
+        "tasks": [
+          {
+            "id": "dashboard-template-pack",
+            "title": "Add dashboard template pack for autonomous workers",
+            "file_scope": ["templates/**", "docs/**", "tests/**"],
+            "acceptance": [
+              {"name": "template tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ]
+          },
+          {
+            "id": "submission-review-template-pack",
+            "title": "Add submission and revision workflow template pack",
+            "file_scope": ["templates/**", "docs/**", "tests/**"],
+            "acceptance": [
+              {"name": "submission template tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ]
+          },
+          {
+            "id": "multi-role-template-pack",
+            "title": "Add multi-role authenticated application planning template",
+            "file_scope": ["templates/**", "docs/**", "tests/**"],
+            "acceptance": [
+              {"name": "multi-role template tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ]
+          }
+        ]
+      },
+      {
+        "id": "e2e-user-simulation",
+        "title": "E2E and Real User Simulation",
+        "objective": "Make final-user experience validation a standard project completion gate.",
+        "tasks": [
+          {
+            "id": "browser-e2e-conventions",
+            "title": "Define browser, API, CLI, and multi-role E2E conventions",
+            "file_scope": ["docs/**", "src/engineering_harness/**", "tests/**"],
+            "acceptance": [
+              {"name": "e2e convention tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ]
+          },
+          {
+            "id": "e2e-artifact-index",
+            "title": "Capture screenshots, traces, logs, and accessibility reports as E2E artifacts",
+            "file_scope": ["src/engineering_harness/**", "tests/**", "docs/**"],
+            "acceptance": [
+              {"name": "e2e artifact tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ]
+          }
+        ]
+      },
+      {
+        "id": "observability-dashboard",
+        "title": "Observability and Dashboard",
+        "objective": "Provide a visual surface for project state, task progress, policy gates, and E2E evidence.",
+        "tasks": [
+          {
+            "id": "dashboard-data-api",
+            "title": "Expose dashboard-ready JSON data from manifests and state",
+            "file_scope": ["src/engineering_harness/**", "tests/**", "docs/**"],
+            "acceptance": [
+              {"name": "dashboard data tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ]
+          },
+          {
+            "id": "static-dashboard-viewer",
+            "title": "Add a local static dashboard viewer",
+            "file_scope": ["src/engineering_harness/**", "templates/**", "tests/**", "docs/**"],
+            "acceptance": [
+              {"name": "dashboard tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ],
+            "e2e": [
+              {"name": "dashboard user path", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ]
+          }
+        ]
+      },
+      {
+        "id": "github-ci-integration",
+        "title": "GitHub and CI Integration",
+        "objective": "Connect local harness runs to repository-native CI, PR checks, and comments.",
+        "tasks": [
+          {
+            "id": "github-actions-generator",
+            "title": "Generate GitHub Actions workflows for validation, acceptance, and E2E",
+            "file_scope": ["src/engineering_harness/**", "tests/**", "docs/**", ".github/**"],
+            "acceptance": [
+              {"name": "ci generator tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ]
+          },
+          {
+            "id": "pr-report-integration",
+            "title": "Design PR report publishing and CI failure mapping",
+            "file_scope": ["src/engineering_harness/**", "tests/**", "docs/**"],
+            "acceptance": [
+              {"name": "pr integration tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ]
+          }
+        ]
+      },
+      {
+        "id": "intelligent-selection-caching",
+        "title": "Intelligent Task Selection and Caching",
+        "objective": "Use changed files, dependency scopes, caching, and concurrency to pick relevant work.",
+        "tasks": [
+          {
+            "id": "affected-task-selection",
+            "title": "Select tasks from changed files and file scopes",
+            "file_scope": ["src/engineering_harness/**", "tests/**", "docs/**"],
+            "acceptance": [
+              {"name": "affected task tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ]
+          },
+          {
+            "id": "safe-result-cache",
+            "title": "Cache safe acceptance results by inputs and environment",
+            "file_scope": ["src/engineering_harness/**", "tests/**", "docs/**"],
+            "acceptance": [
+              {"name": "cache tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ]
+          }
+        ]
+      },
+      {
+        "id": "production-hardening-release",
+        "title": "Production Hardening and Release",
+        "objective": "Make the harness stable enough for long-lived autonomous engineering projects.",
+        "tasks": [
+          {
+            "id": "schema-migrations",
+            "title": "Add schema migration and compatibility tests",
+            "file_scope": ["src/engineering_harness/**", "tests/**", "docs/**"],
+            "acceptance": [
+              {"name": "migration tests", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ]
+          },
+          {
+            "id": "security-review-checklist",
+            "title": "Add security review checklist for execution, secrets, reports, and agents",
+            "file_scope": ["docs/**", "tests/**"],
+            "acceptance": [
+              {"name": "security docs smoke", "command": "python3 -m pytest tests/test_engineering_harness.py -q"}
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "self_iteration": {
+    "enabled": false,
+    "objective": "Append the next safe, testable stage only after schema, policy, and run evidence are mature enough.",
+    "max_stages_per_iteration": 1,
+    "file_scope": [".engineering/roadmap.yaml", "docs/**", "src/engineering_harness/**", "tests/**"],
+    "planner": {
+      "name": "Codex self-iteration planner",
+      "executor": "codex",
+      "timeout_seconds": 3600,
+      "sandbox": "workspace-write",
+      "prompt": "Use the blueprint and latest reports to append exactly one new continuation stage with measurable acceptance and E2E gates."
+    }
+  }
 }

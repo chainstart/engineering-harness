@@ -74,6 +74,7 @@ class HarnessTask:
     implementation: tuple[AcceptanceCommand, ...]
     repair: tuple[AcceptanceCommand, ...]
     acceptance: tuple[AcceptanceCommand, ...]
+    e2e: tuple[AcceptanceCommand, ...]
 
 
 @dataclass(frozen=True)
@@ -504,6 +505,7 @@ class Harness:
                     timeout_seconds=60,
                 ),
             ),
+            e2e=(),
         )
 
     def _self_iteration_prompt(self, config: dict[str, Any], snapshot_path: Path) -> str:
@@ -636,6 +638,7 @@ Rules:
                 implementation = self._parse_task_commands(task.get("implementation", []), default_name="implementation")
                 repair = self._parse_task_commands(task.get("repair", []), default_name="repair")
                 acceptance = self._parse_task_commands(task.get("acceptance", []), default_name="acceptance")
+                e2e = self._parse_task_commands(task.get("e2e", []), default_name="e2e")
                 tasks.append(
                     HarnessTask(
                         id=str(task["id"]),
@@ -651,6 +654,7 @@ Rules:
                         implementation=tuple(implementation),
                         repair=tuple(repair),
                         acceptance=tuple(acceptance),
+                        e2e=tuple(e2e),
                     )
                 )
         return tasks
@@ -843,7 +847,7 @@ Rules:
         file_scope = task.get("file_scope", [])
         if file_scope is not None and not isinstance(file_scope, list):
             errors.append(f"task `{task_id}` file_scope must be a list")
-        for group_name in ("implementation", "repair", "acceptance"):
+        for group_name in ("implementation", "repair", "acceptance", "e2e"):
             group = task.get(group_name, [])
             if group_name == "acceptance" and not group:
                 errors.append(f"task `{task_id}` must define at least one acceptance command")
@@ -926,6 +930,7 @@ Rules:
             "implementation": [command_payload(command) for command in task.implementation],
             "repair": [command_payload(command) for command in task.repair],
             "acceptance": [command_payload(command) for command in task.acceptance],
+            "e2e": [command_payload(command) for command in task.e2e],
         }
 
     def command_allowed(self, command: str | None, allow_live: bool = False) -> tuple[bool, str]:
@@ -1158,6 +1163,20 @@ Rules:
                 if repair_status != "passed":
                     break
 
+        if overall_status == "passed" and task.e2e:
+            e2e_status, message = self._run_command_group(
+                task.e2e,
+                phase="e2e",
+                runs=runs,
+                dry_run=dry_run,
+                allow_live=allow_live,
+                allow_agent=allow_agent,
+                task=task,
+            )
+            overall_status = e2e_status
+            if e2e_status == "passed":
+                message = "All required acceptance and e2e commands passed."
+
         if not dry_run:
             safety["file_scope_guard"] = self._file_scope_guard(
                 task,
@@ -1325,8 +1344,10 @@ Rules:
 
     def _codex_prompt(self, command: AcceptanceCommand, task: HarnessTask) -> str:
         acceptance = "\n".join(f"- {item.name}: {item.command or item.prompt or item.executor}" for item in task.acceptance)
+        e2e = "\n".join(f"- {item.name}: {item.command or item.prompt or item.executor}" for item in task.e2e)
         file_scope = "\n".join(f"- {scope}" for scope in task.file_scope) or "- repository-scoped, but keep changes minimal"
         prompt = command.prompt or task.title
+        verification = acceptance if not e2e else f"{acceptance}\n\nE2E/user-experience commands:\n{e2e}"
         return (
             "You are executing one roadmap task for an autonomous engineering harness.\n\n"
             f"Project root: {self.project_root}\n"
@@ -1336,8 +1357,8 @@ Rules:
             f"{prompt}\n\n"
             "Allowed file scope:\n"
             f"{file_scope}\n\n"
-            "Acceptance commands that must pass after your changes:\n"
-            f"{acceptance}\n\n"
+            "Verification commands that must pass after your changes:\n"
+            f"{verification}\n\n"
             "Constraints:\n"
             "- Edit files directly in the working tree.\n"
             "- Do not commit or push; the harness handles git checkpoints.\n"

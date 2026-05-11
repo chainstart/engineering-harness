@@ -111,6 +111,56 @@ def test_harness_can_repair_after_failed_acceptance(tmp_path):
     assert phases == ["acceptance-1", "repair-1", "acceptance-2"]
 
 
+def test_harness_runs_e2e_after_acceptance(tmp_path):
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["acceptance"][0]["command"] = "python3 -c \"from pathlib import Path; Path('accepted.txt').write_text('ok')\""
+    task["e2e"] = [
+        {
+            "name": "simulate user path",
+            "command": "python3 -c \"from pathlib import Path; assert Path('accepted.txt').read_text() == 'ok'; Path('e2e.txt').write_text('ok')\"",
+        }
+    ]
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    result = harness.run_task(harness.next_task())
+
+    assert result["status"] == "passed"
+    assert (project / "e2e.txt").read_text(encoding="utf-8") == "ok"
+    assert [run["phase"] for run in result["runs"]] == ["acceptance-1", "e2e"]
+    assert result["task"]["e2e"][0]["name"] == "simulate user path"
+
+
+def test_harness_fails_task_when_e2e_fails(tmp_path):
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["acceptance"][0]["command"] = "python3 -c \"print('accepted')\""
+    task["e2e"] = [
+        {
+            "name": "failing user path",
+            "command": "python3 -c \"raise SystemExit(7)\"",
+        }
+    ]
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    result = harness.run_task(harness.next_task())
+
+    assert result["status"] == "failed"
+    assert result["runs"][-1]["phase"] == "e2e"
+    assert result["runs"][-1]["returncode"] == 7
+    assert "Required e2e command failed" in result["message"]
+
+
 def test_file_scope_guard_allows_in_scope_changes(tmp_path):
     project = tmp_path / "agent-project"
     project.mkdir()

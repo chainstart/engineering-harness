@@ -190,14 +190,16 @@ branch on `origin` unless `--git-remote` or `--git-branch` is provided.
 
 ## Autonomous Implementation Loop
 
-Tasks can now include three phases:
+Tasks can now include four phases:
 
 - `implementation`: commands or an agent executor that changes the working tree.
 - `acceptance`: required tests/checks that decide whether the task is done.
 - `repair`: commands or an agent executor used after a failed acceptance run.
+- `e2e`: optional end-to-end checks that simulate the final user experience after acceptance passes.
 
 The harness executes `implementation`, then `acceptance`. If acceptance fails and `repair` is
-configured, it runs `repair` and retries acceptance until `max_task_iterations` is exhausted.
+configured, it runs `repair` and retries acceptance until `max_task_iterations` is exhausted. When
+acceptance passes, configured `e2e` commands run as a final user-experience gate.
 
 ```json
 {
@@ -223,6 +225,9 @@ configured, it runs `repair` and retries acceptance until `max_task_iterations` 
   ],
   "acceptance": [
     {"name": "focused tests", "command": "python3 -m pytest tests/test_worker.py -q"}
+  ],
+  "e2e": [
+    {"name": "user workflow", "command": "python3 -m pytest tests/e2e/test_worker_user_path.py -q"}
   ]
 }
 ```
@@ -237,3 +242,11 @@ engh drive --project-root /home/biostar/work/projects/utopiai --rolling --allow-
 The built-in `codex` executor calls `codex exec --full-auto --sandbox workspace-write -C <project>`.
 It is still bounded by the roadmap task, file scope, acceptance commands, time budget, git
 checkpoints, and the command/live/manual gates already enforced by the harness.
+
+## Project Frontends and E2E Experience
+
+Every substantial project should eventually define the frontend or operator surface that matches
+its domain. Some projects only need a dashboard for autonomous worker state, some need a submission
+and review portal, and some need multi-role authenticated workflows. Roadmap tasks can model those
+surfaces explicitly and use `e2e` commands to exercise the real user path after normal unit and
+integration checks pass.

@@ -2,7 +2,11 @@
   "allowed_prefixes": [
     "python3 ",
     "pytest ",
-    "bash scripts/"
+    "bash scripts/",
+    "bin/engh ",
+    "npm ",
+    "npx ",
+    "node "
   ],
   "blocked_patterns": [
     "rm -rf /",
