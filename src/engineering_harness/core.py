@@ -4,11 +4,17 @@ import fnmatch
 import hashlib
 import os
 import subprocess
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .executors import (
+    EXECUTOR_RESULT_CONTRACT_VERSION,
+    ExecutorInvocation,
+    ExecutorRegistry,
+    default_executor_registry,
+)
 from .io import append_jsonl, load_mapping, write_json, write_mapping
 from .profiles import command_policy, default_roadmap
 
@@ -89,6 +95,9 @@ class CommandRun:
     finished_at: str
     stdout: str
     stderr: str
+    executor: str = "shell"
+    executor_metadata: dict[str, Any] = field(default_factory=dict)
+    result_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def find_project_config(root: Path) -> Path | None:
@@ -197,7 +206,12 @@ def init_project(project_root: Path, profile_id: str, name: str | None = None, f
 
 
 class Harness:
-    def __init__(self, project_root: Path, roadmap_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        project_root: Path,
+        roadmap_path: Path | None = None,
+        executor_registry: ExecutorRegistry | None = None,
+    ) -> None:
         self.project_root = project_root.resolve()
         self.roadmap_path = roadmap_path or find_project_config(self.project_root)
         if self.roadmap_path is None:
@@ -216,6 +230,7 @@ class Harness:
             else self.report_dir / "manifest-index.json"
         )
         self.command_policy = self._load_command_policy()
+        self.executor_registry = executor_registry or default_executor_registry()
 
     def _load_command_policy(self) -> dict[str, Any]:
         policy_candidates = [
@@ -389,6 +404,8 @@ class Harness:
                 utc_now(),
                 "",
                 "codex planner requires --allow-agent",
+                executor=command.executor,
+                executor_metadata=self.executor_registry.metadata_for(command.executor),
             )
             self._write_self_iteration_report(report_path, reason, snapshot_path, before, before, run)
             return {
@@ -412,6 +429,8 @@ class Harness:
                     utc_now(),
                     "",
                     block_reason,
+                    executor=command.executor,
+                    executor_metadata=self.executor_registry.metadata_for(command.executor),
                 )
                 self._write_self_iteration_report(report_path, reason, snapshot_path, before, before, run)
                 return {
@@ -433,6 +452,8 @@ class Harness:
                 utc_now(),
                 "",
                 f"unknown executor: {command.executor}",
+                executor=command.executor,
+                executor_metadata=self.executor_registry.metadata_for(command.executor),
             )
             self._write_self_iteration_report(report_path, reason, snapshot_path, before, before, run)
             return {
@@ -849,6 +870,8 @@ Rules:
                     "executor": str(run.get("executor") or ""),
                     "status": str(run.get("status") or "unknown"),
                     "returncode": run.get("returncode"),
+                    "executor_metadata": run.get("executor_metadata") if isinstance(run.get("executor_metadata"), dict) else {},
+                    "executor_result": run.get("executor_result") if isinstance(run.get("executor_result"), dict) else {},
                 }
                 for run in runs
                 if isinstance(run, dict)
@@ -1129,10 +1152,12 @@ Rules:
             errors.append(f"{location} must be a mapping")
             return
         executor = str(item.get("executor", "shell"))
-        if executor not in {"shell", "codex"}:
+        executor_adapter = self.executor_registry.get(executor)
+        if executor_adapter is None:
             errors.append(f"{location} has unknown executor `{executor}`")
             return
-        if executor == "shell":
+        executor_metadata = executor_adapter.metadata
+        if executor_metadata.uses_command_policy:
             command = item.get("command")
             if not str(command or "").strip():
                 errors.append(f"{location} shell command is required")
@@ -1140,7 +1165,7 @@ Rules:
                 allowed, reason = self.command_allowed(str(command))
                 if not allowed:
                     warnings.append(f"{location} command is not currently allowlisted: {reason}")
-        if executor == "codex" and not str(item.get("prompt", "") or item.get("command", "")).strip():
+        if executor_metadata.input_mode == "prompt" and not str(item.get("prompt", "") or item.get("command", "")).strip():
             errors.append(f"{location} codex prompt is required")
         try:
             if int(item.get("timeout_seconds", self.default_timeout)) <= 0:
@@ -1497,25 +1522,77 @@ Rules:
         if not commands:
             return "passed", f"No {phase} commands configured."
         for command in commands:
-            if command.executor == "codex" and not allow_agent:
+            executor = self.executor_registry.get(command.executor)
+            if executor is None:
                 runs.append(
-                    CommandRun(phase, command.name, self._display_command(command, task), "blocked", None, utc_now(), utc_now(), "", "codex executor requires --allow-agent")
+                    CommandRun(
+                        phase,
+                        command.name,
+                        self._display_command(command, task),
+                        "blocked",
+                        None,
+                        utc_now(),
+                        utc_now(),
+                        "",
+                        f"unknown executor: {command.executor}",
+                        executor=command.executor,
+                        executor_metadata=self.executor_registry.metadata_for(command.executor),
+                    )
                 )
-                return "blocked", "codex executor requires --allow-agent"
-            if command.executor == "shell":
+                return "blocked", f"unknown executor: {command.executor}"
+            if executor.metadata.requires_agent_approval and not allow_agent:
+                reason = f"{command.executor} executor requires --allow-agent"
+                runs.append(
+                    CommandRun(
+                        phase,
+                        command.name,
+                        self._display_command(command, task),
+                        "blocked",
+                        None,
+                        utc_now(),
+                        utc_now(),
+                        "",
+                        reason,
+                        executor=command.executor,
+                        executor_metadata=executor.metadata.as_contract(),
+                    )
+                )
+                return "blocked", reason
+            if executor.metadata.uses_command_policy:
                 allowed, reason = self.command_allowed(command.command, allow_live=allow_live)
                 if not allowed:
                     runs.append(
-                        CommandRun(phase, command.name, command.command or "", "blocked", None, utc_now(), utc_now(), "", reason)
+                        CommandRun(
+                            phase,
+                            command.name,
+                            self._display_command(command, task),
+                            "blocked",
+                            None,
+                            utc_now(),
+                            utc_now(),
+                            "",
+                            reason,
+                            executor=command.executor,
+                            executor_metadata=executor.metadata.as_contract(),
+                        )
                     )
                     return "blocked", reason
-            elif command.executor != "codex":
-                runs.append(
-                    CommandRun(phase, command.name, self._display_command(command, task), "blocked", None, utc_now(), utc_now(), "", f"unknown executor: {command.executor}")
-                )
-                return "blocked", f"unknown executor: {command.executor}"
             if dry_run:
-                runs.append(CommandRun(phase, command.name, self._display_command(command, task), "dry-run", None, utc_now(), utc_now(), "", ""))
+                runs.append(
+                    CommandRun(
+                        phase,
+                        command.name,
+                        self._display_command(command, task),
+                        "dry-run",
+                        None,
+                        utc_now(),
+                        utc_now(),
+                        "",
+                        "",
+                        executor=command.executor,
+                        executor_metadata=executor.metadata.as_contract(),
+                    )
+                )
                 continue
             run = self._run_command(command, phase=phase, task=task)
             runs.append(run)
@@ -1627,10 +1704,23 @@ Rules:
         }
 
     def _display_command(self, command: AcceptanceCommand, task: HarnessTask) -> str:
-        if command.executor == "codex":
-            model = f" --model {command.model}" if command.model else ""
-            return f"codex exec --full-auto --sandbox {command.sandbox}{model} -C {self.project_root} <task:{task.id}>"
-        return command.command or ""
+        executor = self.executor_registry.get(command.executor)
+        if executor is None:
+            return command.command or command.prompt or command.executor
+        return executor.display_command(self._executor_invocation(command, task))
+
+    def _executor_invocation(self, command: AcceptanceCommand, task: HarnessTask) -> ExecutorInvocation:
+        prompt = self._codex_prompt(command, task) if command.executor == "codex" else command.prompt
+        return ExecutorInvocation(
+            project_root=self.project_root,
+            task_id=task.id,
+            name=command.name,
+            command=command.command,
+            prompt=prompt,
+            timeout_seconds=command.timeout_seconds,
+            model=command.model,
+            sandbox=command.sandbox,
+        )
 
     def _codex_prompt(self, command: AcceptanceCommand, task: HarnessTask) -> str:
         acceptance = "\n".join(f"- {item.name}: {item.command or item.prompt or item.executor}" for item in task.acceptance)
@@ -1658,57 +1748,38 @@ Rules:
         )
 
     def _run_command(self, acceptance: AcceptanceCommand, *, phase: str, task: HarnessTask) -> CommandRun:
-        started_at = utc_now()
-        display_command = self._display_command(acceptance, task)
-        try:
-            if acceptance.executor == "codex":
-                args = ["codex", "exec", "--full-auto", "--sandbox", acceptance.sandbox, "-C", str(self.project_root)]
-                if acceptance.model:
-                    args.extend(["--model", acceptance.model])
-                args.append(self._codex_prompt(acceptance, task))
-                completed = subprocess.run(
-                    args,
-                    cwd=self.project_root,
-                    text=True,
-                    capture_output=True,
-                    timeout=acceptance.timeout_seconds,
-                    env={**os.environ, "ENGINEERING_HARNESS": "1"},
-                )
-            else:
-                completed = subprocess.run(
-                    acceptance.command or "",
-                    cwd=self.project_root,
-                    shell=True,
-                    executable="/bin/bash",
-                    text=True,
-                    capture_output=True,
-                    timeout=acceptance.timeout_seconds,
-                    env={**os.environ, "ENGINEERING_HARNESS": "1"},
-                )
+        executor = self.executor_registry.get(acceptance.executor)
+        if executor is None:
             return CommandRun(
                 phase,
                 acceptance.name,
-                display_command,
-                "passed" if completed.returncode == 0 else "failed",
-                completed.returncode,
-                started_at,
-                utc_now(),
-                redact(completed.stdout[-8000:]),
-                redact(completed.stderr[-8000:]),
-            )
-        except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-            return CommandRun(
-                phase,
-                acceptance.name,
-                display_command,
+                self._display_command(acceptance, task),
                 "failed",
                 None,
-                started_at,
                 utc_now(),
-                redact(stdout[-8000:]),
-                f"Command timed out after {acceptance.timeout_seconds} seconds.",
+                utc_now(),
+                "",
+                f"unknown executor: {acceptance.executor}",
+                executor=acceptance.executor,
+                executor_metadata=self.executor_registry.metadata_for(acceptance.executor),
             )
+        invocation = self._executor_invocation(acceptance, task)
+        display_command = executor.display_command(invocation)
+        result = executor.execute(invocation)
+        return CommandRun(
+            phase,
+            acceptance.name,
+            display_command,
+            result.status,
+            result.returncode,
+            result.started_at,
+            result.finished_at,
+            result.stdout,
+            result.stderr,
+            executor=executor.metadata.id,
+            executor_metadata=executor.metadata.as_contract(),
+            result_metadata=result.metadata,
+        )
 
     def _finish_task(
         self,
@@ -1779,6 +1850,9 @@ Rules:
                     "command": run.command,
                     "status": run.status,
                     "returncode": run.returncode,
+                    "executor": run.executor,
+                    "executor_metadata": run.executor_metadata or self.executor_registry.metadata_for(run.executor),
+                    "executor_result": self._executor_result_contract(run),
                 }
                 for run in runs
             ],
@@ -1848,6 +1922,8 @@ Rules:
 
     def _command_run_manifest(self, task: HarnessTask, run: CommandRun) -> dict[str, Any]:
         metadata = self._configured_command_metadata(task, run)
+        stdout_summary = self._stream_summary(run.stdout)
+        stderr_summary = self._stream_summary(run.stderr)
         return {
             "phase": run.phase,
             "name": run.name,
@@ -1861,8 +1937,34 @@ Rules:
             "timeout_seconds": metadata.get("timeout_seconds"),
             "model": metadata.get("model"),
             "sandbox": metadata.get("sandbox"),
-            "stdout": self._stream_summary(run.stdout),
-            "stderr": self._stream_summary(run.stderr),
+            "stdout": stdout_summary,
+            "stderr": stderr_summary,
+            "executor_metadata": run.executor_metadata
+            or metadata.get("executor_metadata")
+            or self.executor_registry.metadata_for(metadata["executor"]),
+            "executor_result": self._executor_result_contract(
+                run,
+                stdout_summary=stdout_summary,
+                stderr_summary=stderr_summary,
+            ),
+        }
+
+    def _executor_result_contract(
+        self,
+        run: CommandRun,
+        *,
+        stdout_summary: dict[str, Any] | None = None,
+        stderr_summary: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": EXECUTOR_RESULT_CONTRACT_VERSION,
+            "status": run.status,
+            "returncode": run.returncode,
+            "started_at": run.started_at,
+            "finished_at": run.finished_at,
+            "stdout": stdout_summary or self._stream_summary(run.stdout),
+            "stderr": stderr_summary or self._stream_summary(run.stderr),
+            "metadata": run.result_metadata,
         }
 
     def _configured_command_metadata(self, task: HarnessTask, run: CommandRun) -> dict[str, Any]:
@@ -1874,13 +1976,18 @@ Rules:
                     "timeout_seconds": command.timeout_seconds,
                     "model": command.model,
                     "sandbox": command.sandbox,
+                    "executor_metadata": self.executor_registry.metadata_for(command.executor),
                 }
         return {
-            "executor": "codex" if run.command.startswith("codex exec ") else "shell",
+            "executor": run.executor or ("codex" if run.command.startswith("codex exec ") else "shell"),
             "required": None,
             "timeout_seconds": None,
             "model": None,
             "sandbox": None,
+            "executor_metadata": run.executor_metadata
+            or self.executor_registry.metadata_for(
+                run.executor or ("codex" if run.command.startswith("codex exec ") else "shell")
+            ),
         }
 
     def _stream_summary(self, text: str) -> dict[str, Any]:
@@ -1920,7 +2027,8 @@ Rules:
             ("e2e", task.e2e),
         ):
             for command in commands:
-                if command.executor == "shell":
+                executor = self.executor_registry.get(command.executor)
+                if executor and executor.metadata.uses_command_policy:
                     allowed, reason = self.command_allowed(command.command, allow_live=allow_live)
                     decisions.append(
                         {
@@ -1933,7 +2041,7 @@ Rules:
                             "reason": reason,
                         }
                     )
-                elif command.executor == "codex":
+                elif executor and executor.metadata.requires_agent_approval:
                     decisions.append(
                         {
                             "kind": "executor_approval",
@@ -1942,7 +2050,21 @@ Rules:
                             "name": command.name,
                             "executor": command.executor,
                             "outcome": "allowed" if allow_agent else "denied",
-                            "reason": "codex executor requires --allow-agent" if not allow_agent else "agent approval satisfied",
+                            "reason": f"{command.executor} executor requires --allow-agent"
+                            if not allow_agent
+                            else "agent approval satisfied",
+                        }
+                    )
+                elif executor:
+                    decisions.append(
+                        {
+                            "kind": "executor_policy",
+                            "scope": "command",
+                            "phase": phase,
+                            "name": command.name,
+                            "executor": command.executor,
+                            "outcome": "allowed",
+                            "reason": "registered executor",
                         }
                     )
                 else:

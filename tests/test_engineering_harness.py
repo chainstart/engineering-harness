@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from engineering_harness.core import Harness, discover_projects, init_project
+from engineering_harness.executors import ExecutorMetadata, ExecutorRegistry, ExecutorResult
 from engineering_harness.cli import main as cli_main
 from engineering_harness.profiles import list_profiles
 
@@ -129,6 +130,18 @@ def test_harness_runs_task_and_writes_matching_manifest(tmp_path):
     assert manifest["runs"][0]["returncode"] == 0
     assert manifest["runs"][0]["stdout"]["bytes"] > 0
     assert manifest["runs"][0]["stdout"]["sha256"]
+    assert manifest["runs"][0]["executor_metadata"]["schema_version"] == 1
+    assert manifest["runs"][0]["executor_metadata"]["id"] == "shell"
+    assert manifest["runs"][0]["executor_metadata"]["kind"] == "process"
+    assert manifest["runs"][0]["executor_metadata"]["input_mode"] == "command"
+    assert manifest["runs"][0]["executor_metadata"]["uses_command_policy"] is True
+    assert manifest["runs"][0]["executor_result"]["schema_version"] == 1
+    assert manifest["runs"][0]["executor_result"]["status"] == "passed"
+    assert manifest["runs"][0]["executor_result"]["returncode"] == 0
+    assert manifest["runs"][0]["executor_result"]["stdout"] == manifest["runs"][0]["stdout"]
+    assert manifest["runs"][0]["executor_result"]["stderr"] == manifest["runs"][0]["stderr"]
+    assert result["runs"][0]["executor_metadata"]["id"] == "shell"
+    assert result["runs"][0]["executor_result"]["status"] == "passed"
     assert manifest["safety"]["git_preflight"]["status"] == "clean"
     assert manifest["safety"]["file_scope_guard"]["status"] == "passed"
     assert manifest["git"]["is_repository"] is True
@@ -191,6 +204,66 @@ def test_manifest_index_lists_multiple_task_run_manifests_deterministically(tmp_
         "zz-second": second_result["manifest"],
     }
     assert Harness(project).status_summary()["manifest_index"]["manifest_count"] == 2
+
+
+def test_custom_executor_registry_preserves_task_semantics_and_normalizes_result(tmp_path):
+    class NoopExecutor:
+        metadata = ExecutorMetadata(
+            id="noop",
+            name="Noop",
+            kind="test",
+            adapter="test.noop",
+            input_mode="prompt",
+            capabilities=("stdout",),
+        )
+
+        def display_command(self, invocation):
+            return f"noop <task:{invocation.task_id}>"
+
+        def execute(self, invocation):
+            return ExecutorResult(
+                status="passed",
+                returncode=0,
+                started_at="2024-01-01T00:00:00Z",
+                finished_at="2024-01-01T00:00:01Z",
+                stdout=f"prompt={invocation.prompt}",
+                stderr="",
+                metadata={"adapter": "noop"},
+            )
+
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0] = {
+        "name": "future adapter",
+        "executor": "noop",
+        "prompt": "preserve the roadmap command shape",
+    }
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    registry = ExecutorRegistry((NoopExecutor(),))
+    harness = Harness(project, executor_registry=registry)
+
+    assert harness.validate_roadmap()["status"] == "passed"
+    result = harness.run_task(harness.next_task())
+
+    assert result["status"] == "passed"
+    assert result["runs"][0]["executor"] == "noop"
+    assert result["runs"][0]["command"] == "noop <task:tests>"
+
+    manifest = json.loads((project / result["manifest"]).read_text(encoding="utf-8"))
+    run = manifest["runs"][0]
+    assert run["executor"] == "noop"
+    assert run["executor_metadata"]["adapter"] == "test.noop"
+    assert run["executor_metadata"]["input_mode"] == "prompt"
+    assert run["executor_result"]["status"] == "passed"
+    assert run["executor_result"]["metadata"] == {"adapter": "noop"}
+    assert any(
+        decision["kind"] == "executor_policy" and decision["executor"] == "noop" and decision["outcome"] == "allowed"
+        for decision in manifest["policy_decisions"]
+    )
 
 
 def test_manifest_index_keeps_repeated_task_runs_with_same_slug(tmp_path, monkeypatch):
@@ -614,8 +687,7 @@ def test_harness_blocks_codex_executor_without_agent_approval(tmp_path):
     roadmap_path = project / ".engineering/roadmap.yaml"
     roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
     task = roadmap["milestones"][0]["tasks"][0]
-    task["implementation"] = [{"name": "agent work", "executor": "codex", "prompt": "Do not change files."}]
-    task["acceptance"][0]["command"] = "python3 -c \"print('ok')\""
+    task["acceptance"][0] = {"name": "agent work", "executor": "codex", "prompt": "Do not change files."}
     roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
 
     harness = Harness(project)
@@ -623,6 +695,15 @@ def test_harness_blocks_codex_executor_without_agent_approval(tmp_path):
 
     assert result["status"] == "blocked"
     assert "allow-agent" in result["message"]
+    assert result["runs"][0]["executor"] == "codex"
+    assert result["runs"][0]["executor_metadata"]["id"] == "codex"
+    assert result["runs"][0]["executor_metadata"]["kind"] == "agent"
+    assert result["runs"][0]["executor_metadata"]["requires_agent_approval"] is True
+    assert result["runs"][0]["executor_result"]["status"] == "blocked"
+
+    manifest = json.loads((project / result["manifest"]).read_text(encoding="utf-8"))
+    assert manifest["runs"][0]["executor_metadata"] == result["runs"][0]["executor_metadata"]
+    assert manifest["runs"][0]["executor_result"]["status"] == "blocked"
 
 
 def test_discover_projects_finds_configured_and_candidate_projects(tmp_path):

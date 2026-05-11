@@ -188,6 +188,7 @@ Goal: make executors replaceable while keeping harness policy and evidence consi
 Tasks:
 
 - Define the executor interface and result contract.
+  - Initial contract: [Executor Contract](executor-contract.md).
 - Refactor shell and codex into executor adapters.
 - Add executor capability checks before execution.
 - Add Dagger adapter design and a minimal proof-of-concept adapter.
