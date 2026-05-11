@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "project": "fixture-invalid-continuation",
+  "profile": "python-agent",
+  "default_timeout_seconds": 120,
+  "milestones": [],
+  "continuation": {
+    "enabled": true,
+    "goal": "Fixture intentionally defines an empty continuation stage.",
+    "stages": [
+      {
+        "id": "empty-continuation-stage",
+        "title": "Empty Continuation Stage",
+        "objective": "This stage has no task payloads.",
+        "tasks": []
+      }
+    ]
+  }
+}

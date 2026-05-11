@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "project": "fixture-invalid-unknown-executor",
+  "profile": "python-agent",
+  "default_timeout_seconds": 120,
+  "milestones": [
+    {
+      "id": "invalid-executor",
+      "title": "Invalid Executor",
+      "status": "active",
+      "objective": "Fixture intentionally uses an unknown executor.",
+      "tasks": [
+        {
+          "id": "unknown-executor-task",
+          "title": "Unknown Executor Task",
+          "status": "pending",
+          "file_scope": ["tests/**"],
+          "acceptance": [
+            {
+              "name": "unknown executor fails validation",
+              "executor": "spaceship",
+              "command": "launch validation"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

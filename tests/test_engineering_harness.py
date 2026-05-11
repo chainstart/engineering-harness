@@ -4,9 +4,26 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from engineering_harness.core import Harness, discover_projects, init_project
 from engineering_harness.cli import main as cli_main
 from engineering_harness.profiles import list_profiles
+
+
+ROADMAP_FIXTURES = Path(__file__).parent / "fixtures" / "roadmaps"
+
+
+def validate_roadmap_fixture(tmp_path: Path, fixture_name: str) -> dict:
+    project = tmp_path / Path(fixture_name).stem
+    project.mkdir()
+    engineering_dir = project / ".engineering"
+    engineering_dir.mkdir()
+    roadmap_path = engineering_dir / "roadmap.yaml"
+    fixture_path = ROADMAP_FIXTURES / fixture_name
+    roadmap_path.write_text(fixture_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    return Harness(project).validate_roadmap()
 
 
 def test_profiles_are_available():
@@ -299,6 +316,39 @@ def test_validate_roadmap_catches_missing_acceptance(tmp_path):
 
     assert result["status"] == "failed"
     assert any("acceptance" in error for error in result["errors"])
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    [
+        "valid/dashboard.json",
+        "valid/submission-review.json",
+        "valid/multi-role-app.json",
+        "valid/cli-only.json",
+    ],
+)
+def test_valid_roadmap_fixtures_pass_validation(tmp_path, fixture_name):
+    result = validate_roadmap_fixture(tmp_path, fixture_name)
+
+    assert result["status"] == "passed"
+    assert result["errors"] == []
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "expected_error"),
+    [
+        ("invalid/missing-acceptance.json", "must define at least one acceptance command"),
+        ("invalid/duplicate-task-id.json", "duplicate task id: duplicate-fixture-task"),
+        ("invalid/unknown-executor.json", "has unknown executor `spaceship`"),
+        ("invalid/continuation-stage-without-tasks.json", "must define at least one task"),
+    ],
+)
+def test_invalid_roadmap_fixtures_fail_validation(tmp_path, fixture_name, expected_error):
+    result = validate_roadmap_fixture(tmp_path, fixture_name)
+
+    assert result["status"] == "failed"
+    assert result["error_count"] >= 1
+    assert any(expected_error in error for error in result["errors"]), result["errors"]
 
 
 def test_harness_blocks_codex_executor_without_agent_approval(tmp_path):

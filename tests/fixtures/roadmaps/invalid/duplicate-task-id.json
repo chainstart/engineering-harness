@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "project": "fixture-invalid-duplicate-task-id",
+  "profile": "python-agent",
+  "default_timeout_seconds": 120,
+  "milestones": [
+    {
+      "id": "invalid-duplicates",
+      "title": "Invalid Duplicates",
+      "status": "active",
+      "objective": "Fixture intentionally repeats a task id.",
+      "tasks": [
+        {
+          "id": "duplicate-fixture-task",
+          "title": "First Duplicate Fixture Task",
+          "status": "pending",
+          "file_scope": ["tests/**"],
+          "acceptance": [
+            {
+              "name": "first duplicate validates",
+              "command": "python3 -c \"print('first duplicate')\""
+            }
+          ]
+        },
+        {
+          "id": "duplicate-fixture-task",
+          "title": "Second Duplicate Fixture Task",
+          "status": "pending",
+          "file_scope": ["tests/**"],
+          "acceptance": [
+            {
+              "name": "second duplicate validates",
+              "command": "python3 -c \"print('second duplicate')\""
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

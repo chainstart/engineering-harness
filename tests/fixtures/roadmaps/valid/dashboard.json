@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "project": "fixture-dashboard",
+  "profile": "python-agent",
+  "default_timeout_seconds": 120,
+  "state_path": ".engineering/state/harness-state.json",
+  "decision_log_path": ".engineering/state/decision-log.jsonl",
+  "report_dir": ".engineering/reports/tasks",
+  "experience": {
+    "kind": "dashboard",
+    "personas": ["operator"],
+    "primary_surfaces": ["operator dashboard", "run detail"],
+    "auth": {
+      "required": false,
+      "roles": ["operator"]
+    },
+    "e2e_journeys": [
+      {
+        "id": "operator-inspects-run",
+        "persona": "operator",
+        "goal": "Inspect the latest run status and open its evidence."
+      }
+    ]
+  },
+  "milestones": [
+    {
+      "id": "dashboard-foundation",
+      "title": "Dashboard Foundation",
+      "status": "active",
+      "objective": "Expose harness run state through an operator dashboard.",
+      "tasks": [
+        {
+          "id": "dashboard-status-panel",
+          "title": "Add dashboard status panel",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 2,
+          "file_scope": ["src/**", "tests/**", "docs/**"],
+          "implementation": [
+            {
+              "name": "render status data",
+              "command": "python3 -c \"print('render status data')\"",
+              "timeout_seconds": 30
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "status panel tests pass",
+              "command": "python3 -c \"print('status panel ok')\"",
+              "required": true,
+              "timeout_seconds": 30
+            }
+          ],
+          "e2e": [
+            {
+              "name": "operator can inspect a run",
+              "command": "python3 -c \"print('operator journey ok')\"",
+              "timeout_seconds": 30
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "continuation": {
+    "enabled": true,
+    "goal": "Expand operator visibility after the first dashboard surface lands.",
+    "stages": [
+      {
+        "id": "dashboard-evidence",
+        "title": "Dashboard Evidence",
+        "objective": "Let operators download run evidence from the dashboard.",
+        "tasks": [
+          {
+            "id": "dashboard-evidence-export",
+            "title": "Add evidence export",
+            "file_scope": ["src/**", "tests/**"],
+            "acceptance": [
+              {
+                "name": "evidence export validates",
+                "command": "python3 -c \"print('evidence export ok')\""
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "self_iteration": {
+    "enabled": false,
+    "objective": "Dashboard fixture does not self-plan.",
+    "planner": {
+      "name": "disabled planner",
+      "command": "python3 -c \"print('disabled')\""
+    }
+  }
+}

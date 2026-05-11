@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "project": "fixture-submission-review",
+  "profile": "python-agent",
+  "default_timeout_seconds": 120,
+  "state_path": ".engineering/state/harness-state.json",
+  "decision_log_path": ".engineering/state/decision-log.jsonl",
+  "report_dir": ".engineering/reports/tasks",
+  "experience": {
+    "kind": "submission-review",
+    "personas": ["student", "reviewer"],
+    "primary_surfaces": ["submission portal", "review console", "status timeline"],
+    "auth": {
+      "required": true,
+      "roles": ["student", "reviewer"]
+    },
+    "e2e_journeys": [
+      {
+        "id": "student-submit-review-revise",
+        "persona": "student",
+        "goal": "Submit a paper, receive review comments, and upload a revision."
+      }
+    ]
+  },
+  "milestones": [
+    {
+      "id": "submission-review-foundation",
+      "title": "Submission Review Foundation",
+      "status": "active",
+      "objective": "Model the submission and reviewer feedback flow.",
+      "tasks": [
+        {
+          "id": "submission-state-model",
+          "title": "Add submission state model",
+          "status": "pending",
+          "max_attempts": 2,
+          "file_scope": ["src/**", "tests/**"],
+          "acceptance": [
+            {
+              "name": "submission states validate",
+              "command": "python3 -c \"print('submission states ok')\"",
+              "required": true,
+              "timeout_seconds": 30
+            }
+          ]
+        },
+        {
+          "id": "reviewer-feedback-flow",
+          "title": "Add reviewer feedback flow",
+          "status": "pending",
+          "max_attempts": 2,
+          "file_scope": ["src/**", "tests/**"],
+          "repair": [
+            {
+              "name": "repair review fixture data",
+              "command": "python3 -c \"print('repair fixture data')\"",
+              "timeout_seconds": 30
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "review feedback validates",
+              "command": "python3 -c \"print('review feedback ok')\"",
+              "required": true,
+              "timeout_seconds": 30
+            }
+          ],
+          "e2e": [
+            {
+              "name": "student revision journey validates",
+              "command": "python3 -c \"print('student revision ok')\"",
+              "timeout_seconds": 30
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

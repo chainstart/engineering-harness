@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "project": "fixture-multi-role-app",
+  "profile": "python-agent",
+  "default_timeout_seconds": 120,
+  "state_path": ".engineering/state/harness-state.json",
+  "decision_log_path": ".engineering/state/decision-log.jsonl",
+  "report_dir": ".engineering/reports/tasks",
+  "experience": {
+    "kind": "multi-role-app",
+    "personas": ["admin", "operator", "approver"],
+    "primary_surfaces": ["admin console", "operator queue", "approval screen", "audit log"],
+    "auth": {
+      "required": true,
+      "roles": ["admin", "operator", "approver"]
+    },
+    "e2e_journeys": [
+      {
+        "id": "operator-requests-approval",
+        "persona": "operator",
+        "goal": "Create a work item, request approval, and verify the audit entry."
+      }
+    ]
+  },
+  "milestones": [
+    {
+      "id": "role-workflows",
+      "title": "Role Workflows",
+      "status": "active",
+      "objective": "Build the first role-aware workflow and validation gates.",
+      "tasks": [
+        {
+          "id": "role-matrix",
+          "title": "Define role matrix",
+          "status": "pending",
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": ["src/**", "tests/**", "docs/**"],
+          "implementation": [
+            {
+              "name": "draft role matrix",
+              "executor": "codex",
+              "prompt": "Draft the role matrix and tests for the fixture project.",
+              "model": "gpt-5.4"
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "role matrix validates",
+              "command": "python3 -c \"print('role matrix ok')\"",
+              "timeout_seconds": 30
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "continuation": {
+    "enabled": true,
+    "goal": "Continue through deeper role-boundary journeys.",
+    "stages": [
+      {
+        "id": "approval-boundaries",
+        "title": "Approval Boundaries",
+        "objective": "Validate that only approvers can complete approval tasks.",
+        "tasks": [
+          {
+            "id": "approval-boundary-e2e",
+            "title": "Add approval boundary e2e",
+            "file_scope": ["src/**", "tests/**"],
+            "acceptance": [
+              {
+                "name": "approval boundary validates",
+                "command": "python3 -c \"print('approval boundary ok')\"",
+                "timeout_seconds": 30
+              }
+            ],
+            "e2e": [
+              {
+                "name": "approval journey validates",
+                "command": "python3 -c \"print('approval journey ok')\"",
+                "timeout_seconds": 30
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

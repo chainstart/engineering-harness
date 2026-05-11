@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "project": "fixture-invalid-missing-acceptance",
+  "profile": "python-agent",
+  "default_timeout_seconds": 120,
+  "milestones": [
+    {
+      "id": "invalid-baseline",
+      "title": "Invalid Baseline",
+      "status": "active",
+      "objective": "Fixture intentionally omits acceptance commands.",
+      "tasks": [
+        {
+          "id": "missing-acceptance-task",
+          "title": "Missing Acceptance Task",
+          "status": "pending",
+          "file_scope": ["tests/**"],
+          "acceptance": []
+        }
+      ]
+    }
+  ]
+}

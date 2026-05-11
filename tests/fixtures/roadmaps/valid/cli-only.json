@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "project": "fixture-cli-only",
+  "profile": "python-agent",
+  "default_timeout_seconds": 120,
+  "state_path": ".engineering/state/harness-state.json",
+  "decision_log_path": ".engineering/state/decision-log.jsonl",
+  "report_dir": ".engineering/reports/tasks",
+  "experience": {
+    "kind": "cli-only",
+    "personas": ["developer"],
+    "primary_surfaces": ["command line", "generated reports"],
+    "auth": {
+      "required": false,
+      "roles": []
+    },
+    "e2e_journeys": [
+      {
+        "id": "developer-runs-cli",
+        "persona": "developer",
+        "goal": "Run the documented command and inspect the generated report."
+      }
+    ]
+  },
+  "milestones": [
+    {
+      "id": "cli-baseline",
+      "title": "CLI Baseline",
+      "status": "active",
+      "objective": "Keep command-line validation explicit and repeatable.",
+      "tasks": [
+        {
+          "id": "cli-smoke",
+          "title": "Add CLI smoke check",
+          "status": "pending",
+          "max_attempts": 2,
+          "file_scope": ["src/**", "tests/**", "README.md", "docs/**"],
+          "acceptance": [
+            {
+              "name": "cli smoke validates",
+              "command": "python3 -c \"print('cli smoke ok')\"",
+              "required": true,
+              "timeout_seconds": 30
+            }
+          ],
+          "e2e": [
+            {
+              "name": "documented command validates",
+              "command": "python3 -c \"print('documented command ok')\"",
+              "timeout_seconds": 30
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "self_iteration": {
+    "enabled": true,
+    "objective": "Plan the next CLI validation stage when the roadmap is empty.",
+    "file_scope": [".engineering/**", "docs/**", "tests/**"],
+    "planner": {
+      "name": "cli planner",
+      "command": "python3 -c \"print('plan next cli stage')\""
+    }
+  }
+}
