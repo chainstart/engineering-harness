@@ -13,6 +13,8 @@ from .executors import (
     EXECUTOR_RESULT_CONTRACT_VERSION,
     ExecutorInvocation,
     ExecutorRegistry,
+    ExecutorTaskCommand,
+    ExecutorTaskContext,
     default_executor_registry,
 )
 from .io import append_jsonl, load_mapping, write_json, write_mapping
@@ -393,59 +395,12 @@ class Harness:
         report_path = assessment_dir / f"{slug_now()}-self-iteration.md"
 
         command = self._parse_task_commands([planner], default_name="self-iteration-planner")[0]
-        if command.executor == "codex" and not allow_agent:
+        executor = self.executor_registry.get(command.executor)
+        if executor is None:
             run = CommandRun(
                 "self-iteration",
                 command.name,
                 self._display_command(command, self._self_iteration_task(command, snapshot_path, "")),
-                "blocked",
-                None,
-                utc_now(),
-                utc_now(),
-                "",
-                "codex planner requires --allow-agent",
-                executor=command.executor,
-                executor_metadata=self.executor_registry.metadata_for(command.executor),
-            )
-            self._write_self_iteration_report(report_path, reason, snapshot_path, before, before, run)
-            return {
-                "status": "blocked",
-                "message": "codex planner requires --allow-agent",
-                "stage_count_before": before["stage_count"],
-                "stage_count_after": before["stage_count"],
-                "pending_stage_count_after": before["pending_stage_count"],
-                "report": str(report_path.relative_to(self.project_root)),
-            }
-        if command.executor == "shell":
-            allowed, block_reason = self.command_allowed(command.command, allow_live=allow_live)
-            if not allowed:
-                run = CommandRun(
-                    "self-iteration",
-                    command.name,
-                    command.command or "",
-                    "blocked",
-                    None,
-                    utc_now(),
-                    utc_now(),
-                    "",
-                    block_reason,
-                    executor=command.executor,
-                    executor_metadata=self.executor_registry.metadata_for(command.executor),
-                )
-                self._write_self_iteration_report(report_path, reason, snapshot_path, before, before, run)
-                return {
-                    "status": "blocked",
-                    "message": block_reason,
-                    "stage_count_before": before["stage_count"],
-                    "stage_count_after": before["stage_count"],
-                    "pending_stage_count_after": before["pending_stage_count"],
-                    "report": str(report_path.relative_to(self.project_root)),
-                }
-        elif command.executor != "codex":
-            run = CommandRun(
-                "self-iteration",
-                command.name,
-                command.command or command.prompt or command.executor,
                 "blocked",
                 None,
                 utc_now(),
@@ -464,6 +419,55 @@ class Harness:
                 "pending_stage_count_after": before["pending_stage_count"],
                 "report": str(report_path.relative_to(self.project_root)),
             }
+        if executor.metadata.requires_agent_approval and not allow_agent:
+            block_reason = f"{command.executor} planner requires --allow-agent"
+            run = CommandRun(
+                "self-iteration",
+                command.name,
+                self._display_command(command, self._self_iteration_task(command, snapshot_path, "")),
+                "blocked",
+                None,
+                utc_now(),
+                utc_now(),
+                "",
+                block_reason,
+                executor=command.executor,
+                executor_metadata=executor.metadata.as_contract(),
+            )
+            self._write_self_iteration_report(report_path, reason, snapshot_path, before, before, run)
+            return {
+                "status": "blocked",
+                "message": block_reason,
+                "stage_count_before": before["stage_count"],
+                "stage_count_after": before["stage_count"],
+                "pending_stage_count_after": before["pending_stage_count"],
+                "report": str(report_path.relative_to(self.project_root)),
+            }
+        if executor.metadata.uses_command_policy:
+            allowed, block_reason = self.command_allowed(command.command, allow_live=allow_live)
+            if not allowed:
+                run = CommandRun(
+                    "self-iteration",
+                    command.name,
+                    self._display_command(command, self._self_iteration_task(command, snapshot_path, "")),
+                    "blocked",
+                    None,
+                    utc_now(),
+                    utc_now(),
+                    "",
+                    block_reason,
+                    executor=command.executor,
+                    executor_metadata=executor.metadata.as_contract(),
+                )
+                self._write_self_iteration_report(report_path, reason, snapshot_path, before, before, run)
+                return {
+                    "status": "blocked",
+                    "message": block_reason,
+                    "stage_count_before": before["stage_count"],
+                    "stage_count_after": before["stage_count"],
+                    "pending_stage_count_after": before["pending_stage_count"],
+                    "report": str(report_path.relative_to(self.project_root)),
+                }
 
         planner_prompt = self._self_iteration_prompt(config, snapshot_path)
         planner_task = self._self_iteration_task(command, snapshot_path, planner_prompt)
@@ -522,7 +526,7 @@ class Harness:
             max_attempts=1,
             file_scope=tuple(str(scope) for scope in (self.roadmap.get("self_iteration") or {}).get("file_scope", [".engineering/**", "docs/**"])),
             manual_approval_required=False,
-            agent_approval_required=command.executor == "codex",
+            agent_approval_required=bool(self.executor_registry.metadata_for(command.executor).get("requires_agent_approval")),
             max_task_iterations=1,
             implementation=(),
             repair=(),
@@ -1710,41 +1714,42 @@ Rules:
         return executor.display_command(self._executor_invocation(command, task))
 
     def _executor_invocation(self, command: AcceptanceCommand, task: HarnessTask) -> ExecutorInvocation:
-        prompt = self._codex_prompt(command, task) if command.executor == "codex" else command.prompt
-        return ExecutorInvocation(
+        invocation = ExecutorInvocation(
             project_root=self.project_root,
             task_id=task.id,
             name=command.name,
             command=command.command,
-            prompt=prompt,
+            prompt=command.prompt,
             timeout_seconds=command.timeout_seconds,
             model=command.model,
             sandbox=command.sandbox,
         )
+        executor = self.executor_registry.get(command.executor)
+        if executor is None:
+            return invocation
+        prepare_invocation = getattr(executor, "prepare_invocation", None)
+        if prepare_invocation is None:
+            return invocation
+        return prepare_invocation(invocation, self._executor_task_context(task))
 
-    def _codex_prompt(self, command: AcceptanceCommand, task: HarnessTask) -> str:
-        acceptance = "\n".join(f"- {item.name}: {item.command or item.prompt or item.executor}" for item in task.acceptance)
-        e2e = "\n".join(f"- {item.name}: {item.command or item.prompt or item.executor}" for item in task.e2e)
-        file_scope = "\n".join(f"- {scope}" for scope in task.file_scope) or "- repository-scoped, but keep changes minimal"
-        prompt = command.prompt or task.title
-        verification = acceptance if not e2e else f"{acceptance}\n\nE2E/user-experience commands:\n{e2e}"
-        return (
-            "You are executing one roadmap task for an autonomous engineering harness.\n\n"
-            f"Project root: {self.project_root}\n"
-            f"Milestone: {task.milestone_id} - {task.milestone_title}\n"
-            f"Task: {task.id} - {task.title}\n\n"
-            "Goal:\n"
-            f"{prompt}\n\n"
-            "Allowed file scope:\n"
-            f"{file_scope}\n\n"
-            "Verification commands that must pass after your changes:\n"
-            f"{verification}\n\n"
-            "Constraints:\n"
-            "- Edit files directly in the working tree.\n"
-            "- Do not commit or push; the harness handles git checkpoints.\n"
-            "- Do not use private keys, paid live deployment, or live trading.\n"
-            "- Prefer focused, test-driven changes that satisfy the acceptance commands.\n"
-            "- If the task cannot be completed locally, write a clear blocker into the relevant project docs.\n"
+    def _executor_task_context(self, task: HarnessTask) -> ExecutorTaskContext:
+        def task_command(command: AcceptanceCommand) -> ExecutorTaskCommand:
+            return ExecutorTaskCommand(
+                name=command.name,
+                command=command.command,
+                prompt=command.prompt,
+                executor=command.executor,
+            )
+
+        return ExecutorTaskContext(
+            project_root=self.project_root,
+            task_id=task.id,
+            title=task.title,
+            milestone_id=task.milestone_id,
+            milestone_title=task.milestone_title,
+            file_scope=task.file_scope,
+            acceptance=tuple(task_command(item) for item in task.acceptance),
+            e2e=tuple(task_command(item) for item in task.e2e),
         )
 
     def _run_command(self, acceptance: AcceptanceCommand, *, phase: str, task: HarnessTask) -> CommandRun:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -264,6 +265,114 @@ def test_custom_executor_registry_preserves_task_semantics_and_normalizes_result
         decision["kind"] == "executor_policy" and decision["executor"] == "noop" and decision["outcome"] == "allowed"
         for decision in manifest["policy_decisions"]
     )
+
+
+def test_shell_executor_selection_uses_registered_adapter(tmp_path):
+    executed = []
+
+    class RecordingShellExecutor:
+        metadata = ExecutorMetadata(
+            id="shell",
+            name="Recording Shell",
+            kind="process",
+            adapter="test.recording-shell",
+            input_mode="command",
+            capabilities=("stdout",),
+            uses_command_policy=True,
+        )
+
+        def display_command(self, invocation):
+            return f"recording-shell:{invocation.command}"
+
+        def execute(self, invocation):
+            executed.append(invocation)
+            return ExecutorResult(
+                status="passed",
+                returncode=0,
+                started_at="2024-01-01T00:00:00Z",
+                finished_at="2024-01-01T00:00:01Z",
+                stdout="shell adapter selected",
+                stderr="",
+                metadata={"selected": "shell"},
+            )
+
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0]["command"] = "python3 -c \"print('not run directly')\""
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project, executor_registry=ExecutorRegistry((RecordingShellExecutor(),)))
+    result = harness.run_task(harness.next_task())
+
+    assert result["status"] == "passed"
+    assert len(executed) == 1
+    assert executed[0].command == "python3 -c \"print('not run directly')\""
+    assert result["runs"][0]["executor"] == "shell"
+    assert result["runs"][0]["command"] == "recording-shell:python3 -c \"print('not run directly')\""
+    assert result["runs"][0]["executor_metadata"]["adapter"] == "test.recording-shell"
+    assert result["runs"][0]["executor_result"]["metadata"] == {"selected": "shell"}
+
+
+def test_codex_executor_selection_uses_registered_adapter_and_preparation(tmp_path):
+    prepared = []
+    executed = []
+
+    class RecordingCodexExecutor:
+        metadata = ExecutorMetadata(
+            id="codex",
+            name="Recording Codex",
+            kind="agent",
+            adapter="test.recording-codex",
+            input_mode="prompt",
+            capabilities=("stdout",),
+            requires_agent_approval=True,
+        )
+
+        def prepare_invocation(self, invocation, task_context):
+            prepared.append((invocation.prompt, task_context.task_id, task_context.acceptance[0].name))
+            return replace(invocation, prompt=f"prepared:{task_context.task_id}:{invocation.prompt}")
+
+        def display_command(self, invocation):
+            return f"recording-codex <task:{invocation.task_id}>"
+
+        def execute(self, invocation):
+            executed.append(invocation)
+            return ExecutorResult(
+                status="passed",
+                returncode=0,
+                started_at="2024-01-01T00:00:00Z",
+                finished_at="2024-01-01T00:00:01Z",
+                stdout=invocation.prompt or "",
+                stderr="",
+                metadata={"selected": "codex"},
+            )
+
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0] = {
+        "name": "agent work",
+        "executor": "codex",
+        "prompt": "Do not change files.",
+    }
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project, executor_registry=ExecutorRegistry((RecordingCodexExecutor(),)))
+    result = harness.run_task(harness.next_task(), allow_agent=True)
+
+    assert result["status"] == "passed"
+    assert prepared[0] == ("Do not change files.", "tests", "agent work")
+    assert len(executed) == 1
+    assert executed[0].prompt == "prepared:tests:Do not change files."
+    assert result["runs"][0]["executor"] == "codex"
+    assert result["runs"][0]["command"] == "recording-codex <task:tests>"
+    assert result["runs"][0]["executor_metadata"]["adapter"] == "test.recording-codex"
+    assert result["runs"][0]["executor_result"]["metadata"] == {"selected": "codex"}
 
 
 def test_manifest_index_keeps_repeated_task_runs_with_same_slug(tmp_path, monkeypatch):

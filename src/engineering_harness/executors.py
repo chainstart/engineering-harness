@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -68,6 +68,29 @@ class ExecutorInvocation:
 
 
 @dataclass(frozen=True)
+class ExecutorTaskCommand:
+    name: str
+    command: str | None
+    prompt: str | None
+    executor: str
+
+    def summary(self) -> str:
+        return self.command or self.prompt or self.executor
+
+
+@dataclass(frozen=True)
+class ExecutorTaskContext:
+    project_root: Path
+    task_id: str
+    title: str
+    milestone_id: str
+    milestone_title: str
+    file_scope: tuple[str, ...]
+    acceptance: tuple[ExecutorTaskCommand, ...]
+    e2e: tuple[ExecutorTaskCommand, ...]
+
+
+@dataclass(frozen=True)
 class ExecutorResult:
     status: str
     returncode: int | None
@@ -88,7 +111,16 @@ class Executor(Protocol):
         ...
 
 
-class ShellExecutor:
+class InvocationPreparingExecutor(Protocol):
+    def prepare_invocation(
+        self,
+        invocation: ExecutorInvocation,
+        task_context: ExecutorTaskContext,
+    ) -> ExecutorInvocation:
+        ...
+
+
+class ShellExecutorAdapter:
     metadata = ExecutorMetadata(
         id="shell",
         name="Shell",
@@ -98,6 +130,13 @@ class ShellExecutor:
         capabilities=("local_process", "exit_code", "stdout", "stderr"),
         uses_command_policy=True,
     )
+
+    def prepare_invocation(
+        self,
+        invocation: ExecutorInvocation,
+        task_context: ExecutorTaskContext,
+    ) -> ExecutorInvocation:
+        return invocation
 
     def display_command(self, invocation: ExecutorInvocation) -> str:
         return invocation.command or ""
@@ -136,7 +175,7 @@ class ShellExecutor:
             )
 
 
-class CodexExecutor:
+class CodexExecutorAdapter:
     metadata = ExecutorMetadata(
         id="codex",
         name="Codex",
@@ -146,6 +185,36 @@ class CodexExecutor:
         capabilities=("agent", "workspace_write", "exit_code", "stdout", "stderr"),
         requires_agent_approval=True,
     )
+
+    def prepare_invocation(
+        self,
+        invocation: ExecutorInvocation,
+        task_context: ExecutorTaskContext,
+    ) -> ExecutorInvocation:
+        prompt = invocation.prompt or invocation.command or task_context.title
+        acceptance = "\n".join(f"- {item.name}: {item.summary()}" for item in task_context.acceptance)
+        e2e = "\n".join(f"- {item.name}: {item.summary()}" for item in task_context.e2e)
+        file_scope = "\n".join(f"- {scope}" for scope in task_context.file_scope) or "- repository-scoped, but keep changes minimal"
+        verification = acceptance if not e2e else f"{acceptance}\n\nE2E/user-experience commands:\n{e2e}"
+        expanded_prompt = (
+            "You are executing one roadmap task for an autonomous engineering harness.\n\n"
+            f"Project root: {task_context.project_root}\n"
+            f"Milestone: {task_context.milestone_id} - {task_context.milestone_title}\n"
+            f"Task: {task_context.task_id} - {task_context.title}\n\n"
+            "Goal:\n"
+            f"{prompt}\n\n"
+            "Allowed file scope:\n"
+            f"{file_scope}\n\n"
+            "Verification commands that must pass after your changes:\n"
+            f"{verification}\n\n"
+            "Constraints:\n"
+            "- Edit files directly in the working tree.\n"
+            "- Do not commit or push; the harness handles git checkpoints.\n"
+            "- Do not use private keys, paid live deployment, or live trading.\n"
+            "- Prefer focused, test-driven changes that satisfy the acceptance commands.\n"
+            "- If the task cannot be completed locally, write a clear blocker into the relevant project docs.\n"
+        )
+        return replace(invocation, prompt=expanded_prompt)
 
     def display_command(self, invocation: ExecutorInvocation) -> str:
         model = f" --model {invocation.model}" if invocation.model else ""
@@ -190,6 +259,10 @@ class CodexExecutor:
             )
 
 
+ShellExecutor = ShellExecutorAdapter
+CodexExecutor = CodexExecutorAdapter
+
+
 class ExecutorRegistry:
     def __init__(self, executors: tuple[Executor, ...]) -> None:
         self._executors = {executor.metadata.id: executor for executor in executors}
@@ -218,4 +291,4 @@ class ExecutorRegistry:
 
 
 def default_executor_registry() -> ExecutorRegistry:
-    return ExecutorRegistry((ShellExecutor(), CodexExecutor()))
+    return ExecutorRegistry((ShellExecutorAdapter(), CodexExecutorAdapter()))
