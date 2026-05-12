@@ -492,6 +492,130 @@
           "generated_at": "2026-05-11T23:24:26Z"
         }
       ]
+    },
+    {
+      "id": "policy-engine-v2",
+      "title": "Policy Engine V2",
+      "status": "planned",
+      "objective": "Move from prefix-only allowlists to structured policy decisions.",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-12T22:38:33Z",
+      "tasks": [
+        {
+          "id": "policy-input-schema",
+          "title": "Define structured policy input and decision schema",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 2,
+          "manual_approval_required": false,
+          "agent_approval_required": false,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 1800,
+              "prompt": "Define a structured policy input and policy decision schema for the harness. Capture task, command, executor, phase, git/worktree, file_scope, approval flags, live flags, and project context. Preserve current behavior, but route existing command/executor/manual/live/file-scope decisions through the schema where practical. Add tests for allow, deny, warning, and requires-approval style decisions. Keep changes scoped to src/engineering_harness, tests, and docs."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 1200,
+              "prompt": "Fix failing policy schema tests while keeping existing command allowlist, agent gating, live gating, and file-scope behavior backward compatible."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "policy schema tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-12T22:38:33Z"
+        },
+        {
+          "id": "policy-decision-reports",
+          "title": "Persist policy decisions in task reports and manifests",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 2,
+          "manual_approval_required": false,
+          "agent_approval_required": false,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 1800,
+              "prompt": "Persist structured policy decisions consistently in Markdown task reports, JSON manifests, and manifest index summaries where useful. Include command policy, executor approval, manual approval, live approval, git preflight, and file-scope decisions. Add tests that run allowed, blocked, live-gated, and file-scope violating tasks and assert the report/manifest evidence is coherent."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 1200,
+              "prompt": "Fix failing policy report and manifest tests while preserving existing report readability and manifest compatibility."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "policy report tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-12T22:38:33Z"
+        },
+        {
+          "id": "opa-compatibility-design",
+          "title": "Add optional OPA/Rego compatibility design",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 2,
+          "manual_approval_required": false,
+          "agent_approval_required": false,
+          "file_scope": [
+            "docs/**",
+            "src/engineering_harness/**",
+            "tests/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 1800,
+              "prompt": "Add an optional OPA/Rego compatibility design for the policy schema without adding a hard runtime dependency. Provide docs and a safe stub/export hook that can serialize policy input for external evaluation, while the built-in Python evaluator remains authoritative by default. Add tests for export shape and safe disabled-by-default behavior."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 1200,
+              "prompt": "Fix failing OPA compatibility tests and keep external policy evaluation disabled unless explicitly configured."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "policy docs and tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-12T22:38:33Z"
+        }
+      ]
     }
   ],
   "continuation": {
