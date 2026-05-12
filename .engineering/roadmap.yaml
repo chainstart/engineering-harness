@@ -1110,29 +1110,76 @@
           {
             "id": "phase-level-state",
             "title": "Persist phase-level state for implementation, acceptance, repair, and E2E",
+            "max_task_iterations": 2,
             "file_scope": [
               "src/engineering_harness/**",
-              "tests/**"
+              "tests/**",
+              "docs/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 1800,
+                "prompt": "Implement durable phase-level state for long autonomous drives. Persist each task phase before and after implementation, acceptance attempts, repair attempts, e2e, file-scope guard, manifest writing, checkpoint intent, and final result. Add enough metadata to resume or inspect interrupted work later without changing current public behavior. Add focused tests that run tasks with implementation, acceptance, repair, and e2e phases and assert phase history/state is durable and ordered. Update docs to explain how this supports long-running autonomy."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 1200,
+                "prompt": "Fix failing phase-level state tests while preserving existing run_task, drive, manifest, and report behavior."
+              }
             ],
             "acceptance": [
               {
                 "name": "phase state tests",
                 "command": "python3 -m pytest tests/test_engineering_harness.py -q"
               }
+            ],
+            "e2e": [
+              {
+                "name": "status remains readable with durable phase state",
+                "command": "bin/engh status --project-root . --json"
+              }
             ]
           },
           {
             "id": "pause-resume-cancel",
             "title": "Add pause, resume, cancel, and approval queue commands",
+            "max_task_iterations": 2,
             "file_scope": [
               "src/engineering_harness/**",
               "tests/**",
               "docs/**"
             ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 1800,
+                "prompt": "Implement the first durable drive control commands and state needed for long autonomous runs: pause, resume, cancel, and an approval queue for manual/live/agent gates. Keep behavior local-first and safe. Add CLI commands or subcommands as appropriate, tests for state transitions, and docs showing how a long drive can be paused, resumed, cancelled, or blocked on approval."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 1200,
+                "prompt": "Fix failing durable command tests while preserving existing drive/run behavior and avoiding unsafe automatic approval."
+              }
+            ],
             "acceptance": [
               {
                 "name": "durable command tests",
                 "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+              }
+            ],
+            "e2e": [
+              {
+                "name": "roadmap validates after durable commands",
+                "command": "bin/engh validate --project-root ."
               }
             ]
           }
