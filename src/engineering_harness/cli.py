@@ -99,6 +99,10 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"Root: {summary['root']}")
         print(f"Roadmap: {summary['roadmap']}")
         print(f"Run manifests: {summary.get('manifest_index', {}).get('manifest_count', 0)}")
+        drive_control = summary.get("drive_control", {})
+        approval_queue = summary.get("approval_queue", {})
+        print(f"Drive control: {drive_control.get('status', 'idle')}")
+        print(f"Pending approvals: {approval_queue.get('pending_count', 0)}")
         print("")
         for milestone in summary["milestones"]:
             print(
@@ -325,10 +329,101 @@ def cmd_self_iterate(args: argparse.Namespace) -> int:
     return 0 if result["status"] in {"planned", "disabled"} else 1
 
 
+def cmd_pause(args: argparse.Namespace) -> int:
+    root = resolve_project_root(args)
+    payload = Harness(root).set_drive_control("pause", reason=args.reason)
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"Drive control: {payload['status']} - {payload['message']}")
+    return 0
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    root = resolve_project_root(args)
+    payload = Harness(root).set_drive_control("resume", reason=args.reason)
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"Drive control: {payload['status']} - {payload['message']}")
+    return 0
+
+
+def cmd_cancel(args: argparse.Namespace) -> int:
+    root = resolve_project_root(args)
+    payload = Harness(root).set_drive_control("cancel", reason=args.reason)
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"Drive control: {payload['status']} - {payload['message']}")
+    return 0
+
+
+def cmd_approvals(args: argparse.Namespace) -> int:
+    root = resolve_project_root(args)
+    status_filter = None if args.all else args.status
+    payload = Harness(root).approval_queue_summary(status_filter=status_filter)
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"Approvals: {len(payload['items'])} shown, {payload['pending_count']} pending")
+        for item in payload["items"]:
+            detail = item.get("name") or item.get("phase") or item.get("decision_kind")
+            print(
+                f"- {item['id']}: {item.get('status')} {item.get('approval_kind')} "
+                f"{item.get('task_id')} {detail} - {item.get('reason')}"
+            )
+    return 0
+
+
+def cmd_approve(args: argparse.Namespace) -> int:
+    root = resolve_project_root(args)
+    harness = Harness(root)
+    if args.all:
+        payload = harness.approve_all_pending(approved_by=args.approved_by, reason=args.reason)
+    else:
+        if not args.approval_id:
+            raise ValueError("Provide an approval id or use --all")
+        payload = harness.approve_approval(args.approval_id, approved_by=args.approved_by, reason=args.reason)
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"Approval status: {payload['status']} - {payload['message']}")
+    return 0 if payload["status"] in {"approved", "consumed"} else 1
+
+
 def cmd_drive(args: argparse.Namespace) -> int:
     root = resolve_project_root(args)
     harness = Harness(root)
     started_at = utc_now()
+    start = harness.start_drive()
+    if not start["started"]:
+        final_status = harness.status_summary()
+        payload = {
+            "project": final_status["project"],
+            "root": str(root),
+            "status": start["status"],
+            "message": start["message"],
+            "started_at": started_at,
+            "finished_at": utc_now(),
+            "results": [],
+            "continuations": [],
+            "self_iterations": [],
+            "final_status": final_status,
+        }
+        payload["drive_report"] = write_drive_report(harness, payload)
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print(f"Drive status: {payload['status']} - {payload['message']}")
+            print("Tasks run: 0")
+            print("Continuations: 0")
+            print("Self-iterations: 0")
+            print(f"Drive report: {payload['drive_report']}")
+            next_task = final_status.get("next_task")
+            print(f"Next task: {next_task['id'] if next_task else 'none'}")
+        return 0 if start["status"] == "paused" else 1
+
     deadline = time.monotonic() + args.time_budget_seconds if args.time_budget_seconds else None
     results = []
     continuations = []
@@ -340,6 +435,15 @@ def cmd_drive(args: argparse.Namespace) -> int:
     message = "No pending task."
 
     while True:
+        control = harness.drive_control_summary()
+        if control.get("cancel_requested") or control.get("status") == "cancelled":
+            status = "cancelled"
+            message = "Drive cancelled by control state."
+            break
+        if control.get("pause_requested") or control.get("status") == "paused":
+            status = "paused"
+            message = "Drive paused by control state."
+            break
         if deadline is not None and time.monotonic() >= deadline:
             status = "timeout"
             message = "Time budget expired."
@@ -429,6 +533,7 @@ def cmd_drive(args: argparse.Namespace) -> int:
             message = f"Stopped after task {task.id} because --stop-after-each was set."
             break
 
+    harness.finish_drive(status=status, message=message)
     final_status = harness.status_summary()
     payload = {
         "project": final_status["project"],
@@ -488,6 +593,11 @@ def build_parser() -> argparse.ArgumentParser:
         ("advance", "Materialize the next continuation milestone into the roadmap", cmd_advance),
         ("frontend-tasks", "Propose or materialize frontend roadmap tasks from the experience plan", cmd_frontend_tasks),
         ("self-iterate", "Assess current state and append the next continuation stage", cmd_self_iterate),
+        ("pause", "Pause future drive scheduling for this project", cmd_pause),
+        ("resume", "Clear pause or cancel state so a drive can continue", cmd_resume),
+        ("cancel", "Cancel future drive scheduling for this project until resumed", cmd_cancel),
+        ("approvals", "List pending or historical approval gates", cmd_approvals),
+        ("approve", "Approve one or all pending approval gates", cmd_approve),
         ("drive", "Continuously run pending roadmap tasks until complete, blocked, failed, or out of budget", cmd_drive),
     ]:
         command = subparsers.add_parser(name, help=help_text)
@@ -519,6 +629,16 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--reason", default="manual_self_iteration")
             command.add_argument("--allow-live", action="store_true")
             command.add_argument("--allow-agent", action="store_true")
+        if name in {"pause", "resume", "cancel"}:
+            command.add_argument("--reason", default=f"manual_{name}")
+        if name == "approvals":
+            command.add_argument("--status", default="pending")
+            command.add_argument("--all", action="store_true")
+        if name == "approve":
+            command.add_argument("approval_id", nargs="?")
+            command.add_argument("--all", action="store_true")
+            command.add_argument("--approved-by", default="local")
+            command.add_argument("--reason", default="manual approval")
         if name == "drive":
             command.add_argument("--max-tasks", type=int, default=100)
             command.add_argument("--time-budget-seconds", type=int, default=0)

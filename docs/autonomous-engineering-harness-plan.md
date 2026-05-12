@@ -249,6 +249,16 @@ Current durable phase state:
 - `phase_states` keeps the latest event per phase for quick inspection, while manifests and reports
   remain the public evidence artifacts for completed attempts.
 
+Current durable drive controls:
+
+- Drive-level pause, resume, and cancel state is stored in the `drive_control` block in
+  `.engineering/state/harness-state.json`.
+- `pause` and `cancel` stop future drive scheduling without deleting roadmap tasks or reports.
+- `resume` clears pause or cancel state and lets a later `drive` invocation continue selecting work.
+- Manual, live, and agent policy gates create records in `approval_queue`; approved records unblock
+  the affected task and are marked `consumed` after the task completes.
+- Operator commands and examples are documented in [Durable Drive Controls](durable-drive-controls.md).
+
 ### Stage 6: Frontend Experience Planning
 
 Goal: make every substantial generated project define the right frontend for its users.

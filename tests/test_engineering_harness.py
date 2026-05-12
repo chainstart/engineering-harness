@@ -1538,6 +1538,114 @@ def test_drive_runs_until_roadmap_is_empty(tmp_path):
     assert list((project / ".engineering/reports/tasks/drives").glob("*-drive.md"))
 
 
+def test_drive_pause_resume_and_cancel_controls_are_durable(tmp_path):
+    project = tmp_path / "paused-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="paused-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0]["command"] = (
+        "python3 -c \"from pathlib import Path; Path('pause-marker.txt').write_text('ok')\""
+    )
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    assert cli_main(["pause", "--project-root", str(project), "--reason", "test_pause"]) == 0
+    assert cli_main(["drive", "--project-root", str(project)]) == 0
+    assert not (project / "pause-marker.txt").exists()
+
+    state = json.loads((project / ".engineering/state/harness-state.json").read_text(encoding="utf-8"))
+    assert state["drive_control"]["status"] == "paused"
+    assert state["drive_control"]["pause_requested"] is True
+    assert "tests" not in state.get("tasks", {})
+
+    assert cli_main(["resume", "--project-root", str(project), "--reason", "test_resume"]) == 0
+    assert cli_main(["drive", "--project-root", str(project)]) == 0
+    assert (project / "pause-marker.txt").read_text(encoding="utf-8") == "ok"
+
+    state = json.loads((project / ".engineering/state/harness-state.json").read_text(encoding="utf-8"))
+    assert state["drive_control"]["status"] == "idle"
+    assert state["drive_control"]["last_drive_status"] == "completed"
+    assert state["tasks"]["tests"]["status"] == "passed"
+
+    cancelled = tmp_path / "cancelled-project"
+    cancelled.mkdir()
+    init_project(cancelled, "python-agent", name="cancelled-project")
+    cancelled_roadmap_path = cancelled / ".engineering/roadmap.yaml"
+    cancelled_roadmap = json.loads(cancelled_roadmap_path.read_text(encoding="utf-8"))
+    cancelled_roadmap["milestones"][0]["tasks"][0]["acceptance"][0]["command"] = (
+        "python3 -c \"from pathlib import Path; Path('cancel-marker.txt').write_text('ok')\""
+    )
+    cancelled_roadmap_path.write_text(json.dumps(cancelled_roadmap), encoding="utf-8")
+
+    assert cli_main(["cancel", "--project-root", str(cancelled), "--reason", "test_cancel"]) == 0
+    assert cli_main(["drive", "--project-root", str(cancelled)]) == 1
+    assert not (cancelled / "cancel-marker.txt").exists()
+    state = json.loads((cancelled / ".engineering/state/harness-state.json").read_text(encoding="utf-8"))
+    assert state["drive_control"]["status"] == "cancelled"
+    assert state["drive_control"]["cancel_requested"] is True
+
+
+@pytest.mark.parametrize(
+    ("gate", "approval_kind", "decision_kind", "marker"),
+    [
+        ("manual", "manual", "manual_approval", "manual-marker.txt"),
+        ("live", "live", "live_approval", "live-marker.txt"),
+        ("agent", "agent", "agent_approval", "agent-marker.txt"),
+    ],
+)
+def test_approval_queue_unblocks_manual_live_and_agent_gates(
+    tmp_path,
+    gate,
+    approval_kind,
+    decision_kind,
+    marker,
+):
+    project = tmp_path / f"{gate}-approval-project"
+    project.mkdir()
+    init_project(project, "python-agent", name=f"{gate}-approval-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["acceptance"][0]["command"] = (
+        f"python3 -c \"from pathlib import Path; Path('{marker}').write_text('ok')\""
+    )
+    if gate == "manual":
+        task["manual_approval_required"] = True
+    elif gate == "agent":
+        task["agent_approval_required"] = True
+    elif gate == "live":
+        task["acceptance"][0]["command"] += " --live"
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    assert cli_main(["drive", "--project-root", str(project)]) == 1
+    assert not (project / marker).exists()
+    assert cli_main(["approvals", "--project-root", str(project), "--json"]) == 0
+
+    state = json.loads((project / ".engineering/state/harness-state.json").read_text(encoding="utf-8"))
+    pending = [
+        item
+        for item in state["approval_queue"]["items"].values()
+        if item["status"] == "pending"
+    ]
+    assert len(pending) == 1
+    approval = pending[0]
+    assert approval["approval_kind"] == approval_kind
+    assert approval["decision_kind"] == decision_kind
+    assert state["tasks"]["tests"]["status"] == "blocked"
+    assert state["tasks"]["tests"]["attempts"] == 0
+
+    assert cli_main(["approve", "--project-root", str(project), approval["id"], "--reason", "test approval"]) == 0
+    state = json.loads((project / ".engineering/state/harness-state.json").read_text(encoding="utf-8"))
+    assert state["approval_queue"]["items"][approval["id"]]["status"] == "approved"
+    assert state["tasks"]["tests"]["status"] == "pending"
+
+    assert cli_main(["drive", "--project-root", str(project)]) == 0
+    assert (project / marker).read_text(encoding="utf-8") == "ok"
+    state = json.loads((project / ".engineering/state/harness-state.json").read_text(encoding="utf-8"))
+    assert state["approval_queue"]["items"][approval["id"]]["status"] == "consumed"
+    assert state["tasks"]["tests"]["status"] == "passed"
+
+
 def test_drive_can_commit_after_each_completed_task(tmp_path):
     project = tmp_path / "agent-project"
     project.mkdir()

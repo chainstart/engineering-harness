@@ -33,6 +33,14 @@ EXPERIENCE_KINDS = {"dashboard", "submission-review", "multi-role-app", "api-onl
 POLICY_INPUT_SCHEMA_VERSION = 1
 POLICY_DECISION_SCHEMA_VERSION = 1
 PHASE_STATE_SCHEMA_VERSION = 1
+DRIVE_CONTROL_SCHEMA_VERSION = 1
+APPROVAL_QUEUE_SCHEMA_VERSION = 1
+APPROVAL_DECISION_KINDS = {
+    "manual_approval": "manual",
+    "agent_approval": "agent",
+    "executor_approval": "agent",
+    "live_approval": "live",
+}
 DEFAULT_EXPERIENCE_PLANS: dict[str, dict[str, Any]] = {
     "dashboard": {
         "kind": "dashboard",
@@ -637,6 +645,461 @@ class Harness:
         state["version"] = 1
         state["updated_at"] = utc_now()
         write_json(self.state_path, state)
+
+    def _drive_control(self, state: dict[str, Any]) -> dict[str, Any]:
+        control = state.setdefault("drive_control", {})
+        if not isinstance(control, dict):
+            control = {}
+            state["drive_control"] = control
+        control.setdefault("schema_version", DRIVE_CONTROL_SCHEMA_VERSION)
+        control.setdefault("status", "idle")
+        control.setdefault("active", False)
+        control.setdefault("pause_requested", False)
+        control.setdefault("cancel_requested", False)
+        control.setdefault("reason", None)
+        control.setdefault("updated_at", state.get("updated_at"))
+        history = control.setdefault("history", [])
+        if not isinstance(history, list):
+            control["history"] = []
+        return control
+
+    def _record_drive_control_event(
+        self,
+        state: dict[str, Any],
+        *,
+        command: str,
+        from_status: str,
+        to_status: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        control = self._drive_control(state)
+        event = {
+            "at": utc_now(),
+            "command": command,
+            "from_status": from_status,
+            "to_status": to_status,
+            "reason": reason,
+        }
+        history = control.setdefault("history", [])
+        if isinstance(history, list):
+            history.append(event)
+            control["history"] = history[-100:]
+        return event
+
+    def set_drive_control(self, command: str, *, reason: str = "manual") -> dict[str, Any]:
+        state = self.load_state()
+        control = self._drive_control(state)
+        from_status = str(control.get("status", "idle"))
+        now = utc_now()
+        if command == "pause":
+            control.update(
+                {
+                    "status": "paused",
+                    "active": False,
+                    "pause_requested": True,
+                    "cancel_requested": False,
+                    "paused_at": now,
+                    "reason": reason,
+                    "updated_at": now,
+                }
+            )
+            message = "drive pause requested"
+        elif command == "resume":
+            control.update(
+                {
+                    "status": "idle",
+                    "active": False,
+                    "pause_requested": False,
+                    "cancel_requested": False,
+                    "resumed_at": now,
+                    "reason": reason,
+                    "updated_at": now,
+                }
+            )
+            message = "drive controls cleared; run `drive` to continue"
+        elif command == "cancel":
+            control.update(
+                {
+                    "status": "cancelled",
+                    "active": False,
+                    "pause_requested": False,
+                    "cancel_requested": True,
+                    "cancelled_at": now,
+                    "reason": reason,
+                    "updated_at": now,
+                }
+            )
+            message = "drive cancel requested"
+        else:
+            raise ValueError(f"unknown drive control command: {command}")
+        self._record_drive_control_event(
+            state,
+            command=command,
+            from_status=from_status,
+            to_status=str(control["status"]),
+            reason=reason,
+        )
+        self.save_state(state)
+        append_jsonl(
+            self.decision_log_path,
+            {
+                "at": now,
+                "event": "drive_control",
+                "command": command,
+                "from_status": from_status,
+                "to_status": control["status"],
+                "reason": reason,
+            },
+        )
+        return {"status": control["status"], "message": message, "drive_control": deepcopy(control)}
+
+    def start_drive(self, *, reason: str = "drive_command") -> dict[str, Any]:
+        state = self.load_state()
+        control = self._drive_control(state)
+        from_status = str(control.get("status", "idle"))
+        if bool(control.get("pause_requested")) or from_status == "paused":
+            return {
+                "started": False,
+                "status": "paused",
+                "message": "drive is paused; run `resume` before starting another drive",
+                "drive_control": deepcopy(control),
+            }
+        if bool(control.get("cancel_requested")) or from_status == "cancelled":
+            return {
+                "started": False,
+                "status": "cancelled",
+                "message": "drive is cancelled; run `resume` to clear the cancellation before driving again",
+                "drive_control": deepcopy(control),
+            }
+        now = utc_now()
+        control.update(
+            {
+                "schema_version": DRIVE_CONTROL_SCHEMA_VERSION,
+                "status": "running",
+                "active": True,
+                "pause_requested": False,
+                "cancel_requested": False,
+                "started_at": now,
+                "reason": reason,
+                "updated_at": now,
+            }
+        )
+        self._record_drive_control_event(
+            state,
+            command="start",
+            from_status=from_status,
+            to_status="running",
+            reason=reason,
+        )
+        self.save_state(state)
+        return {"started": True, "status": "running", "message": "drive started", "drive_control": deepcopy(control)}
+
+    def finish_drive(self, *, status: str, message: str) -> dict[str, Any]:
+        state = self.load_state()
+        control = self._drive_control(state)
+        from_status = str(control.get("status", "idle"))
+        now = utc_now()
+        if bool(control.get("cancel_requested")) or status == "cancelled":
+            to_status = "cancelled"
+            pause_requested = False
+            cancel_requested = True
+        elif bool(control.get("pause_requested")) or status == "paused":
+            to_status = "paused"
+            pause_requested = True
+            cancel_requested = False
+        else:
+            to_status = "idle"
+            pause_requested = False
+            cancel_requested = False
+        control.update(
+            {
+                "schema_version": DRIVE_CONTROL_SCHEMA_VERSION,
+                "status": to_status,
+                "active": False,
+                "pause_requested": pause_requested,
+                "cancel_requested": cancel_requested,
+                "last_drive_status": status,
+                "last_drive_message": message,
+                "finished_at": now,
+                "updated_at": now,
+            }
+        )
+        self._record_drive_control_event(
+            state,
+            command="finish",
+            from_status=from_status,
+            to_status=to_status,
+            reason=message,
+        )
+        self.save_state(state)
+        return deepcopy(control)
+
+    def drive_control_summary(self) -> dict[str, Any]:
+        state = self.load_state()
+        return deepcopy(self._drive_control(state))
+
+    def _approval_queue(self, state: dict[str, Any]) -> dict[str, Any]:
+        queue = state.setdefault("approval_queue", {})
+        if not isinstance(queue, dict):
+            queue = {}
+            state["approval_queue"] = queue
+        queue.setdefault("schema_version", APPROVAL_QUEUE_SCHEMA_VERSION)
+        items = queue.setdefault("items", {})
+        if not isinstance(items, dict):
+            queue["items"] = {}
+        queue.setdefault("updated_at", state.get("updated_at"))
+        return queue
+
+    def approval_queue_summary(self, *, status_filter: str | None = "pending") -> dict[str, Any]:
+        state = self.load_state()
+        queue = self._approval_queue(state)
+        items = [
+            deepcopy(item)
+            for item in queue.get("items", {}).values()
+            if isinstance(item, dict) and (status_filter is None or str(item.get("status")) == status_filter)
+        ]
+        items.sort(key=lambda item: (str(item.get("created_at") or ""), str(item.get("id") or "")))
+        all_items = [item for item in queue.get("items", {}).values() if isinstance(item, dict)]
+        counts: dict[str, int] = {}
+        for item in all_items:
+            status = str(item.get("status", "unknown"))
+            counts[status] = counts.get(status, 0) + 1
+        return {
+            "schema_version": APPROVAL_QUEUE_SCHEMA_VERSION,
+            "path": self._project_relative_path(self.state_path),
+            "status_filter": status_filter,
+            "counts": dict(sorted(counts.items())),
+            "pending_count": counts.get("pending", 0),
+            "items": items,
+        }
+
+    def approve_approval(
+        self,
+        approval_id: str,
+        *,
+        approved_by: str = "local",
+        reason: str = "manual approval",
+    ) -> dict[str, Any]:
+        state = self.load_state()
+        queue = self._approval_queue(state)
+        items = queue.setdefault("items", {})
+        record = items.get(approval_id)
+        if not isinstance(record, dict):
+            return {"status": "not_found", "message": f"approval not found: {approval_id}", "approval_id": approval_id}
+        previous_status = str(record.get("status", "pending"))
+        now = utc_now()
+        if previous_status == "consumed":
+            return {
+                "status": "consumed",
+                "message": f"approval was already consumed: {approval_id}",
+                "approval": deepcopy(record),
+            }
+        record.update(
+            {
+                "status": "approved",
+                "approved_at": now,
+                "approved_by": approved_by,
+                "approval_reason": reason,
+                "updated_at": now,
+            }
+        )
+        queue["updated_at"] = now
+        task_id = str(record.get("task_id", ""))
+        task_state = state.setdefault("tasks", {}).get(task_id)
+        if isinstance(task_state, dict) and str(task_state.get("status")) == "blocked":
+            task_state["status"] = "pending"
+            task_state["approval_unblocked_at"] = now
+            task_state["approval_unblocked_by"] = approval_id
+            task_state["blocked_on_approval"] = False
+        self.save_state(state)
+        append_jsonl(
+            self.decision_log_path,
+            {
+                "at": now,
+                "event": "approval",
+                "approval_id": approval_id,
+                "task_id": task_id,
+                "status": "approved",
+                "previous_status": previous_status,
+                "approved_by": approved_by,
+                "reason": reason,
+            },
+        )
+        return {"status": "approved", "message": f"approval recorded: {approval_id}", "approval": deepcopy(record)}
+
+    def approve_all_pending(
+        self,
+        *,
+        approved_by: str = "local",
+        reason: str = "manual approval",
+    ) -> dict[str, Any]:
+        pending = self.approval_queue_summary(status_filter="pending")["items"]
+        results = [
+            self.approve_approval(str(item["id"]), approved_by=approved_by, reason=reason)
+            for item in pending
+            if item.get("id")
+        ]
+        return {
+            "status": "approved",
+            "message": f"approved {len(results)} pending approval(s)",
+            "approved_count": len(results),
+            "approvals": results,
+        }
+
+    def _approval_phase_key(self, phase: str | None) -> str:
+        value = str(phase or "task")
+        if value.startswith("acceptance-"):
+            return "acceptance"
+        if value.startswith("repair-"):
+            return "repair"
+        return value
+
+    def _approval_identity_from_decision(self, task: HarnessTask, decision: dict[str, Any]) -> dict[str, Any] | None:
+        decision_kind = str(decision.get("kind", ""))
+        approval_kind = APPROVAL_DECISION_KINDS.get(decision_kind)
+        if approval_kind is None:
+            return None
+        policy_input = decision.get("input") if isinstance(decision.get("input"), dict) else {}
+        command = policy_input.get("command") if isinstance(policy_input.get("command"), dict) else {}
+        phase = self._approval_phase_key(str(decision.get("phase") or policy_input.get("phase") or "task"))
+        name = str(decision.get("name") or command.get("name") or "")
+        executor = str(decision.get("executor") or command.get("executor") or "")
+        approval_flag = str(decision.get("approval_flag") or "")
+        identity = {
+            "task_id": task.id,
+            "milestone_id": task.milestone_id,
+            "approval_kind": approval_kind,
+            "decision_kind": decision_kind,
+            "phase": phase,
+            "name": name,
+            "executor": executor,
+            "approval_flag": approval_flag,
+        }
+        raw = json.dumps(identity, sort_keys=True)
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+        label_parts = [task.id, approval_kind, phase]
+        if name:
+            label_parts.append(name)
+        elif executor:
+            label_parts.append(executor)
+        identity["id"] = f"{self._slugify('-'.join(label_parts))}-{digest}"
+        return identity
+
+    def _approval_is_approved(
+        self,
+        task: HarnessTask,
+        *,
+        decision_kind: str,
+        phase: str = "task",
+        name: str | None = None,
+        executor: str | None = None,
+    ) -> bool:
+        state = self.load_state()
+        items = self._approval_queue(state).get("items", {})
+        phase_key = self._approval_phase_key(phase)
+        for item in items.values():
+            if not isinstance(item, dict) or str(item.get("status")) != "approved":
+                continue
+            if str(item.get("task_id")) != task.id:
+                continue
+            if str(item.get("decision_kind")) != decision_kind:
+                continue
+            if str(item.get("phase", "task")) != phase_key:
+                continue
+            if name is not None and str(item.get("name", "")) != name:
+                continue
+            if executor is not None and str(item.get("executor", "")) != executor:
+                continue
+            return True
+        return False
+
+    def _queue_required_approvals(
+        self,
+        state: dict[str, Any],
+        task: HarnessTask,
+        decisions: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        queue = self._approval_queue(state)
+        items = queue.setdefault("items", {})
+        created_or_updated: list[dict[str, Any]] = []
+        now = utc_now()
+        for decision in decisions:
+            if not decision.get("requires_approval") or decision.get("outcome") != "requires_approval":
+                continue
+            identity = self._approval_identity_from_decision(task, decision)
+            if identity is None:
+                continue
+            approval_id = str(identity["id"])
+            existing = items.get(approval_id)
+            if isinstance(existing, dict) and str(existing.get("status")) in {"pending", "approved"}:
+                existing.update(
+                    {
+                        "last_seen_at": now,
+                        "reason": decision.get("reason"),
+                        "policy_decision": self._compact_policy_decision(decision),
+                        "updated_at": now,
+                    }
+                )
+                created_or_updated.append(deepcopy(existing))
+                continue
+            record = {
+                "schema_version": APPROVAL_QUEUE_SCHEMA_VERSION,
+                **identity,
+                "status": "pending",
+                "reason": decision.get("reason"),
+                "created_at": now,
+                "updated_at": now,
+                "last_seen_at": now,
+                "source": "policy",
+                "policy_decision": self._compact_policy_decision(decision),
+            }
+            items[approval_id] = record
+            created_or_updated.append(deepcopy(record))
+            append_jsonl(
+                self.decision_log_path,
+                {
+                    "at": now,
+                    "event": "approval",
+                    "approval_id": approval_id,
+                    "task_id": task.id,
+                    "status": "pending",
+                    "decision_kind": identity["decision_kind"],
+                    "approval_kind": identity["approval_kind"],
+                    "reason": decision.get("reason"),
+                },
+            )
+        if created_or_updated:
+            queue["updated_at"] = now
+        return created_or_updated
+
+    def _consume_task_approvals(
+        self,
+        state: dict[str, Any],
+        task: HarnessTask,
+        *,
+        status: str,
+    ) -> list[dict[str, Any]]:
+        queue = self._approval_queue(state)
+        items = queue.setdefault("items", {})
+        now = utc_now()
+        consumed: list[dict[str, Any]] = []
+        for item in items.values():
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("task_id")) != task.id or str(item.get("status")) not in {"pending", "approved"}:
+                continue
+            item.update(
+                {
+                    "status": "consumed",
+                    "consumed_at": now,
+                    "consumed_by_status": status,
+                    "updated_at": now,
+                }
+            )
+            consumed.append(deepcopy(item))
+        if consumed:
+            queue["updated_at"] = now
+        return consumed
 
     def _record_phase_state(
         self,
@@ -1244,6 +1707,8 @@ Rules:
             "experience": self.frontend_experience_plan(),
             "continuation": self.continuation_summary(),
             "self_iteration": self.self_iteration_summary(),
+            "drive_control": self.drive_control_summary(),
+            "approval_queue": self.approval_queue_summary(status_filter="pending"),
             "manifest_index": self.manifest_index_summary(),
         }
 
@@ -2866,14 +3331,24 @@ Rules:
             },
         }
         task_state["last_dirty_before_paths"] = safety["git_preflight"].get("dirty_before_paths", [])
+        effective_allow_manual = allow_manual or self._approval_is_approved(
+            task,
+            decision_kind="manual_approval",
+            phase="task",
+        )
+        effective_allow_agent = allow_agent or self._approval_is_approved(
+            task,
+            decision_kind="agent_approval",
+            phase="task",
+        )
 
         manual_decision = self._manual_approval_decision(
             self._policy_input(
                 task,
                 safety=safety,
                 allow_live=allow_live,
-                allow_manual=allow_manual,
-                allow_agent=allow_agent,
+                allow_manual=effective_allow_manual,
+                allow_agent=effective_allow_agent,
             )
         )
         if manual_decision.blocks_execution():
@@ -2888,16 +3363,16 @@ Rules:
                 not dry_run,
                 safety=safety,
                 allow_live=allow_live,
-                allow_manual=allow_manual,
-                allow_agent=allow_agent,
+                allow_manual=effective_allow_manual,
+                allow_agent=effective_allow_agent,
             )
         agent_decision = self._agent_approval_decision(
             self._policy_input(
                 task,
                 safety=safety,
                 allow_live=allow_live,
-                allow_manual=allow_manual,
-                allow_agent=allow_agent,
+                allow_manual=effective_allow_manual,
+                allow_agent=effective_allow_agent,
             )
         )
         if agent_decision.blocks_execution():
@@ -2912,8 +3387,8 @@ Rules:
                 not dry_run,
                 safety=safety,
                 allow_live=allow_live,
-                allow_manual=allow_manual,
-                allow_agent=allow_agent,
+                allow_manual=effective_allow_manual,
+                allow_agent=effective_allow_agent,
             )
         if not task.acceptance:
             return self._finish_task(
@@ -2927,8 +3402,8 @@ Rules:
                 not dry_run,
                 safety=safety,
                 allow_live=allow_live,
-                allow_manual=allow_manual,
-                allow_agent=allow_agent,
+                allow_manual=effective_allow_manual,
+                allow_agent=effective_allow_agent,
             )
 
         runs: list[CommandRun] = []
@@ -2938,8 +3413,8 @@ Rules:
             runs=runs,
             dry_run=dry_run,
             allow_live=allow_live,
-            allow_manual=allow_manual,
-            allow_agent=allow_agent,
+            allow_manual=effective_allow_manual,
+            allow_agent=effective_allow_agent,
             task=task,
             state=state,
             persist_state=not dry_run,
@@ -2954,8 +3429,8 @@ Rules:
                     runs=runs,
                     dry_run=dry_run,
                     allow_live=allow_live,
-                    allow_manual=allow_manual,
-                    allow_agent=allow_agent,
+                    allow_manual=effective_allow_manual,
+                    allow_agent=effective_allow_agent,
                     task=task,
                     state=state,
                     persist_state=not dry_run,
@@ -2972,8 +3447,8 @@ Rules:
                     runs=runs,
                     dry_run=dry_run,
                     allow_live=allow_live,
-                    allow_manual=allow_manual,
-                    allow_agent=allow_agent,
+                    allow_manual=effective_allow_manual,
+                    allow_agent=effective_allow_agent,
                     task=task,
                     state=state,
                     persist_state=not dry_run,
@@ -2989,8 +3464,8 @@ Rules:
                 runs=runs,
                 dry_run=dry_run,
                 allow_live=allow_live,
-                allow_manual=allow_manual,
-                allow_agent=allow_agent,
+                allow_manual=effective_allow_manual,
+                allow_agent=effective_allow_agent,
                 task=task,
                 state=state,
                 persist_state=not dry_run,
@@ -3025,8 +3500,8 @@ Rules:
                     task,
                     safety=safety,
                     allow_live=allow_live,
-                    allow_manual=allow_manual,
-                    allow_agent=allow_agent,
+                    allow_manual=effective_allow_manual,
+                    allow_agent=effective_allow_agent,
                 )
             )
             if overall_status == "passed" and file_scope_decision.blocks_execution():
@@ -3064,8 +3539,8 @@ Rules:
             not dry_run,
             safety=safety,
             allow_live=allow_live,
-            allow_manual=allow_manual,
-            allow_agent=allow_agent,
+            allow_manual=effective_allow_manual,
+            allow_agent=effective_allow_agent,
         )
 
     def _run_command_group(
@@ -3121,14 +3596,29 @@ Rules:
         if not commands:
             return finish("passed", f"No {phase} commands configured.")
         for command in commands:
+            approval_phase = self._approval_phase_key(phase)
+            command_allow_live = allow_live or self._approval_is_approved(
+                task,
+                decision_kind="live_approval",
+                phase=approval_phase,
+                name=command.name,
+                executor=command.executor,
+            )
+            command_allow_agent = allow_agent or self._approval_is_approved(
+                task,
+                decision_kind="executor_approval",
+                phase=approval_phase,
+                name=command.name,
+                executor=command.executor,
+            )
             executor_metadata = self.executor_registry.metadata_for(command.executor)
             policy_input = self._policy_input(
                 task,
                 phase=phase,
                 command=command,
-                allow_live=allow_live,
+                allow_live=command_allow_live,
                 allow_manual=allow_manual,
-                allow_agent=allow_agent,
+                allow_agent=command_allow_agent,
                 executor_metadata=executor_metadata,
             )
             executor_decision = self._executor_policy_decision(policy_input)
@@ -3539,6 +4029,10 @@ Rules:
         )
         self.rebuild_manifest_index()
         if persist:
+            queued_approvals = self._queue_required_approvals(state, task, policy_decisions)
+            if status in COMPLETED_STATUSES:
+                self._consume_task_approvals(state, task, status=status)
+            approval_blocked = status == "blocked" and bool(queued_approvals)
             self._record_phase_state(
                 state,
                 task,
@@ -3555,6 +4049,8 @@ Rules:
             )
             task_state = state.setdefault("tasks", {}).setdefault(task.id, {})
             task_state["status"] = status
+            if approval_blocked:
+                task_state["blocked_on_approval"] = True
             task_state["last_finished_at"] = finished_at
             task_state["last_report"] = report_relative
             task_state["last_manifest"] = manifest_relative
@@ -3572,6 +4068,11 @@ Rules:
                     "run_count": len(runs),
                 },
             )
+            if approval_blocked:
+                state.setdefault("tasks", {}).setdefault(task.id, {})["attempts"] = max(
+                    0,
+                    int(state.get("tasks", {}).get(task.id, {}).get("attempts", 0)) - 1,
+                )
             self.save_state(state)
         append_jsonl(
             self.decision_log_path,
@@ -3777,13 +4278,23 @@ Rules:
         allow_manual: bool,
         allow_agent: bool,
     ) -> list[dict[str, Any]]:
+        task_allow_manual = allow_manual or self._approval_is_approved(
+            task,
+            decision_kind="manual_approval",
+            phase="task",
+        )
+        task_allow_agent = allow_agent or self._approval_is_approved(
+            task,
+            decision_kind="agent_approval",
+            phase="task",
+        )
         base_input = self._policy_input(
             task,
             safety=safety,
             git_context=git_context,
             allow_live=allow_live,
-            allow_manual=allow_manual,
-            allow_agent=allow_agent,
+            allow_manual=task_allow_manual,
+            allow_agent=task_allow_agent,
         )
         decisions: list[PolicyDecision] = [
             self._manual_approval_decision(base_input),
@@ -3796,6 +4307,20 @@ Rules:
             ("e2e", task.e2e),
         ):
             for command in commands:
+                command_allow_live = allow_live or self._approval_is_approved(
+                    task,
+                    decision_kind="live_approval",
+                    phase=phase,
+                    name=command.name,
+                    executor=command.executor,
+                )
+                command_allow_agent = task_allow_agent or self._approval_is_approved(
+                    task,
+                    decision_kind="executor_approval",
+                    phase=phase,
+                    name=command.name,
+                    executor=command.executor,
+                )
                 executor_metadata = self.executor_registry.metadata_for(command.executor)
                 command_input = self._policy_input(
                     task,
@@ -3803,9 +4328,9 @@ Rules:
                     command=command,
                     safety=safety,
                     git_context=git_context,
-                    allow_live=allow_live,
-                    allow_manual=allow_manual,
-                    allow_agent=allow_agent,
+                    allow_live=command_allow_live,
+                    allow_manual=task_allow_manual,
+                    allow_agent=command_allow_agent,
                     executor_metadata=executor_metadata,
                 )
                 executor_decision = self._executor_policy_decision(command_input)
