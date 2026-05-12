@@ -19,6 +19,11 @@ from engineering_harness.executors import (
     default_executor_registry,
 )
 from engineering_harness.cli import main as cli_main
+from engineering_harness.policy_compat import (
+    evaluate_opa_policy_input,
+    export_policy_input_for_opa,
+    serialize_policy_input_for_opa,
+)
 from engineering_harness.profiles import list_profiles
 
 
@@ -268,6 +273,74 @@ def test_harness_runs_task_and_writes_matching_manifest(tmp_path):
 
     state = json.loads((project / ".engineering/state/harness-state.json").read_text(encoding="utf-8"))
     assert state["tasks"]["tests"]["last_manifest"] == result["manifest"]
+
+
+def test_opa_policy_input_export_shape(tmp_path):
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0]["command"] = "python3 -c \"print('ok')\""
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    result = harness.run_task(harness.next_task())
+    manifest = task_manifest(project, result)
+
+    exported = export_policy_input_for_opa(manifest["policy_input"])
+
+    assert exported["schema_version"] == 1
+    assert exported["kind"] == "opa_rego_policy_input_export"
+    assert exported["target"] == "opa-rego"
+    assert exported["policy_input_schema_version"] == 1
+    assert exported["policy_decision_schema_version"] == 1
+    assert exported["authoritative_engine"] == "python"
+    assert exported["external_evaluation"] == {
+        "enabled": False,
+        "decision_mode": "advisory",
+        "runtime_dependency": None,
+    }
+    assert exported["rego"] == {
+        "package": "engineering_harness.policy.v1",
+        "entrypoint": "data.engineering_harness.policy.v1.decisions",
+        "input_path": "input.policy_input",
+    }
+    assert exported["policy_input"] == manifest["policy_input"]
+
+    exported["policy_input"]["task"]["id"] = "mutated"
+    assert manifest["policy_input"]["task"]["id"] == "tests"
+    serialized = json.loads(serialize_policy_input_for_opa(manifest["policy_input"]))
+    assert serialized["policy_input"]["task"]["id"] == "tests"
+
+
+def test_opa_policy_input_evaluation_stub_is_disabled_by_default():
+    policy_input = {
+        "schema_version": 1,
+        "project": {"name": "agent-project"},
+        "task": {"id": "tests"},
+    }
+    called = False
+
+    def evaluator(_exported: dict) -> dict:
+        nonlocal called
+        called = True
+        raise AssertionError("disabled OPA/Rego stub must not call evaluator")
+
+    result = evaluate_opa_policy_input(policy_input, evaluator=evaluator)
+
+    assert called is False
+    assert result["enabled"] is False
+    assert result["status"] == "disabled"
+    assert result["authoritative"] is False
+    assert result["authoritative_engine"] == "python"
+    assert result["decision_mode"] == "disabled"
+    assert result["decisions"] == []
+    assert result["export"]["external_evaluation"]["enabled"] is False
+
+    enabled_without_runtime = evaluate_opa_policy_input(policy_input, enabled=True)
+    assert enabled_without_runtime["status"] == "not_configured"
+    assert enabled_without_runtime["decisions"] == []
 
 
 def test_manifest_index_lists_multiple_task_run_manifests_deterministically(tmp_path):

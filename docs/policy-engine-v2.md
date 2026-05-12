@@ -47,3 +47,40 @@ The summary shape is intentionally compact:
 - `by_kind`, `by_outcome`, `by_effect`, and `by_severity`: deterministic count maps.
 - `blocking`: compact decision records whose effect is `deny` or `requires_approval`.
 - `requires_approval`: compact decision records that name the required approval flag.
+
+## OPA/Rego Compatibility
+
+Policy Engine V2 includes an optional OPA/Rego compatibility surface, but does not add Open Policy
+Agent as a runtime dependency. The built-in Python evaluator remains authoritative by default.
+External OPA/Rego evaluation is advisory unless a future integration explicitly changes enforcement
+semantics. Task execution does not call this hook unless a caller opts in outside the default run
+path.
+
+The compatibility hook lives in `engineering_harness.policy_compat`:
+
+- `export_policy_input_for_opa(policy_input)` returns an OPA-friendly JSON document.
+- `serialize_policy_input_for_opa(policy_input)` returns the same document as deterministic JSON.
+- `evaluate_opa_policy_input(policy_input)` is disabled by default and returns no decisions.
+- `evaluate_opa_policy_input(policy_input, enabled=True, evaluator=...)` calls an injected evaluator
+  and treats returned decisions as advisory.
+
+The export wrapper has `schema_version: 1`, `kind: opa_rego_policy_input_export`, `target:
+opa-rego`, `authoritative_engine: python`, OPA package hints, and the original `policy_input`
+contract under `policy_input`.
+
+Recommended Rego layout:
+
+```rego
+package engineering_harness.policy.v1
+
+default decisions := []
+
+policy_input := input.policy_input
+```
+
+The export advertises `data.engineering_harness.policy.v1.decisions` as the entrypoint and
+`input.policy_input` as the input path. Rego policies that emit decisions should use the same
+normalized decision vocabulary as the Python evaluator: `allowed`, `denied`, `warning`, and
+`requires_approval`; `allow`, `deny`, `warn`, and `requires_approval`; plus the existing severity
+values. External decisions should be converted back to `policy_decisions` schema version 1 before
+they are compared with or displayed alongside Python decisions.
