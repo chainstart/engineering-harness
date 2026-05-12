@@ -1714,6 +1714,7 @@ Rules:
             "manifest_count": index["manifest_count"],
             "latest_manifest": index["latest_manifest"],
             "status_counts": index["status_counts"],
+            "policy_decision_summary": index.get("policy_decision_summary", {}),
         }
 
     def rebuild_manifest_index(self) -> dict[str, Any]:
@@ -1752,6 +1753,7 @@ Rules:
 
         latest_manifest = manifests[-1]["manifest_path"] if manifests else None
         latest_finished_at = max((str(item.get("finished_at") or "") for item in manifests), default="") or None
+        policy_decision_summary = self._aggregate_policy_decision_summaries(manifests)
         return {
             "schema_version": 1,
             "kind": "engineering-harness.task-run-manifest-index",
@@ -1763,6 +1765,7 @@ Rules:
             "updated_at": latest_finished_at,
             "manifest_count": len(manifests),
             "status_counts": dict(sorted(status_counts.items())),
+            "policy_decision_summary": policy_decision_summary,
             "latest_manifest": latest_manifest,
             "latest_by_task": dict(sorted(latest_by_task.items())),
             "manifests": manifests,
@@ -1782,6 +1785,12 @@ Rules:
         milestone = manifest.get("milestone") if isinstance(manifest.get("milestone"), dict) else {}
         runs = manifest.get("runs") if isinstance(manifest.get("runs"), list) else []
         git = manifest.get("git") if isinstance(manifest.get("git"), dict) else {}
+        policy_decisions = manifest.get("policy_decisions") if isinstance(manifest.get("policy_decisions"), list) else []
+        policy_decision_summary = (
+            manifest.get("policy_decision_summary")
+            if isinstance(manifest.get("policy_decision_summary"), dict)
+            else self._policy_decision_summary(policy_decisions)
+        )
         return {
             "manifest_path": str(manifest.get("manifest_path") or self._project_relative_path(manifest_path)),
             "report_path": str(manifest.get("report_path") or ""),
@@ -1796,6 +1805,7 @@ Rules:
             "dry_run": bool(manifest.get("dry_run", False)),
             "attempt": manifest.get("attempt"),
             "run_count": len(runs),
+            "policy_decision_summary": policy_decision_summary,
             "runs": [
                 {
                     "phase": str(run.get("phase") or ""),
@@ -1813,6 +1823,53 @@ Rules:
                 "is_repository": bool(git.get("is_repository", False)),
                 "head": git.get("head"),
             },
+        }
+
+    def _aggregate_policy_decision_summaries(self, manifests: list[dict[str, Any]]) -> dict[str, Any]:
+        by_kind: dict[str, int] = {}
+        by_outcome: dict[str, int] = {}
+        by_effect: dict[str, int] = {}
+        by_severity: dict[str, int] = {}
+        total = 0
+        blocking: list[dict[str, Any]] = []
+        requires_approval: list[dict[str, Any]] = []
+        for manifest in manifests:
+            summary = manifest.get("policy_decision_summary")
+            if not isinstance(summary, dict):
+                continue
+            total += int(summary.get("total") or 0)
+            for source, target in (
+                (summary.get("by_kind"), by_kind),
+                (summary.get("by_outcome"), by_outcome),
+                (summary.get("by_effect"), by_effect),
+                (summary.get("by_severity"), by_severity),
+            ):
+                if not isinstance(source, dict):
+                    continue
+                for key, value in source.items():
+                    target[str(key)] = target.get(str(key), 0) + int(value or 0)
+            for decision in summary.get("blocking", []):
+                if isinstance(decision, dict):
+                    blocking.append(self._manifest_policy_summary_item(manifest, decision))
+            for decision in summary.get("requires_approval", []):
+                if isinstance(decision, dict):
+                    requires_approval.append(self._manifest_policy_summary_item(manifest, decision))
+        return {
+            "total": total,
+            "by_kind": dict(sorted(by_kind.items())),
+            "by_outcome": dict(sorted(by_outcome.items())),
+            "by_effect": dict(sorted(by_effect.items())),
+            "by_severity": dict(sorted(by_severity.items())),
+            "blocking": blocking,
+            "requires_approval": requires_approval,
+        }
+
+    def _manifest_policy_summary_item(self, manifest: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "manifest_path": manifest.get("manifest_path"),
+            "task_id": manifest.get("task_id"),
+            "manifest_status": manifest.get("status"),
+            **decision,
         }
 
     def _project_relative_path(self, path: Path) -> str:
@@ -2358,6 +2415,31 @@ Rules:
                 policy_input=policy_input,
                 status="unknown",
             )
+        return PolicyDecision(
+            kind="executor_policy",
+            scope="command",
+            outcome="allowed",
+            effect="allow",
+            severity="info",
+            reason="registered executor",
+            policy_input=policy_input,
+        )
+
+    def _executor_approval_decision(self, policy_input: PolicyInput) -> PolicyDecision:
+        command = policy_input.command or {}
+        executor = policy_input.executor or {}
+        executor_id = str(command.get("executor") or executor.get("id") or "")
+        if not executor_id or executor.get("kind") == "unknown":
+            return PolicyDecision(
+                kind="executor_approval",
+                scope="command",
+                outcome="warning",
+                effect="warn",
+                severity="warning",
+                reason=f"executor approval not evaluated for unknown executor: {executor_id}",
+                policy_input=policy_input,
+                status="unknown",
+            )
         if executor.get("requires_agent_approval"):
             if not policy_input.approvals.get("allow_agent"):
                 return PolicyDecision(
@@ -2382,12 +2464,12 @@ Rules:
                 approval_flag="--allow-agent",
             )
         return PolicyDecision(
-            kind="executor_policy",
+            kind="executor_approval",
             scope="command",
             outcome="allowed",
             effect="allow",
             severity="info",
-            reason="registered executor",
+            reason="executor approval not required",
             policy_input=policy_input,
         )
 
@@ -2428,6 +2510,45 @@ Rules:
             severity="error",
             reason=reason,
             policy_input=policy_input,
+            metadata=metadata,
+        )
+
+    def _live_approval_decision(self, policy_input: PolicyInput) -> PolicyDecision:
+        live = policy_input.live or {}
+        matches = list(live.get("matched_patterns", []))
+        if not live.get("detected"):
+            return PolicyDecision(
+                kind="live_approval",
+                scope="command",
+                outcome="allowed",
+                effect="allow",
+                severity="info",
+                reason="live approval not required",
+                policy_input=policy_input,
+            )
+        metadata = {"matched_live_patterns": matches}
+        if live.get("allow_live"):
+            return PolicyDecision(
+                kind="live_approval",
+                scope="command",
+                outcome="allowed",
+                effect="allow",
+                severity="info",
+                reason="live approval satisfied",
+                policy_input=policy_input,
+                approval_flag="--allow-live",
+                metadata=metadata,
+            )
+        return PolicyDecision(
+            kind="live_approval",
+            scope="command",
+            outcome="requires_approval",
+            effect="requires_approval",
+            severity="approval",
+            reason="live command requires --allow-live",
+            policy_input=policy_input,
+            requires_approval=True,
+            approval_flag="--allow-live",
             metadata=metadata,
         )
 
@@ -2858,6 +2979,24 @@ Rules:
                     )
                 )
                 return "blocked", executor_decision.reason
+            executor_approval_decision = self._executor_approval_decision(policy_input)
+            if executor_approval_decision.blocks_execution():
+                runs.append(
+                    CommandRun(
+                        phase,
+                        command.name,
+                        self._display_command(command, task),
+                        "blocked",
+                        None,
+                        utc_now(),
+                        utc_now(),
+                        "",
+                        executor_approval_decision.reason,
+                        executor=command.executor,
+                        executor_metadata=executor_metadata,
+                    )
+                )
+                return "blocked", executor_approval_decision.reason
             if executor is None:
                 return "blocked", executor_decision.reason
             if executor.metadata.uses_command_policy:
@@ -3104,7 +3243,37 @@ Rules:
     ) -> dict[str, Any]:
         finished_at = utc_now()
         manifest_path = report_path.with_suffix(".json")
-        self._write_report(report_path, task, started_at, finished_at, runs, status, message, safety=safety)
+        safety_payload = safety or {}
+        git_context = self._git_context(safety_payload)
+        policy_input = self._policy_input(
+            task,
+            safety=safety_payload,
+            git_context=git_context,
+            allow_live=allow_live,
+            allow_manual=allow_manual,
+            allow_agent=allow_agent,
+        )
+        policy_decisions = self._policy_decisions(
+            task,
+            safety=safety_payload,
+            git_context=git_context,
+            allow_live=allow_live,
+            allow_manual=allow_manual,
+            allow_agent=allow_agent,
+        )
+        policy_decision_summary = self._policy_decision_summary(policy_decisions)
+        self._write_report(
+            report_path,
+            task,
+            started_at,
+            finished_at,
+            runs,
+            status,
+            message,
+            safety=safety_payload,
+            policy_decisions=policy_decisions,
+            policy_decision_summary=policy_decision_summary,
+        )
         self._write_task_manifest(
             manifest_path,
             report_path,
@@ -3120,6 +3289,10 @@ Rules:
             allow_live=allow_live,
             allow_manual=allow_manual,
             allow_agent=allow_agent,
+            git_context=git_context,
+            policy_input=policy_input.as_contract(),
+            policy_decisions=policy_decisions,
+            policy_decision_summary=policy_decision_summary,
         )
         self.rebuild_manifest_index()
         if persist:
@@ -3181,18 +3354,33 @@ Rules:
         allow_live: bool = False,
         allow_manual: bool = False,
         allow_agent: bool = False,
+        git_context: dict[str, Any] | None = None,
+        policy_input: dict[str, Any] | None = None,
+        policy_decisions: list[dict[str, Any]] | None = None,
+        policy_decision_summary: dict[str, Any] | None = None,
     ) -> None:
         manifest_relative = str(manifest_path.relative_to(self.project_root))
         report_relative = str(report_path.relative_to(self.project_root))
         safety_payload = safety or {}
-        git_context = self._git_context(safety_payload)
-        policy_input = self._policy_input(
+        git_payload = git_context or self._git_context(safety_payload)
+        policy_input_payload = policy_input or self._policy_input(
             task,
             safety=safety_payload,
-            git_context=git_context,
+            git_context=git_payload,
             allow_live=allow_live,
             allow_manual=allow_manual,
             allow_agent=allow_agent,
+        ).as_contract()
+        policy_decision_payload = policy_decisions or self._policy_decisions(
+            task,
+            safety=safety_payload,
+            git_context=git_payload,
+            allow_live=allow_live,
+            allow_manual=allow_manual,
+            allow_agent=allow_agent,
+        )
+        policy_decision_summary_payload = policy_decision_summary or self._policy_decision_summary(
+            policy_decision_payload
         )
         payload = {
             "schema_version": 1,
@@ -3224,16 +3412,10 @@ Rules:
             ],
             "runs": [self._command_run_manifest(task, run) for run in runs],
             "safety": safety_payload,
-            "policy_input": policy_input.as_contract(),
-            "policy_decisions": self._policy_decisions(
-                task,
-                safety=safety_payload,
-                git_context=git_context,
-                allow_live=allow_live,
-                allow_manual=allow_manual,
-                allow_agent=allow_agent,
-            ),
-            "git": git_context,
+            "policy_input": policy_input_payload,
+            "policy_decisions": policy_decision_payload,
+            "policy_decision_summary": policy_decision_summary_payload,
+            "git": git_payload,
         }
         write_json(manifest_path, payload)
 
@@ -3357,9 +3539,12 @@ Rules:
                 )
                 executor_decision = self._executor_policy_decision(command_input)
                 decisions.append(executor_decision)
+                if not executor_decision.blocks_execution():
+                    decisions.append(self._executor_approval_decision(command_input))
                 executor = self.executor_registry.get(command.executor)
                 if executor is not None and executor.metadata.uses_command_policy:
                     decisions.append(self._command_policy_decision(command_input))
+                    decisions.append(self._live_approval_decision(command_input))
 
         decisions.extend(
             [
@@ -3368,6 +3553,54 @@ Rules:
             ]
         )
         return [decision.as_contract() for decision in decisions]
+
+    def _policy_decision_summary(self, decisions: list[dict[str, Any]]) -> dict[str, Any]:
+        by_kind: dict[str, int] = {}
+        by_outcome: dict[str, int] = {}
+        by_effect: dict[str, int] = {}
+        by_severity: dict[str, int] = {}
+        blocking: list[dict[str, Any]] = []
+        requires_approval: list[dict[str, Any]] = []
+        for decision in decisions:
+            kind = str(decision.get("kind") or "unknown")
+            outcome = str(decision.get("outcome") or "unknown")
+            effect = str(decision.get("effect") or "unknown")
+            severity = str(decision.get("severity") or "unknown")
+            by_kind[kind] = by_kind.get(kind, 0) + 1
+            by_outcome[outcome] = by_outcome.get(outcome, 0) + 1
+            by_effect[effect] = by_effect.get(effect, 0) + 1
+            by_severity[severity] = by_severity.get(severity, 0) + 1
+            if effect in {"deny", "requires_approval"}:
+                blocking.append(self._compact_policy_decision(decision))
+            if decision.get("requires_approval"):
+                requires_approval.append(self._compact_policy_decision(decision))
+        return {
+            "total": len(decisions),
+            "by_kind": dict(sorted(by_kind.items())),
+            "by_outcome": dict(sorted(by_outcome.items())),
+            "by_effect": dict(sorted(by_effect.items())),
+            "by_severity": dict(sorted(by_severity.items())),
+            "blocking": blocking,
+            "requires_approval": requires_approval,
+        }
+
+    def _compact_policy_decision(self, decision: dict[str, Any]) -> dict[str, Any]:
+        policy_input = decision.get("input") if isinstance(decision.get("input"), dict) else {}
+        command = policy_input.get("command") if isinstance(policy_input.get("command"), dict) else {}
+        compact = {
+            "kind": decision.get("kind"),
+            "scope": decision.get("scope"),
+            "outcome": decision.get("outcome"),
+            "effect": decision.get("effect"),
+            "severity": decision.get("severity"),
+            "reason": decision.get("reason"),
+            "phase": decision.get("phase") or policy_input.get("phase"),
+            "name": decision.get("name") or command.get("name"),
+            "executor": decision.get("executor"),
+            "approval_flag": decision.get("approval_flag"),
+            "status": decision.get("status"),
+        }
+        return {key: value for key, value in compact.items() if value is not None}
 
     def _git_context(self, safety: dict[str, Any]) -> dict[str, Any]:
         git_preflight = safety.get("git_preflight", {})
@@ -3419,6 +3652,8 @@ Rules:
         message: str,
         *,
         safety: dict[str, Any] | None = None,
+        policy_decisions: list[dict[str, Any]] | None = None,
+        policy_decision_summary: dict[str, Any] | None = None,
     ) -> None:
         report_path.parent.mkdir(parents=True, exist_ok=True)
         lines = [
@@ -3476,4 +3711,42 @@ Rules:
                 lines.extend(["Violations:", ""])
                 lines.extend(f"- `{path}`" for path in violations[:40])
                 lines.append("")
+        if policy_decisions is not None:
+            summary = policy_decision_summary or self._policy_decision_summary(policy_decisions)
+            lines.extend(
+                [
+                    "## Policy Decisions",
+                    "",
+                    f"- Total decisions: `{summary.get('total', len(policy_decisions))}`",
+                    f"- Outcomes: `{json.dumps(summary.get('by_outcome', {}), sort_keys=True)}`",
+                    f"- Effects: `{json.dumps(summary.get('by_effect', {}), sort_keys=True)}`",
+                    f"- Blocking decisions: `{len(summary.get('blocking', []))}`",
+                    "",
+                ]
+            )
+            blocking = summary.get("blocking", [])
+            if blocking:
+                lines.extend(["Blocking decisions:", ""])
+                for decision in blocking[:40]:
+                    lines.append(
+                        "- "
+                        f"`{decision.get('kind', 'unknown')}` "
+                        f"`{decision.get('outcome', 'unknown')}`: {decision.get('reason', '')}"
+                    )
+                lines.append("")
+            lines.extend(
+                [
+                    "```json",
+                    json.dumps(
+                        {
+                            "policy_decision_summary": summary,
+                            "policy_decisions": policy_decisions,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    ),
+                    "```",
+                    "",
+                ]
+            )
         report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")

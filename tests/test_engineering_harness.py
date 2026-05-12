@@ -68,6 +68,13 @@ def task_manifest(project: Path, result: dict) -> dict:
     return json.loads((project / result["manifest"]).read_text(encoding="utf-8"))
 
 
+def report_policy_evidence(project: Path, result: dict) -> dict:
+    report = (project / result["report"]).read_text(encoding="utf-8")
+    section = report.split("## Policy Decisions", 1)[1]
+    block = section.split("```json", 1)[1].split("```", 1)[0]
+    return json.loads(block)
+
+
 def policy_decision(manifest: dict, kind: str, **matches) -> dict:
     for decision in manifest["policy_decisions"]:
         if decision.get("kind") != kind:
@@ -231,6 +238,33 @@ def test_harness_runs_task_and_writes_matching_manifest(tmp_path):
     assert command_policy["input"]["phase"] == "acceptance"
     assert command_policy["input"]["command"]["executor"] == "shell"
     assert command_policy["input"]["executor"]["uses_command_policy"] is True
+    assert policy_decision(manifest, "executor_policy", outcome="allowed")["executor"] == "shell"
+    assert policy_decision(manifest, "executor_approval", outcome="allowed")["reason"] == "executor approval not required"
+    assert policy_decision(manifest, "manual_approval", outcome="allowed")["reason"] == "manual approval not required"
+    assert policy_decision(manifest, "live_approval", outcome="allowed")["reason"] == "live approval not required"
+    assert policy_decision(manifest, "git_preflight", outcome="allowed")["status"] == "clean"
+    assert policy_decision(manifest, "file_scope_guard", outcome="allowed")["status"] == "passed"
+    summary = manifest["policy_decision_summary"]
+    assert summary["total"] == len(manifest["policy_decisions"]) == 8
+    assert summary["by_kind"] == {
+        "agent_approval": 1,
+        "command_policy": 1,
+        "executor_approval": 1,
+        "executor_policy": 1,
+        "file_scope_guard": 1,
+        "git_preflight": 1,
+        "live_approval": 1,
+        "manual_approval": 1,
+    }
+    assert summary["by_outcome"] == {"allowed": 8}
+    assert summary["blocking"] == []
+    report_evidence = report_policy_evidence(project, result)
+    assert report_evidence["policy_decision_summary"] == summary
+    assert report_evidence["policy_decisions"] == manifest["policy_decisions"]
+    index = Harness(project).manifest_index()
+    assert index["policy_decision_summary"]["total"] == summary["total"]
+    assert index["manifests"][0]["policy_decision_summary"] == summary
+    assert Harness(project).status_summary()["manifest_index"]["policy_decision_summary"]["total"] == summary["total"]
 
     state = json.loads((project / ".engineering/state/harness-state.json").read_text(encoding="utf-8"))
     assert state["tasks"]["tests"]["last_manifest"] == result["manifest"]
@@ -282,6 +316,8 @@ def test_manifest_index_lists_multiple_task_run_manifests_deterministically(tmp_
         "tests": first_result["manifest"],
         "zz-second": second_result["manifest"],
     }
+    assert index["policy_decision_summary"]["by_kind"]["command_policy"] == 2
+    assert index["policy_decision_summary"]["by_kind"]["file_scope_guard"] == 2
     assert Harness(project).status_summary()["manifest_index"]["manifest_count"] == 2
 
 
@@ -614,6 +650,13 @@ def test_policy_decision_schema_records_denied_command(tmp_path):
     assert command_policy["input"]["command"]["command"] == "curl https://example.com"
     assert command_policy["input"]["executor"]["id"] == "shell"
     assert "python3 " in command_policy["metadata"]["allowed_prefixes"]
+    assert manifest["policy_decision_summary"]["blocking"][0]["kind"] == "command_policy"
+    assert manifest["policy_decision_summary"]["blocking"][0]["reason"] == "command prefix is not allowlisted"
+    report_evidence = report_policy_evidence(project, result)
+    assert report_evidence["policy_decision_summary"] == manifest["policy_decision_summary"]
+    assert report_evidence["policy_decisions"] == manifest["policy_decisions"]
+    index = Harness(project).manifest_index()
+    assert index["policy_decision_summary"]["blocking"][0]["kind"] == "command_policy"
 
 
 def test_policy_decision_schema_records_live_command_approval_gate(tmp_path):
@@ -637,6 +680,19 @@ def test_policy_decision_schema_records_live_command_approval_gate(tmp_path):
     assert command_policy["approval_flag"] == "--allow-live"
     assert command_policy["input"]["live"]["detected"] is True
     assert command_policy["input"]["live"]["matched_patterns"] == ["--live"]
+    live = policy_decision(manifest, "live_approval", outcome="requires_approval")
+    assert live["effect"] == "requires_approval"
+    assert live["severity"] == "approval"
+    assert live["requires_approval"] is True
+    assert live["approval_flag"] == "--allow-live"
+    assert live["metadata"]["matched_live_patterns"] == ["--live"]
+    assert [item["kind"] for item in manifest["policy_decision_summary"]["requires_approval"]] == [
+        "command_policy",
+        "live_approval",
+    ]
+    report_evidence = report_policy_evidence(project, result)
+    assert report_evidence["policy_decision_summary"] == manifest["policy_decision_summary"]
+    assert report_evidence["policy_decisions"] == manifest["policy_decisions"]
 
 
 def test_policy_decision_schema_records_manual_approval_gate(tmp_path):
@@ -660,6 +716,9 @@ def test_policy_decision_schema_records_manual_approval_gate(tmp_path):
     assert manual["approval_flag"] == "--allow-manual"
     assert manual["input"]["approvals"]["manual_required"] is True
     assert manual["input"]["approvals"]["allow_manual"] is False
+    report_evidence = report_policy_evidence(project, result)
+    assert report_evidence["policy_decision_summary"] == manifest["policy_decision_summary"]
+    assert report_evidence["policy_decisions"] == manifest["policy_decisions"]
 
 
 def test_harness_runs_implementation_before_acceptance(tmp_path):
@@ -825,6 +884,12 @@ def test_file_scope_guard_blocks_out_of_scope_changes(tmp_path):
     assert file_scope["status"] == "failed"
     assert file_scope["input"]["file_scope"]["patterns"] == ["src/**"]
     assert file_scope["metadata"]["violations"] == ["outside.txt"]
+    assert manifest["policy_decision_summary"]["blocking"][0]["kind"] == "file_scope_guard"
+    report_evidence = report_policy_evidence(project, result)
+    assert report_evidence["policy_decision_summary"] == manifest["policy_decision_summary"]
+    assert report_evidence["policy_decisions"] == manifest["policy_decisions"]
+    index = Harness(project).manifest_index()
+    assert index["policy_decision_summary"]["blocking"][0]["kind"] == "file_scope_guard"
 
 
 def test_file_scope_guard_blocks_changed_preexisting_dirty_out_of_scope_file(tmp_path):
@@ -1281,6 +1346,11 @@ def test_harness_blocks_codex_executor_without_agent_approval(tmp_path):
     manifest = json.loads((project / result["manifest"]).read_text(encoding="utf-8"))
     assert manifest["runs"][0]["executor_metadata"] == result["runs"][0]["executor_metadata"]
     assert manifest["runs"][0]["executor_result"]["status"] == "blocked"
+    assert policy_decision(manifest, "executor_policy", outcome="allowed")["executor"] == "codex"
+    executor_approval = policy_decision(manifest, "executor_approval", outcome="requires_approval")
+    assert executor_approval["effect"] == "requires_approval"
+    assert executor_approval["approval_flag"] == "--allow-agent"
+    assert executor_approval["requires_approval"] is True
 
 
 def test_discover_projects_finds_configured_and_candidate_projects(tmp_path):
