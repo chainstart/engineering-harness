@@ -32,6 +32,7 @@ PRUNE_DIRS = {".git", "node_modules", ".venv", "venv", ".pytest_cache", "dist", 
 EXPERIENCE_KINDS = {"dashboard", "submission-review", "multi-role-app", "api-only", "cli-only"}
 POLICY_INPUT_SCHEMA_VERSION = 1
 POLICY_DECISION_SCHEMA_VERSION = 1
+PHASE_STATE_SCHEMA_VERSION = 1
 DEFAULT_EXPERIENCE_PLANS: dict[str, dict[str, Any]] = {
     "dashboard": {
         "kind": "dashboard",
@@ -636,6 +637,99 @@ class Harness:
         state["version"] = 1
         state["updated_at"] = utc_now()
         write_json(self.state_path, state)
+
+    def _record_phase_state(
+        self,
+        state: dict[str, Any],
+        task: HarnessTask,
+        *,
+        phase: str,
+        event: str,
+        status: str,
+        persist: bool,
+        message: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        runs: list[CommandRun] | None = None,
+    ) -> dict[str, Any] | None:
+        if not persist:
+            return None
+        task_state = state.setdefault("tasks", {}).setdefault(task.id, {})
+        history = task_state.setdefault("phase_history", [])
+        if not isinstance(history, list):
+            history = []
+            task_state["phase_history"] = history
+        sequence = self._next_phase_sequence(task_state, history)
+        recorded_at = utc_now()
+        payload: dict[str, Any] = {
+            "schema_version": PHASE_STATE_SCHEMA_VERSION,
+            "sequence": sequence,
+            "recorded_at": recorded_at,
+            "event": event,
+            "phase": phase,
+            "status": status,
+            "task_id": task.id,
+            "milestone_id": task.milestone_id,
+            "task_attempt": int(task_state.get("attempts", 0)),
+        }
+        if message is not None:
+            payload["message"] = message
+        if metadata:
+            payload["metadata"] = metadata
+        if runs is not None:
+            payload["runs"] = [self._command_run_state_summary(run) for run in runs]
+        history.append(payload)
+        task_state["phase_sequence"] = sequence
+        task_state["last_phase_event"] = payload
+        phase_states = task_state.setdefault("phase_states", {})
+        if isinstance(phase_states, dict):
+            phase_states[phase] = payload
+        if event == "before":
+            task_state["current_phase"] = payload
+        else:
+            current_phase = task_state.get("current_phase")
+            if isinstance(current_phase, dict) and current_phase.get("phase") == phase:
+                task_state["current_phase"] = None
+        self.save_state(state)
+        return payload
+
+    def _next_phase_sequence(self, task_state: dict[str, Any], history: list[Any]) -> int:
+        current = int(task_state.get("phase_sequence", 0) or 0)
+        for item in history:
+            if isinstance(item, dict):
+                try:
+                    current = max(current, int(item.get("sequence", 0) or 0))
+                except (TypeError, ValueError):
+                    continue
+        return current + 1
+
+    def _command_run_state_summary(self, run: CommandRun) -> dict[str, Any]:
+        return {
+            "phase": run.phase,
+            "name": run.name,
+            "status": run.status,
+            "returncode": run.returncode,
+            "executor": run.executor,
+            "started_at": run.started_at,
+            "finished_at": run.finished_at,
+        }
+
+    def _command_group_state_metadata(self, commands: tuple[AcceptanceCommand, ...]) -> dict[str, Any]:
+        return {
+            "command_count": len(commands),
+            "commands": [
+                {
+                    "name": command.name,
+                    "executor": command.executor,
+                    "required": command.required,
+                    "timeout_seconds": command.timeout_seconds,
+                    "has_command": command.command is not None,
+                    "has_prompt": command.prompt is not None,
+                    "model": command.model,
+                    "sandbox": command.sandbox,
+                }
+                for command in commands
+            ],
+        }
 
     def save_roadmap(self) -> None:
         write_mapping(self.roadmap_path, self.roadmap)
@@ -2847,6 +2941,8 @@ Rules:
             allow_manual=allow_manual,
             allow_agent=allow_agent,
             task=task,
+            state=state,
+            persist_state=not dry_run,
         )
         overall_status = implementation_status
 
@@ -2861,6 +2957,8 @@ Rules:
                     allow_manual=allow_manual,
                     allow_agent=allow_agent,
                     task=task,
+                    state=state,
+                    persist_state=not dry_run,
                 )
                 overall_status = acceptance_status
                 if acceptance_status == "passed":
@@ -2877,6 +2975,8 @@ Rules:
                     allow_manual=allow_manual,
                     allow_agent=allow_agent,
                     task=task,
+                    state=state,
+                    persist_state=not dry_run,
                 )
                 overall_status = repair_status
                 if repair_status != "passed":
@@ -2892,12 +2992,26 @@ Rules:
                 allow_manual=allow_manual,
                 allow_agent=allow_agent,
                 task=task,
+                state=state,
+                persist_state=not dry_run,
             )
             overall_status = e2e_status
             if e2e_status == "passed":
                 message = "All required acceptance and e2e commands passed."
 
         if not dry_run:
+            self._record_phase_state(
+                state,
+                task,
+                phase="file-scope-guard",
+                event="before",
+                status="running",
+                persist=True,
+                metadata={
+                    "file_scope": list(task.file_scope),
+                    "dirty_before_paths": list(safety["git_preflight"].get("dirty_before_paths", [])),
+                },
+            )
             safety["file_scope_guard"] = self._file_scope_guard(
                 task,
                 dirty_before_paths=list(safety["git_preflight"].get("dirty_before_paths", [])),
@@ -2918,6 +3032,25 @@ Rules:
             if overall_status == "passed" and file_scope_decision.blocks_execution():
                 overall_status = "failed"
                 message = safety["file_scope_guard"]["message"]
+            self._record_phase_state(
+                state,
+                task,
+                phase="file-scope-guard",
+                event="after",
+                status=str(safety["file_scope_guard"].get("status", "unknown")),
+                message=str(safety["file_scope_guard"].get("message", "")),
+                persist=True,
+                metadata={
+                    "dirty_after_paths": safety["file_scope_guard"].get("dirty_after_paths", []),
+                    "new_dirty_paths": safety["file_scope_guard"].get("new_dirty_paths", []),
+                    "changed_preexisting_dirty_paths": safety["file_scope_guard"].get(
+                        "changed_preexisting_dirty_paths",
+                        [],
+                    ),
+                    "new_or_changed_dirty_paths": safety["file_scope_guard"].get("new_or_changed_dirty_paths", []),
+                    "violations": safety["file_scope_guard"].get("violations", []),
+                },
+            )
 
         status = "dry-run" if dry_run and overall_status == "passed" else overall_status
         return self._finish_task(
@@ -2946,9 +3079,47 @@ Rules:
         allow_manual: bool,
         allow_agent: bool,
         task: HarnessTask,
+        state: dict[str, Any] | None = None,
+        persist_state: bool = False,
     ) -> tuple[str, str]:
+        state_payload = state if state is not None else {}
+        self._record_phase_state(
+            state_payload,
+            task,
+            phase=phase,
+            event="before",
+            status="running",
+            persist=persist_state,
+            metadata=self._command_group_state_metadata(commands),
+        )
+        run_start_index = len(runs)
+
+        def finish(status: str, message: str) -> tuple[str, str]:
+            phase_runs = runs[run_start_index:]
+            self._record_phase_state(
+                state_payload,
+                task,
+                phase=phase,
+                event="after",
+                status=status,
+                message=message,
+                persist=persist_state,
+                metadata={
+                    "command_count": len(commands),
+                    "run_count": len(phase_runs),
+                    "required_failures": [
+                        run.name
+                        for run in phase_runs
+                        if any(command.name == run.name and command.required for command in commands)
+                        and (run.status == "blocked" or run.returncode != 0)
+                    ],
+                },
+                runs=phase_runs,
+            )
+            return status, message
+
         if not commands:
-            return "passed", f"No {phase} commands configured."
+            return finish("passed", f"No {phase} commands configured.")
         for command in commands:
             executor_metadata = self.executor_registry.metadata_for(command.executor)
             policy_input = self._policy_input(
@@ -2978,7 +3149,7 @@ Rules:
                         executor_metadata=executor_metadata,
                     )
                 )
-                return "blocked", executor_decision.reason
+                return finish("blocked", executor_decision.reason)
             executor_approval_decision = self._executor_approval_decision(policy_input)
             if executor_approval_decision.blocks_execution():
                 runs.append(
@@ -2996,9 +3167,9 @@ Rules:
                         executor_metadata=executor_metadata,
                     )
                 )
-                return "blocked", executor_approval_decision.reason
+                return finish("blocked", executor_approval_decision.reason)
             if executor is None:
-                return "blocked", executor_decision.reason
+                return finish("blocked", executor_decision.reason)
             if executor.metadata.uses_command_policy:
                 command_decision = self._command_policy_decision(policy_input)
                 if command_decision.blocks_execution():
@@ -3017,7 +3188,7 @@ Rules:
                             executor_metadata=executor.metadata.as_contract(),
                         )
                     )
-                    return "blocked", command_decision.reason
+                    return finish("blocked", command_decision.reason)
             if dry_run:
                 runs.append(
                     CommandRun(
@@ -3038,10 +3209,10 @@ Rules:
             run = self._run_command(command, phase=phase, task=task)
             runs.append(run)
             if command.required and run.status == "blocked":
-                return "blocked", run.stderr or f"Required {phase} command blocked: {command.name}"
+                return finish("blocked", run.stderr or f"Required {phase} command blocked: {command.name}")
             if command.required and run.returncode != 0:
-                return "failed", f"Required {phase} command failed: {command.name}"
-        return "passed", f"All required {phase} commands passed."
+                return finish("failed", f"Required {phase} command failed: {command.name}")
+        return finish("passed", f"All required {phase} commands passed.")
 
     def git_checkpoint(
         self,
@@ -3052,45 +3223,86 @@ Rules:
         branch: str | None = None,
         message_template: str = "chore(engineering): complete {task_id}",
     ) -> dict[str, Any]:
-        if not self._is_git_repo():
-            return {"status": "skipped", "message": "project root is not inside a git repository"}
+        state = self.load_state()
+        self._record_phase_state(
+            state,
+            task,
+            phase="checkpoint-intent",
+            event="before",
+            status="running",
+            persist=True,
+            metadata={
+                "push": push,
+                "remote": remote,
+                "branch": branch,
+                "message_template": message_template,
+            },
+        )
 
-        task_state = self.load_state().get("tasks", {}).get(task.id, {})
+        def finish(payload: dict[str, Any]) -> dict[str, Any]:
+            self._record_phase_state(
+                state,
+                task,
+                phase="checkpoint-intent",
+                event="after",
+                status=str(payload.get("status", "unknown")),
+                message=str(payload.get("message", "")),
+                persist=True,
+                metadata={
+                    key: value
+                    for key, value in payload.items()
+                    if key
+                    not in {
+                        "stdout",
+                        "stderr",
+                        "push_stdout",
+                        "push_stderr",
+                    }
+                },
+            )
+            return payload
+
+        if not self._is_git_repo():
+            return finish({"status": "skipped", "message": "project root is not inside a git repository"})
+
+        task_state = state.get("tasks", {}).get(task.id, {})
         dirty_before = [str(path) for path in task_state.get("last_dirty_before_paths", [])]
         if dirty_before:
-            return {
+            return finish({
                 "status": "skipped",
                 "message": "dirty worktree existed before the task; refusing to checkpoint mixed changes",
                 "dirty_before_paths": dirty_before,
-            }
+            })
 
         status_before = self._git(["status", "--porcelain"])
         if status_before["returncode"] != 0:
-            return {
+            return finish({
                 "status": "failed",
                 "message": "could not inspect git status",
                 "stderr": status_before["stderr"],
-            }
+            })
         current_paths = self._git_status_paths()
         scope_violations = self._scope_violations(current_paths, task.file_scope)
         if scope_violations:
-            return {
+            return finish({
                 "status": "skipped",
                 "message": "dirty files are outside task file_scope; refusing checkpoint",
                 "violations": scope_violations,
-            }
+            })
         if not status_before["stdout"].strip():
-            return {"status": "skipped", "message": "no git changes to commit"}
+            return finish({"status": "skipped", "message": "no git changes to commit"})
 
         add_result = self._git(["add", "-A", "--", "."])
         if add_result["returncode"] != 0:
-            return {"status": "failed", "message": "git add failed", "stderr": add_result["stderr"]}
+            return finish({"status": "failed", "message": "git add failed", "stderr": add_result["stderr"]})
 
         staged = self._git(["diff", "--cached", "--quiet"])
         if staged["returncode"] == 0:
-            return {"status": "skipped", "message": "no staged git changes to commit"}
+            return finish({"status": "skipped", "message": "no staged git changes to commit"})
         if staged["returncode"] not in (0, 1):
-            return {"status": "failed", "message": "could not inspect staged git diff", "stderr": staged["stderr"]}
+            return finish(
+                {"status": "failed", "message": "could not inspect staged git diff", "stderr": staged["stderr"]}
+            )
 
         message = message_template.format(
             task_id=task.id,
@@ -3100,7 +3312,7 @@ Rules:
         )
         commit_result = self._git(["commit", "-m", message])
         if commit_result["returncode"] != 0:
-            return {"status": "failed", "message": "git commit failed", "stderr": commit_result["stderr"]}
+            return finish({"status": "failed", "message": "git commit failed", "stderr": commit_result["stderr"]})
 
         commit_sha = self._git(["rev-parse", "HEAD"])
         payload: dict[str, Any] = {
@@ -3113,7 +3325,7 @@ Rules:
             target_branch = branch or self._current_branch()
             if not target_branch:
                 payload.update({"status": "failed", "push_status": "failed", "stderr": "could not resolve current branch"})
-                return payload
+                return finish(payload)
             push_result = self._git(["push", remote, f"HEAD:{target_branch}"])
             payload["push_status"] = "pushed" if push_result["returncode"] == 0 else "failed"
             payload["push_remote"] = remote
@@ -3122,7 +3334,7 @@ Rules:
             payload["push_stderr"] = push_result["stderr"]
             if push_result["returncode"] != 0:
                 payload["status"] = "failed"
-        return payload
+        return finish(payload)
 
     def _is_git_repo(self) -> bool:
         result = self._git(["rev-parse", "--is-inside-work-tree"])
@@ -3262,6 +3474,22 @@ Rules:
             allow_agent=allow_agent,
         )
         policy_decision_summary = self._policy_decision_summary(policy_decisions)
+        report_relative = str(report_path.relative_to(self.project_root))
+        manifest_relative = str(manifest_path.relative_to(self.project_root))
+        self._record_phase_state(
+            state,
+            task,
+            phase="manifest-writing",
+            event="before",
+            status="running",
+            persist=persist,
+            metadata={
+                "report_path": report_relative,
+                "manifest_path": manifest_relative,
+                "run_count": len(runs),
+                "result_status": status,
+            },
+        )
         self._write_report(
             report_path,
             task,
@@ -3294,13 +3522,56 @@ Rules:
             policy_decisions=policy_decisions,
             policy_decision_summary=policy_decision_summary,
         )
+        self._record_phase_state(
+            state,
+            task,
+            phase="manifest-writing",
+            event="after",
+            status="passed",
+            message="task report and manifest were written",
+            persist=persist,
+            metadata={
+                "report_path": report_relative,
+                "manifest_path": manifest_relative,
+                "report_exists": report_path.exists(),
+                "manifest_exists": manifest_path.exists(),
+            },
+        )
         self.rebuild_manifest_index()
         if persist:
+            self._record_phase_state(
+                state,
+                task,
+                phase="final-result",
+                event="before",
+                status="running",
+                persist=True,
+                metadata={
+                    "status": status,
+                    "message": message,
+                    "report_path": report_relative,
+                    "manifest_path": manifest_relative,
+                },
+            )
             task_state = state.setdefault("tasks", {}).setdefault(task.id, {})
             task_state["status"] = status
             task_state["last_finished_at"] = finished_at
-            task_state["last_report"] = str(report_path.relative_to(self.project_root))
-            task_state["last_manifest"] = str(manifest_path.relative_to(self.project_root))
+            task_state["last_report"] = report_relative
+            task_state["last_manifest"] = manifest_relative
+            self._record_phase_state(
+                state,
+                task,
+                phase="final-result",
+                event="after",
+                status=status,
+                message=message,
+                persist=True,
+                metadata={
+                    "report_path": report_relative,
+                    "manifest_path": manifest_relative,
+                    "run_count": len(runs),
+                },
+            )
             self.save_state(state)
         append_jsonl(
             self.decision_log_path,

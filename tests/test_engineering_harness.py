@@ -867,6 +867,85 @@ def test_harness_runs_e2e_after_acceptance(tmp_path):
     assert result["task"]["e2e"][0]["name"] == "simulate user path"
 
 
+def test_phase_level_state_is_durable_and_ordered_for_repairing_e2e_task(tmp_path):
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["max_task_iterations"] = 2
+    task["implementation"] = [
+        {
+            "name": "write implementation marker",
+            "command": "python3 -c \"from pathlib import Path; Path('implemented.txt').write_text('ok')\"",
+        }
+    ]
+    task["repair"] = [
+        {
+            "name": "repair acceptance marker",
+            "command": "python3 -c \"from pathlib import Path; Path('repair.txt').write_text('fixed')\"",
+        }
+    ]
+    task["acceptance"][0] = {
+        "name": "accepts after repair",
+        "command": (
+            "python3 -c \"from pathlib import Path; "
+            "assert Path('implemented.txt').read_text() == 'ok'; "
+            "assert Path('repair.txt').read_text() == 'fixed'\""
+        ),
+    }
+    task["e2e"] = [
+        {
+            "name": "simulate repaired user path",
+            "command": "python3 -c \"from pathlib import Path; Path('e2e.txt').write_text('ok')\"",
+        }
+    ]
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    result = harness.run_task(harness.next_task(), allow_agent=True)
+
+    assert result["status"] == "passed"
+    state = json.loads((project / ".engineering/state/harness-state.json").read_text(encoding="utf-8"))
+    task_state = state["tasks"]["tests"]
+    history = task_state["phase_history"]
+
+    assert [item["sequence"] for item in history] == list(range(1, len(history) + 1))
+    assert [(item["phase"], item["event"]) for item in history] == [
+        ("implementation", "before"),
+        ("implementation", "after"),
+        ("acceptance-1", "before"),
+        ("acceptance-1", "after"),
+        ("repair-1", "before"),
+        ("repair-1", "after"),
+        ("acceptance-2", "before"),
+        ("acceptance-2", "after"),
+        ("e2e", "before"),
+        ("e2e", "after"),
+        ("file-scope-guard", "before"),
+        ("file-scope-guard", "after"),
+        ("manifest-writing", "before"),
+        ("manifest-writing", "after"),
+        ("final-result", "before"),
+        ("final-result", "after"),
+    ]
+
+    after_by_phase = {item["phase"]: item for item in history if item["event"] == "after"}
+    assert after_by_phase["implementation"]["status"] == "passed"
+    assert after_by_phase["acceptance-1"]["status"] == "failed"
+    assert after_by_phase["acceptance-1"]["runs"][0]["returncode"] != 0
+    assert after_by_phase["repair-1"]["status"] == "passed"
+    assert after_by_phase["acceptance-2"]["status"] == "passed"
+    assert after_by_phase["e2e"]["status"] == "passed"
+    assert after_by_phase["file-scope-guard"]["status"] == "skipped"
+    assert after_by_phase["manifest-writing"]["metadata"]["manifest_path"] == result["manifest"]
+    assert after_by_phase["final-result"]["status"] == "passed"
+    assert task_state["current_phase"] is None
+    assert task_state["last_phase_event"]["phase"] == "final-result"
+    assert task_state["phase_states"]["acceptance-1"]["status"] == "failed"
+
+
 def test_harness_fails_task_when_e2e_fails(tmp_path):
     project = tmp_path / "agent-project"
     project.mkdir()
@@ -1482,6 +1561,15 @@ def test_drive_can_commit_after_each_completed_task(tmp_path):
     last_subject = subprocess.check_output(["git", "log", "-1", "--format=%s"], cwd=project, text=True).strip()
     assert last_subject == "chore(engineering): complete tests"
     assert subprocess.check_output(["git", "status", "--porcelain"], cwd=project, text=True).strip() == ""
+    state = json.loads((project / ".engineering/state/harness-state.json").read_text(encoding="utf-8"))
+    checkpoint_events = [
+        event for event in state["tasks"]["tests"]["phase_history"] if event["phase"] == "checkpoint-intent"
+    ]
+    assert [(event["event"], event["status"]) for event in checkpoint_events] == [
+        ("before", "running"),
+        ("after", "committed"),
+    ]
+    assert checkpoint_events[-1]["metadata"]["commit"]
 
 
 def test_advance_materializes_next_continuation_stage(tmp_path):

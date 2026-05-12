@@ -237,6 +237,18 @@ Acceptance:
 - Manual gates are visible in status and reports.
 - Re-running a drive does not duplicate completed phases unless explicitly requested.
 
+Current durable phase state:
+
+- Each task stores an ordered `phase_history` in `.engineering/state/harness-state.json`.
+- Every phase transition is recorded as a `before` and `after` event with a sequence number,
+  task attempt, timestamp, phase name, status, message, and compact metadata.
+- Recorded phases include implementation, numbered acceptance attempts, numbered repair attempts,
+  E2E, file-scope guard, manifest writing, checkpoint intent, and final result.
+- `current_phase` remains populated after a `before` event until the matching `after` event is
+  written, so interrupted drives can show which phase was active when work stopped.
+- `phase_states` keeps the latest event per phase for quick inspection, while manifests and reports
+  remain the public evidence artifacts for completed attempts.
+
 ### Stage 6: Frontend Experience Planning
 
 Goal: make every substantial generated project define the right frontend for its users.
