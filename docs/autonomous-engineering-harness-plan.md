@@ -208,6 +208,7 @@ Tasks:
 
 - Define policy input schema for task, command, executor, project, git state, environment, and
   requested capabilities.
+  - Initial schema: [Policy Engine V2 Schema](policy-engine-v2.md).
 - Implement Python policy evaluator for command allowlists, blocked patterns, live gates, file
   scope, secret handling, E2E environment, and deployment gates.
 - Add optional OPA-compatible policy export and evaluation hook.

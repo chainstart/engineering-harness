@@ -30,6 +30,8 @@ BLOCKED_STATUSES = {"blocked", "paused"}
 CONFIG_CANDIDATES = (".engineering/roadmap.yaml", ".engineering/roadmap.json", "ops/engineering/roadmap.yaml")
 PRUNE_DIRS = {".git", "node_modules", ".venv", "venv", ".pytest_cache", "dist", "out", "cache", "artifacts"}
 EXPERIENCE_KINDS = {"dashboard", "submission-review", "multi-role-app", "api-only", "cli-only"}
+POLICY_INPUT_SCHEMA_VERSION = 1
+POLICY_DECISION_SCHEMA_VERSION = 1
 DEFAULT_EXPERIENCE_PLANS: dict[str, dict[str, Any]] = {
     "dashboard": {
         "kind": "dashboard",
@@ -398,6 +400,85 @@ class CommandRun:
     executor: str = "shell"
     executor_metadata: dict[str, Any] = field(default_factory=dict)
     result_metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PolicyInput:
+    project: dict[str, Any]
+    task: dict[str, Any]
+    phase: str
+    command: dict[str, Any] | None
+    executor: dict[str, Any] | None
+    git: dict[str, Any]
+    worktree: dict[str, Any]
+    file_scope: dict[str, Any]
+    approvals: dict[str, Any]
+    live: dict[str, Any]
+    context: dict[str, Any]
+
+    def as_contract(self) -> dict[str, Any]:
+        return {
+            "schema_version": POLICY_INPUT_SCHEMA_VERSION,
+            "project": self.project,
+            "task": self.task,
+            "phase": self.phase,
+            "command": self.command,
+            "executor": self.executor,
+            "git": self.git,
+            "worktree": self.worktree,
+            "file_scope": self.file_scope,
+            "approvals": self.approvals,
+            "live": self.live,
+            "context": self.context,
+        }
+
+
+@dataclass(frozen=True)
+class PolicyDecision:
+    kind: str
+    scope: str
+    outcome: str
+    reason: str
+    policy_input: PolicyInput
+    severity: str = "info"
+    effect: str = "allow"
+    requires_approval: bool = False
+    approval_flag: str | None = None
+    status: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def blocks_execution(self) -> bool:
+        return self.effect in {"deny", "requires_approval"}
+
+    def as_contract(self) -> dict[str, Any]:
+        policy_input = self.policy_input.as_contract()
+        command = policy_input.get("command") or {}
+        executor = policy_input.get("executor") or {}
+        payload: dict[str, Any] = {
+            "schema_version": POLICY_DECISION_SCHEMA_VERSION,
+            "kind": self.kind,
+            "scope": self.scope,
+            "outcome": self.outcome,
+            "effect": self.effect,
+            "severity": self.severity,
+            "reason": self.reason,
+            "requires_approval": self.requires_approval,
+            "input": policy_input,
+        }
+        if self.status is not None:
+            payload["status"] = self.status
+        if self.approval_flag is not None:
+            payload["approval_flag"] = self.approval_flag
+        if self.metadata:
+            payload["metadata"] = self.metadata
+        phase = policy_input.get("phase")
+        if phase:
+            payload["phase"] = phase
+        if command.get("name"):
+            payload["name"] = command["name"]
+        if executor.get("id"):
+            payload["executor"] = executor["id"]
+        return payload
 
 
 def find_project_config(root: Path) -> Path | None:
@@ -2058,21 +2139,363 @@ Rules:
             "e2e": [command_payload(command) for command in task.e2e],
         }
 
-    def command_allowed(self, command: str | None, allow_live: bool = False) -> tuple[bool, str]:
+    def _policy_input(
+        self,
+        task: HarnessTask,
+        *,
+        phase: str = "task",
+        command: AcceptanceCommand | None = None,
+        safety: dict[str, Any] | None = None,
+        git_context: dict[str, Any] | None = None,
+        allow_live: bool = False,
+        allow_manual: bool = False,
+        allow_agent: bool = False,
+        executor_metadata: dict[str, Any] | None = None,
+    ) -> PolicyInput:
+        safety = safety or {}
+        git_context = git_context or self._git_context(safety)
+        git_preflight = safety.get("git_preflight", {})
+        file_scope_guard = safety.get("file_scope_guard", {})
+        executor_contract = executor_metadata
+        if executor_contract is None and command is not None:
+            executor_contract = self.executor_registry.metadata_for(command.executor)
+        command_payload: dict[str, Any] | None = None
+        live_matches: list[str] = []
+        if command is not None:
+            live_matches = self._live_policy_matches(command.command)
+            command_payload = {
+                "name": command.name,
+                "command": command.command,
+                "prompt": command.prompt,
+                "required": command.required,
+                "timeout_seconds": command.timeout_seconds,
+                "model": command.model,
+                "sandbox": command.sandbox,
+                "executor": command.executor,
+            }
+        roadmap_path = (
+            str(self.roadmap_path.relative_to(self.project_root))
+            if self.roadmap_path and self.roadmap_path.is_relative_to(self.project_root)
+            else str(self.roadmap_path)
+        )
+        return PolicyInput(
+            project={
+                "name": str(self.roadmap.get("project", self.project_root.name)),
+                "root": str(self.project_root),
+                "profile": self.roadmap.get("profile"),
+                "roadmap_path": roadmap_path,
+            },
+            task={
+                "id": task.id,
+                "title": task.title,
+                "milestone_id": task.milestone_id,
+                "milestone_title": task.milestone_title,
+                "status": task.status,
+                "manual_approval_required": task.manual_approval_required,
+                "agent_approval_required": task.agent_approval_required,
+                "max_task_iterations": task.max_task_iterations,
+            },
+            phase=phase,
+            command=command_payload,
+            executor=executor_contract,
+            git={
+                "is_repository": git_context.get("is_repository", False),
+                "root": git_context.get("root"),
+                "branch": git_context.get("branch"),
+                "head": git_context.get("head"),
+                "short_head": git_context.get("short_head"),
+                "refs": git_context.get("refs", {}),
+            },
+            worktree={
+                "git_preflight_status": git_preflight.get("status", "unknown"),
+                "git_preflight_message": git_preflight.get("message", ""),
+                "file_scope_guard_status": file_scope_guard.get("status", "unknown"),
+                "file_scope_guard_message": file_scope_guard.get("message", ""),
+                "dirty_before_paths": git_preflight.get("dirty_before_paths", []),
+                "dirty_after_paths": file_scope_guard.get("dirty_after_paths", []),
+                "dirty_before_out_of_scope_paths": git_preflight.get("dirty_before_out_of_scope_paths", []),
+                "new_dirty_paths": file_scope_guard.get("new_dirty_paths", []),
+                "changed_preexisting_dirty_paths": file_scope_guard.get("changed_preexisting_dirty_paths", []),
+                "new_or_changed_dirty_paths": file_scope_guard.get("new_or_changed_dirty_paths", []),
+                "file_scope_violations": file_scope_guard.get("violations", []),
+                "status_short": git_context.get("status_short", ""),
+            },
+            file_scope={
+                "patterns": list(task.file_scope),
+                "dirty_before_out_of_scope_paths": git_preflight.get("dirty_before_out_of_scope_paths", []),
+                "violations": file_scope_guard.get("violations", []),
+            },
+            approvals={
+                "allow_manual": allow_manual,
+                "allow_agent": allow_agent,
+                "manual_required": task.manual_approval_required,
+                "agent_required": task.agent_approval_required,
+                "executor_agent_required": bool((executor_contract or {}).get("requires_agent_approval")),
+            },
+            live={
+                "allow_live": allow_live,
+                "requires_live_flag_patterns": list(self.command_policy.get("requires_live_flag_patterns", [])),
+                "matched_patterns": live_matches,
+                "detected": bool(live_matches),
+            },
+            context={
+                "policy_profile": self.command_policy.get("profile") or self.roadmap.get("profile"),
+                "command_policy_version": self.command_policy.get("version"),
+                "default_timeout_seconds": self.default_timeout,
+            },
+        )
+
+    def _live_policy_matches(self, command: str | None) -> list[str]:
         if command is None:
-            return False, "shell command is missing"
+            return []
+        stripped = command.strip()
+        return [
+            str(pattern)
+            for pattern in self.command_policy.get("requires_live_flag_patterns", [])
+            if str(pattern) in stripped
+        ]
+
+    def _command_policy_match(self, command: str | None, *, allow_live: bool = False) -> tuple[str, str, dict[str, Any]]:
+        if command is None:
+            return "denied", "shell command is missing", {}
         stripped = command.strip()
         for pattern in self.command_policy.get("blocked_patterns", []):
             if pattern in stripped:
-                return False, f"blocked pattern matched: {pattern}"
-        if not allow_live:
-            for pattern in self.command_policy.get("requires_live_flag_patterns", []):
-                if pattern in stripped:
-                    return False, f"live command requires --allow-live: {pattern}"
+                return "denied", f"blocked pattern matched: {pattern}", {"blocked_pattern": pattern}
+        live_matches = self._live_policy_matches(command)
+        if live_matches and not allow_live:
+            return (
+                "requires_approval",
+                f"live command requires --allow-live: {live_matches[0]}",
+                {"approval_flag": "--allow-live", "matched_live_patterns": live_matches},
+            )
         prefixes = tuple(str(prefix) for prefix in self.command_policy.get("allowed_prefixes", []))
         if prefixes and not stripped.startswith(prefixes):
-            return False, "command prefix is not allowlisted"
-        return True, "allowed"
+            return "denied", "command prefix is not allowlisted", {"allowed_prefixes": list(prefixes)}
+        return "allowed", "allowed", {}
+
+    def command_allowed(self, command: str | None, allow_live: bool = False) -> tuple[bool, str]:
+        outcome, reason, _metadata = self._command_policy_match(command, allow_live=allow_live)
+        return outcome == "allowed", reason
+
+    def _approval_policy_decision(
+        self,
+        policy_input: PolicyInput,
+        *,
+        kind: str,
+        required_key: str,
+        allowed_key: str,
+        label: str,
+        approval_flag: str,
+    ) -> PolicyDecision:
+        required = bool(policy_input.approvals.get(required_key))
+        allowed = bool(policy_input.approvals.get(allowed_key))
+        if not required:
+            return PolicyDecision(
+                kind=kind,
+                scope="task",
+                outcome="allowed",
+                effect="allow",
+                severity="info",
+                reason=f"{label} not required",
+                policy_input=policy_input,
+            )
+        if allowed:
+            return PolicyDecision(
+                kind=kind,
+                scope="task",
+                outcome="allowed",
+                effect="allow",
+                severity="info",
+                reason=f"{label} satisfied",
+                policy_input=policy_input,
+                approval_flag=approval_flag,
+            )
+        return PolicyDecision(
+            kind=kind,
+            scope="task",
+            outcome="requires_approval",
+            effect="requires_approval",
+            severity="approval",
+            reason=f"{label} required",
+            policy_input=policy_input,
+            requires_approval=True,
+            approval_flag=approval_flag,
+        )
+
+    def _manual_approval_decision(self, policy_input: PolicyInput) -> PolicyDecision:
+        return self._approval_policy_decision(
+            policy_input,
+            kind="manual_approval",
+            required_key="manual_required",
+            allowed_key="allow_manual",
+            label="manual approval",
+            approval_flag="--allow-manual",
+        )
+
+    def _agent_approval_decision(self, policy_input: PolicyInput) -> PolicyDecision:
+        return self._approval_policy_decision(
+            policy_input,
+            kind="agent_approval",
+            required_key="agent_required",
+            allowed_key="allow_agent",
+            label="agent approval",
+            approval_flag="--allow-agent",
+        )
+
+    def _executor_policy_decision(self, policy_input: PolicyInput) -> PolicyDecision:
+        command = policy_input.command or {}
+        executor = policy_input.executor or {}
+        executor_id = str(command.get("executor") or executor.get("id") or "")
+        if not executor_id or executor.get("kind") == "unknown":
+            return PolicyDecision(
+                kind="executor_policy",
+                scope="command",
+                outcome="denied",
+                effect="deny",
+                severity="error",
+                reason=f"unknown executor: {executor_id}",
+                policy_input=policy_input,
+                status="unknown",
+            )
+        if executor.get("requires_agent_approval"):
+            if not policy_input.approvals.get("allow_agent"):
+                return PolicyDecision(
+                    kind="executor_approval",
+                    scope="command",
+                    outcome="requires_approval",
+                    effect="requires_approval",
+                    severity="approval",
+                    reason=f"{executor_id} executor requires --allow-agent",
+                    policy_input=policy_input,
+                    requires_approval=True,
+                    approval_flag="--allow-agent",
+                )
+            return PolicyDecision(
+                kind="executor_approval",
+                scope="command",
+                outcome="allowed",
+                effect="allow",
+                severity="info",
+                reason="agent approval satisfied",
+                policy_input=policy_input,
+                approval_flag="--allow-agent",
+            )
+        return PolicyDecision(
+            kind="executor_policy",
+            scope="command",
+            outcome="allowed",
+            effect="allow",
+            severity="info",
+            reason="registered executor",
+            policy_input=policy_input,
+        )
+
+    def _command_policy_decision(self, policy_input: PolicyInput) -> PolicyDecision:
+        command = policy_input.command or {}
+        outcome, reason, metadata = self._command_policy_match(
+            command.get("command"),
+            allow_live=bool(policy_input.live.get("allow_live")),
+        )
+        if outcome == "allowed":
+            return PolicyDecision(
+                kind="command_policy",
+                scope="command",
+                outcome="allowed",
+                effect="allow",
+                severity="info",
+                reason=reason,
+                policy_input=policy_input,
+            )
+        if outcome == "requires_approval":
+            return PolicyDecision(
+                kind="command_policy",
+                scope="command",
+                outcome="requires_approval",
+                effect="requires_approval",
+                severity="approval",
+                reason=reason,
+                policy_input=policy_input,
+                requires_approval=True,
+                approval_flag=str(metadata.get("approval_flag", "--allow-live")),
+                metadata=metadata,
+            )
+        return PolicyDecision(
+            kind="command_policy",
+            scope="command",
+            outcome="denied",
+            effect="deny",
+            severity="error",
+            reason=reason,
+            policy_input=policy_input,
+            metadata=metadata,
+        )
+
+    def _git_preflight_decision(self, policy_input: PolicyInput) -> PolicyDecision:
+        status = str(policy_input.worktree.get("git_preflight_status", "unknown"))
+        reason = str(policy_input.worktree.get("git_preflight_message", ""))
+        if status == "clean":
+            return PolicyDecision(
+                kind="git_preflight",
+                scope="worktree",
+                outcome="allowed",
+                effect="allow",
+                severity="info",
+                reason=reason,
+                policy_input=policy_input,
+                status=status,
+            )
+        return PolicyDecision(
+            kind="git_preflight",
+            scope="worktree",
+            outcome="warning",
+            effect="warn",
+            severity="warning",
+            reason=reason,
+            policy_input=policy_input,
+            status=status,
+            metadata={
+                "dirty_before_paths": policy_input.worktree.get("dirty_before_paths", []),
+                "dirty_before_out_of_scope_paths": policy_input.worktree.get("dirty_before_out_of_scope_paths", []),
+            },
+        )
+
+    def _file_scope_decision(self, policy_input: PolicyInput) -> PolicyDecision:
+        status = str(policy_input.worktree.get("file_scope_guard_status", "unknown"))
+        reason = str(policy_input.worktree.get("file_scope_guard_message", ""))
+        if status == "failed":
+            return PolicyDecision(
+                kind="file_scope_guard",
+                scope="worktree",
+                outcome="denied",
+                effect="deny",
+                severity="error",
+                reason=reason,
+                policy_input=policy_input,
+                status=status,
+                metadata={"violations": policy_input.file_scope.get("violations", [])},
+            )
+        if status == "passed":
+            return PolicyDecision(
+                kind="file_scope_guard",
+                scope="worktree",
+                outcome="allowed",
+                effect="allow",
+                severity="info",
+                reason=reason,
+                policy_input=policy_input,
+                status=status,
+            )
+        return PolicyDecision(
+            kind="file_scope_guard",
+            scope="worktree",
+            outcome="warning",
+            effect="warn",
+            severity="warning",
+            reason=reason,
+            policy_input=policy_input,
+            status=status,
+        )
 
     def _git_status_paths(self) -> list[str]:
         if not self._is_git_repo():
@@ -2229,7 +2652,16 @@ Rules:
         }
         task_state["last_dirty_before_paths"] = safety["git_preflight"].get("dirty_before_paths", [])
 
-        if task.manual_approval_required and not allow_manual:
+        manual_decision = self._manual_approval_decision(
+            self._policy_input(
+                task,
+                safety=safety,
+                allow_live=allow_live,
+                allow_manual=allow_manual,
+                allow_agent=allow_agent,
+            )
+        )
+        if manual_decision.blocks_execution():
             return self._finish_task(
                 state,
                 task,
@@ -2244,7 +2676,16 @@ Rules:
                 allow_manual=allow_manual,
                 allow_agent=allow_agent,
             )
-        if task.agent_approval_required and not allow_agent:
+        agent_decision = self._agent_approval_decision(
+            self._policy_input(
+                task,
+                safety=safety,
+                allow_live=allow_live,
+                allow_manual=allow_manual,
+                allow_agent=allow_agent,
+            )
+        )
+        if agent_decision.blocks_execution():
             return self._finish_task(
                 state,
                 task,
@@ -2282,6 +2723,7 @@ Rules:
             runs=runs,
             dry_run=dry_run,
             allow_live=allow_live,
+            allow_manual=allow_manual,
             allow_agent=allow_agent,
             task=task,
         )
@@ -2295,6 +2737,7 @@ Rules:
                     runs=runs,
                     dry_run=dry_run,
                     allow_live=allow_live,
+                    allow_manual=allow_manual,
                     allow_agent=allow_agent,
                     task=task,
                 )
@@ -2310,6 +2753,7 @@ Rules:
                     runs=runs,
                     dry_run=dry_run,
                     allow_live=allow_live,
+                    allow_manual=allow_manual,
                     allow_agent=allow_agent,
                     task=task,
                 )
@@ -2324,6 +2768,7 @@ Rules:
                 runs=runs,
                 dry_run=dry_run,
                 allow_live=allow_live,
+                allow_manual=allow_manual,
                 allow_agent=allow_agent,
                 task=task,
             )
@@ -2340,7 +2785,16 @@ Rules:
             task_state["last_dirty_after_paths"] = safety["file_scope_guard"].get("dirty_after_paths", [])
             task_state["last_new_dirty_paths"] = safety["file_scope_guard"].get("new_dirty_paths", [])
             task_state["last_file_scope_violations"] = safety["file_scope_guard"].get("violations", [])
-            if overall_status == "passed" and safety["file_scope_guard"].get("status") == "failed":
+            file_scope_decision = self._file_scope_decision(
+                self._policy_input(
+                    task,
+                    safety=safety,
+                    allow_live=allow_live,
+                    allow_manual=allow_manual,
+                    allow_agent=allow_agent,
+                )
+            )
+            if overall_status == "passed" and file_scope_decision.blocks_execution():
                 overall_status = "failed"
                 message = safety["file_scope_guard"]["message"]
 
@@ -2368,51 +2822,47 @@ Rules:
         runs: list[CommandRun],
         dry_run: bool,
         allow_live: bool,
+        allow_manual: bool,
         allow_agent: bool,
         task: HarnessTask,
     ) -> tuple[str, str]:
         if not commands:
             return "passed", f"No {phase} commands configured."
         for command in commands:
+            executor_metadata = self.executor_registry.metadata_for(command.executor)
+            policy_input = self._policy_input(
+                task,
+                phase=phase,
+                command=command,
+                allow_live=allow_live,
+                allow_manual=allow_manual,
+                allow_agent=allow_agent,
+                executor_metadata=executor_metadata,
+            )
+            executor_decision = self._executor_policy_decision(policy_input)
             executor = self.executor_registry.get(command.executor)
+            if executor_decision.blocks_execution():
+                runs.append(
+                    CommandRun(
+                        phase,
+                        command.name,
+                        self._display_command(command, task),
+                        "blocked",
+                        None,
+                        utc_now(),
+                        utc_now(),
+                        "",
+                        executor_decision.reason,
+                        executor=command.executor,
+                        executor_metadata=executor_metadata,
+                    )
+                )
+                return "blocked", executor_decision.reason
             if executor is None:
-                runs.append(
-                    CommandRun(
-                        phase,
-                        command.name,
-                        self._display_command(command, task),
-                        "blocked",
-                        None,
-                        utc_now(),
-                        utc_now(),
-                        "",
-                        f"unknown executor: {command.executor}",
-                        executor=command.executor,
-                        executor_metadata=self.executor_registry.metadata_for(command.executor),
-                    )
-                )
-                return "blocked", f"unknown executor: {command.executor}"
-            if executor.metadata.requires_agent_approval and not allow_agent:
-                reason = f"{command.executor} executor requires --allow-agent"
-                runs.append(
-                    CommandRun(
-                        phase,
-                        command.name,
-                        self._display_command(command, task),
-                        "blocked",
-                        None,
-                        utc_now(),
-                        utc_now(),
-                        "",
-                        reason,
-                        executor=command.executor,
-                        executor_metadata=executor.metadata.as_contract(),
-                    )
-                )
-                return "blocked", reason
+                return "blocked", executor_decision.reason
             if executor.metadata.uses_command_policy:
-                allowed, reason = self.command_allowed(command.command, allow_live=allow_live)
-                if not allowed:
+                command_decision = self._command_policy_decision(policy_input)
+                if command_decision.blocks_execution():
                     runs.append(
                         CommandRun(
                             phase,
@@ -2423,12 +2873,12 @@ Rules:
                             utc_now(),
                             utc_now(),
                             "",
-                            reason,
+                            command_decision.reason,
                             executor=command.executor,
                             executor_metadata=executor.metadata.as_contract(),
                         )
                     )
-                    return "blocked", reason
+                    return "blocked", command_decision.reason
             if dry_run:
                 runs.append(
                     CommandRun(
@@ -2734,6 +3184,16 @@ Rules:
     ) -> None:
         manifest_relative = str(manifest_path.relative_to(self.project_root))
         report_relative = str(report_path.relative_to(self.project_root))
+        safety_payload = safety or {}
+        git_context = self._git_context(safety_payload)
+        policy_input = self._policy_input(
+            task,
+            safety=safety_payload,
+            git_context=git_context,
+            allow_live=allow_live,
+            allow_manual=allow_manual,
+            allow_agent=allow_agent,
+        )
         payload = {
             "schema_version": 1,
             "kind": "engineering-harness.task-run-manifest",
@@ -2763,15 +3223,17 @@ Rules:
                 {"kind": "json_manifest", "path": manifest_relative},
             ],
             "runs": [self._command_run_manifest(task, run) for run in runs],
-            "safety": safety or {},
+            "safety": safety_payload,
+            "policy_input": policy_input.as_contract(),
             "policy_decisions": self._policy_decisions(
                 task,
-                safety=safety or {},
+                safety=safety_payload,
+                git_context=git_context,
                 allow_live=allow_live,
                 allow_manual=allow_manual,
                 allow_agent=allow_agent,
             ),
-            "git": self._git_context(safety or {}),
+            "git": git_context,
         }
         write_json(manifest_path, payload)
 
@@ -2857,23 +3319,22 @@ Rules:
         task: HarnessTask,
         *,
         safety: dict[str, Any],
+        git_context: dict[str, Any] | None = None,
         allow_live: bool,
         allow_manual: bool,
         allow_agent: bool,
     ) -> list[dict[str, Any]]:
-        decisions: list[dict[str, Any]] = [
-            {
-                "kind": "manual_approval",
-                "scope": "task",
-                "outcome": "allowed" if not task.manual_approval_required or allow_manual else "denied",
-                "reason": self._approval_reason(task.manual_approval_required, allow_manual, "manual approval"),
-            },
-            {
-                "kind": "agent_approval",
-                "scope": "task",
-                "outcome": "allowed" if not task.agent_approval_required or allow_agent else "denied",
-                "reason": self._approval_reason(task.agent_approval_required, allow_agent, "agent approval"),
-            },
+        base_input = self._policy_input(
+            task,
+            safety=safety,
+            git_context=git_context,
+            allow_live=allow_live,
+            allow_manual=allow_manual,
+            allow_agent=allow_agent,
+        )
+        decisions: list[PolicyDecision] = [
+            self._manual_approval_decision(base_input),
+            self._agent_approval_decision(base_input),
         ]
         for phase, commands in (
             ("implementation", task.implementation),
@@ -2882,83 +3343,31 @@ Rules:
             ("e2e", task.e2e),
         ):
             for command in commands:
+                executor_metadata = self.executor_registry.metadata_for(command.executor)
+                command_input = self._policy_input(
+                    task,
+                    phase=phase,
+                    command=command,
+                    safety=safety,
+                    git_context=git_context,
+                    allow_live=allow_live,
+                    allow_manual=allow_manual,
+                    allow_agent=allow_agent,
+                    executor_metadata=executor_metadata,
+                )
+                executor_decision = self._executor_policy_decision(command_input)
+                decisions.append(executor_decision)
                 executor = self.executor_registry.get(command.executor)
-                if executor and executor.metadata.uses_command_policy:
-                    allowed, reason = self.command_allowed(command.command, allow_live=allow_live)
-                    decisions.append(
-                        {
-                            "kind": "command_policy",
-                            "scope": "command",
-                            "phase": phase,
-                            "name": command.name,
-                            "executor": command.executor,
-                            "outcome": "allowed" if allowed else "denied",
-                            "reason": reason,
-                        }
-                    )
-                elif executor and executor.metadata.requires_agent_approval:
-                    decisions.append(
-                        {
-                            "kind": "executor_approval",
-                            "scope": "command",
-                            "phase": phase,
-                            "name": command.name,
-                            "executor": command.executor,
-                            "outcome": "allowed" if allow_agent else "denied",
-                            "reason": f"{command.executor} executor requires --allow-agent"
-                            if not allow_agent
-                            else "agent approval satisfied",
-                        }
-                    )
-                elif executor:
-                    decisions.append(
-                        {
-                            "kind": "executor_policy",
-                            "scope": "command",
-                            "phase": phase,
-                            "name": command.name,
-                            "executor": command.executor,
-                            "outcome": "allowed",
-                            "reason": "registered executor",
-                        }
-                    )
-                else:
-                    decisions.append(
-                        {
-                            "kind": "executor_policy",
-                            "scope": "command",
-                            "phase": phase,
-                            "name": command.name,
-                            "executor": command.executor,
-                            "outcome": "denied",
-                            "reason": f"unknown executor: {command.executor}",
-                        }
-                    )
+                if executor is not None and executor.metadata.uses_command_policy:
+                    decisions.append(self._command_policy_decision(command_input))
 
-        git_preflight = safety.get("git_preflight", {})
-        file_scope_guard = safety.get("file_scope_guard", {})
         decisions.extend(
             [
-                {
-                    "kind": "git_preflight",
-                    "scope": "worktree",
-                    "outcome": str(git_preflight.get("status", "unknown")),
-                    "reason": str(git_preflight.get("message", "")),
-                },
-                {
-                    "kind": "file_scope_guard",
-                    "scope": "worktree",
-                    "outcome": str(file_scope_guard.get("status", "unknown")),
-                    "reason": str(file_scope_guard.get("message", "")),
-                },
+                self._git_preflight_decision(base_input),
+                self._file_scope_decision(base_input),
             ]
         )
-        return decisions
-
-    def _approval_reason(self, required: bool, allowed: bool, label: str) -> str:
-        if not required:
-            return f"{label} not required"
-        return f"{label} satisfied" if allowed else f"{label} required"
+        return [decision.as_contract() for decision in decisions]
 
     def _git_context(self, safety: dict[str, Any]) -> dict[str, Any]:
         git_preflight = safety.get("git_preflight", {})

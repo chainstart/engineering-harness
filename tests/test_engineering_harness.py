@@ -64,6 +64,19 @@ def roadmap_fixture_payload(fixture_name: str) -> dict:
     return json.loads(fixture_path.read_text(encoding="utf-8"))
 
 
+def task_manifest(project: Path, result: dict) -> dict:
+    return json.loads((project / result["manifest"]).read_text(encoding="utf-8"))
+
+
+def policy_decision(manifest: dict, kind: str, **matches) -> dict:
+    for decision in manifest["policy_decisions"]:
+        if decision.get("kind") != kind:
+            continue
+        if all(decision.get(key) == value for key, value in matches.items()):
+            return decision
+    raise AssertionError(f"missing policy decision {kind} matching {matches}")
+
+
 def roadmap_without_experience(project_name: str, *, profile: str = "python-agent", task_title: str) -> dict:
     return {
         "version": 1,
@@ -198,10 +211,26 @@ def test_harness_runs_task_and_writes_matching_manifest(tmp_path):
     assert manifest["git"]["head"] == head
     assert manifest["git"]["dirty_before_paths"] == []
     assert manifest["git"]["dirty_after_paths"] == ["done.txt"]
-    assert any(
-        decision["kind"] == "command_policy" and decision["outcome"] == "allowed"
-        for decision in manifest["policy_decisions"]
-    )
+    assert manifest["policy_input"]["schema_version"] == 1
+    assert manifest["policy_input"]["project"]["name"] == "agent-project"
+    assert manifest["policy_input"]["task"]["id"] == "tests"
+    assert manifest["policy_input"]["file_scope"]["patterns"] == ["**"]
+    assert manifest["policy_input"]["approvals"] == {
+        "allow_manual": False,
+        "allow_agent": False,
+        "manual_required": False,
+        "agent_required": False,
+        "executor_agent_required": False,
+    }
+    assert manifest["policy_input"]["live"]["allow_live"] is False
+
+    command_policy = policy_decision(manifest, "command_policy", outcome="allowed")
+    assert command_policy["schema_version"] == 1
+    assert command_policy["effect"] == "allow"
+    assert command_policy["severity"] == "info"
+    assert command_policy["input"]["phase"] == "acceptance"
+    assert command_policy["input"]["command"]["executor"] == "shell"
+    assert command_policy["input"]["executor"]["uses_command_policy"] is True
 
     state = json.loads((project / ".engineering/state/harness-state.json").read_text(encoding="utf-8"))
     assert state["tasks"]["tests"]["last_manifest"] == result["manifest"]
@@ -564,6 +593,75 @@ def test_harness_blocks_non_allowlisted_command(tmp_path):
     assert "allowlisted" in result["message"]
 
 
+def test_policy_decision_schema_records_denied_command(tmp_path):
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0]["command"] = "curl https://example.com"
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    result = harness.run_task(harness.next_task())
+
+    assert result["status"] == "blocked"
+    manifest = task_manifest(project, result)
+    command_policy = policy_decision(manifest, "command_policy", outcome="denied")
+    assert command_policy["effect"] == "deny"
+    assert command_policy["severity"] == "error"
+    assert command_policy["reason"] == "command prefix is not allowlisted"
+    assert command_policy["input"]["command"]["command"] == "curl https://example.com"
+    assert command_policy["input"]["executor"]["id"] == "shell"
+    assert "python3 " in command_policy["metadata"]["allowed_prefixes"]
+
+
+def test_policy_decision_schema_records_live_command_approval_gate(tmp_path):
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0]["command"] = "python3 -c \"print('live')\" --live"
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    result = harness.run_task(harness.next_task())
+
+    assert result["status"] == "blocked"
+    manifest = task_manifest(project, result)
+    command_policy = policy_decision(manifest, "command_policy", outcome="requires_approval")
+    assert command_policy["effect"] == "requires_approval"
+    assert command_policy["severity"] == "approval"
+    assert command_policy["requires_approval"] is True
+    assert command_policy["approval_flag"] == "--allow-live"
+    assert command_policy["input"]["live"]["detected"] is True
+    assert command_policy["input"]["live"]["matched_patterns"] == ["--live"]
+
+
+def test_policy_decision_schema_records_manual_approval_gate(tmp_path):
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"][0]["manual_approval_required"] = True
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0]["command"] = "python3 -c \"print('ok')\""
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    result = harness.run_task(harness.next_task())
+
+    assert result["status"] == "blocked"
+    manifest = task_manifest(project, result)
+    manual = policy_decision(manifest, "manual_approval", outcome="requires_approval")
+    assert manual["effect"] == "requires_approval"
+    assert manual["requires_approval"] is True
+    assert manual["approval_flag"] == "--allow-manual"
+    assert manual["input"]["approvals"]["manual_required"] is True
+    assert manual["input"]["approvals"]["allow_manual"] is False
+
+
 def test_harness_runs_implementation_before_acceptance(tmp_path):
     project = tmp_path / "agent-project"
     project.mkdir()
@@ -721,6 +819,12 @@ def test_file_scope_guard_blocks_out_of_scope_changes(tmp_path):
     assert result["status"] == "failed"
     assert result["safety"]["file_scope_guard"]["violations"] == ["outside.txt"]
     assert "outside file_scope" in result["message"]
+    manifest = task_manifest(project, result)
+    file_scope = policy_decision(manifest, "file_scope_guard", outcome="denied")
+    assert file_scope["effect"] == "deny"
+    assert file_scope["status"] == "failed"
+    assert file_scope["input"]["file_scope"]["patterns"] == ["src/**"]
+    assert file_scope["metadata"]["violations"] == ["outside.txt"]
 
 
 def test_file_scope_guard_blocks_changed_preexisting_dirty_out_of_scope_file(tmp_path):
@@ -784,6 +888,34 @@ def test_git_checkpoint_refuses_dirty_worktree_that_predates_task(tmp_path):
     assert result["safety"]["git_preflight"]["dirty_before_paths"] == ["preexisting.txt"]
     assert checkpoint["status"] == "skipped"
     assert "dirty worktree existed before the task" in checkpoint["message"]
+
+
+def test_policy_decision_schema_records_dirty_worktree_warning(tmp_path):
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    subprocess.run(["git", "init"], cwd=project, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "harness@example.invalid"], cwd=project, check=True)
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=project, check=True)
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0]["command"] = "python3 -c \"print('ok')\""
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=project, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=project, check=True, capture_output=True, text=True)
+    (project / "preexisting.txt").write_text("dirty before task", encoding="utf-8")
+
+    harness = Harness(project)
+    result = harness.run_task(harness.next_task())
+
+    assert result["status"] == "passed"
+    manifest = task_manifest(project, result)
+    warning = policy_decision(manifest, "git_preflight", outcome="warning")
+    assert warning["effect"] == "warn"
+    assert warning["severity"] == "warning"
+    assert warning["status"] == "dirty"
+    assert warning["input"]["worktree"]["dirty_before_paths"] == ["preexisting.txt"]
+    assert warning["metadata"]["dirty_before_paths"] == ["preexisting.txt"]
 
 
 def test_validate_roadmap_catches_missing_acceptance(tmp_path):
