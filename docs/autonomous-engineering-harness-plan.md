@@ -253,8 +253,17 @@ Current durable drive controls:
 
 - Drive-level pause, resume, and cancel state is stored in the `drive_control` block in
   `.engineering/state/harness-state.json`.
+- Active drives also record their owner pid, started time, latest heartbeat, current loop activity,
+  current task, last progress message, and watchdog status. Stale state is reported when the pid is
+  gone or the heartbeat exceeds the local `drive_watchdog.stale_after_seconds` threshold.
+- Rolling drives with task checkpointing record roadmap materialization checkpoint intent before
+  generated tasks run. Clean materializations are checkpointed first; materializations mixed with
+  pre-existing user dirtiness cause explicit task checkpoint deferral in the drive report.
+- Drive reports include a deterministic goal-gap retrospective and JSON sidecar that compare final
+  local evidence with the long-run unattended reliability goal.
 - `pause` and `cancel` stop future drive scheduling without deleting roadmap tasks or reports.
-- `resume` clears pause or cancel state and lets a later `drive` invocation continue selecting work.
+- `resume` clears pause, cancel, or stale state and lets a later `drive` invocation continue selecting
+  work without killing unrelated processes.
 - Manual, live, and agent policy gates create records in `approval_queue`; approved records unblock
   the affected task and are marked `consumed` after the task completes.
 - Operator commands and examples are documented in [Durable Drive Controls](durable-drive-controls.md).

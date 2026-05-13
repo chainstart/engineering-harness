@@ -1513,6 +1513,202 @@
           "generated_at": "2026-05-13T06:03:58Z"
         }
       ]
+    },
+    {
+      "id": "unattended-reliability-hardening",
+      "title": "Unattended Reliability Hardening",
+      "status": "planned",
+      "objective": "Remove the next concrete failure modes that prevent engineering-harness from running unattended for long autonomous development loops.",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-13T07:26:31Z",
+      "tasks": [
+        {
+          "id": "drive-watchdog-heartbeat",
+          "title": "Add drive heartbeat and stale-run watchdog",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 2,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 2400,
+              "sandbox": "workspace-write",
+              "prompt": "Implement durable heartbeat and stale-run watchdog support for long unattended drives. Persist enough drive-control metadata to inspect active pid, start time, last heartbeat, current loop activity, current task when known, and last progress message. Update the heartbeat at safe boundaries in drive, self-iteration, continuation materialization, task execution, acceptance, E2E, and git checkpoint handling. Detect stale running state when the recorded process is gone or the heartbeat exceeds a configurable local threshold, expose this in status JSON/text, and allow resume to cleanly recover it. Add focused tests for normal running state, stale pid recovery, stale heartbeat recovery, and status output. Update docs for operating and recovering long unattended drives. Keep all behavior local-only and avoid killing unrelated processes."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 1200,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing heartbeat/watchdog tests while preserving durable drive state, pause/resume/cancel behavior, safe stale-run recovery, and local-only operation."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "watchdog tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"drive_watchdog or heartbeat or stale\"",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 120
+            }
+          ],
+          "e2e": [
+            {
+              "name": "status remains machine-readable after watchdog changes",
+              "command": "bin/engh status --project-root . --json",
+              "required": true,
+              "timeout_seconds": 120
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T07:26:31Z"
+        },
+        {
+          "id": "rolling-checkpoint-boundaries",
+          "title": "Make rolling continuation checkpoints safe and explicit",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 2,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 2400,
+              "sandbox": "workspace-write",
+              "prompt": "Improve rolling drive checkpoint boundaries so continuation materialization does not cause later task git checkpoints to be skipped as a pre-existing dirty worktree. When --commit-after-task/--push-after-task is enabled, record materialization checkpoint intent and either commit/push the roadmap materialization before running generated tasks or explicitly defer task checkpointing with a clear drive report reason that distinguishes harness-owned materialization from unrelated user dirtiness. Preserve protection against committing unrelated user changes. Add tests using a temporary git repo that run rolling continuation with commit-after-task and assert materialization and task checkpoint reporting are deterministic. Update drive reports/docs to explain the checkpoint boundary model."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 1200,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing rolling checkpoint boundary tests while preserving user-dirty-worktree protection, task reports, drive reports, and existing commit-after-task behavior."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "checkpoint boundary tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"checkpoint or rolling\"",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 120
+            }
+          ],
+          "e2e": [
+            {
+              "name": "drive status remains readable after checkpoint changes",
+              "command": "bin/engh status --project-root . --json",
+              "required": true,
+              "timeout_seconds": 120
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T07:26:31Z"
+        },
+        {
+          "id": "drive-goal-gap-retrospective",
+          "title": "Add deterministic goal-gap retrospective to drive reports",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 2,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 2400,
+              "sandbox": "workspace-write",
+              "prompt": "Add a deterministic long-run reliability retrospective to drive completion. When a rolling/self-iterating drive stops because the queue is empty, budget is exhausted, blocked, failed, or interrupted, include a machine-readable and Markdown summary comparing the current harness state to the long-term unattended reliability goal. Use local evidence only: status summary, manifest index, latest reports, drive control state, approval queue, self-iteration context pack summaries, tests, and git state. Report completed reliability capabilities, remaining risks, likely next stage themes, and whether another self-iteration should be requested. Add focused tests for budget-exhausted and queue-empty reports and update docs. Do not call a model or external service."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 1200,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing drive retrospective tests while preserving existing drive report shape, JSON status compatibility, and local-only deterministic behavior."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "drive retrospective tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"retrospective or goal_gap or drive_report\"",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 120
+            }
+          ],
+          "e2e": [
+            {
+              "name": "drive report smoke after retrospective changes",
+              "command": "bin/engh status --project-root . --json",
+              "required": true,
+              "timeout_seconds": 120
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T07:26:31Z"
+        }
+      ]
     }
   ],
   "continuation": {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -10,7 +11,7 @@ import pytest
 
 from engineering_harness.goal_intake import GoalIntakeValidationError, normalize_goal_intake, validate_goal_intake
 from engineering_harness.goal_planner import plan_goal_roadmap
-from engineering_harness.core import Harness, discover_projects, init_project
+from engineering_harness.core import Harness, discover_projects, init_project, utc_now
 from engineering_harness.executors import (
     DAGGER_ENABLE_ENV,
     DaggerExecutorAdapter,
@@ -84,9 +85,45 @@ def task_manifest(project: Path, result: dict) -> dict:
     return json.loads((project / result["manifest"]).read_text(encoding="utf-8"))
 
 
+def harness_state(project: Path) -> dict:
+    return json.loads((project / ".engineering/state/harness-state.json").read_text(encoding="utf-8"))
+
+
+def write_harness_state(project: Path, state: dict) -> None:
+    (project / ".engineering/state/harness-state.json").write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def unused_pid() -> int:
+    pid = 999_999
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return pid
+        except PermissionError:
+            pid += 1
+            continue
+        pid += 1
+
+
+def init_git_repo(project: Path, message: str = "initial") -> None:
+    subprocess.run(["git", "init"], cwd=project, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "harness@example.invalid"], cwd=project, check=True)
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=project, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=project, check=True)
+    subprocess.run(["git", "commit", "-m", message], cwd=project, check=True, capture_output=True, text=True)
+
+
 def report_policy_evidence(project: Path, result: dict) -> dict:
     report = (project / result["report"]).read_text(encoding="utf-8")
     section = report.split("## Policy Decisions", 1)[1]
+    block = section.split("```json", 1)[1].split("```", 1)[0]
+    return json.loads(block)
+
+
+def drive_report_goal_gap_retrospective(project: Path, report_path: str) -> dict:
+    report = (project / report_path).read_text(encoding="utf-8")
+    section = report.split("## Goal-Gap Retrospective", 1)[1]
     block = section.split("```json", 1)[1].split("```", 1)[0]
     return json.loads(block)
 
@@ -1877,6 +1914,143 @@ def test_drive_pause_resume_and_cancel_controls_are_durable(tmp_path):
     assert state["drive_control"]["cancel_requested"] is True
 
 
+def test_drive_watchdog_heartbeat_records_running_owner_and_task(tmp_path):
+    project = tmp_path / "watchdog-running-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="watchdog-running-project")
+
+    harness = Harness(project)
+    start = harness.start_drive()
+    task = harness.next_task()
+    assert start["started"] is True
+    assert task is not None
+
+    heartbeat = harness.drive_heartbeat(
+        activity="acceptance-1:command",
+        message="running acceptance command",
+        task=task,
+        phase="acceptance-1",
+    )
+
+    assert heartbeat is not None
+    summary = Harness(project).status_summary()["drive_control"]
+    assert summary["status"] == "running"
+    assert summary["active"] is True
+    assert summary["pid"] == os.getpid()
+    assert summary["started_at"]
+    assert summary["last_heartbeat_at"]
+    assert summary["heartbeat_count"] >= 2
+    assert summary["current_activity"] == "acceptance-1:command"
+    assert summary["current_task"]["id"] == "tests"
+    assert summary["current_task"]["phase"] == "acceptance-1"
+    assert summary["last_progress_message"] == "running acceptance command"
+    assert summary["watchdog"]["status"] == "running"
+    assert summary["watchdog"]["stale"] is False
+
+    Harness(project).finish_drive(status="completed", message="test complete")
+
+
+def test_drive_watchdog_detects_stale_pid_and_resume_recovers(tmp_path):
+    project = tmp_path / "watchdog-stale-pid-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="watchdog-stale-pid-project")
+
+    harness = Harness(project)
+    assert harness.start_drive()["started"] is True
+    state = harness_state(project)
+    state["drive_control"]["pid"] = unused_pid()
+    state["drive_control"]["last_heartbeat_at"] = utc_now()
+    write_harness_state(project, state)
+
+    summary = Harness(project).status_summary()["drive_control"]
+    assert summary["status"] == "stale"
+    assert summary["active"] is False
+    assert summary["watchdog"]["stale"] is True
+    assert summary["watchdog"]["reason"] == "pid_gone"
+
+    start = Harness(project).start_drive()
+    assert start["started"] is False
+    assert start["status"] == "stale"
+    state = harness_state(project)
+    assert state["drive_control"]["status"] == "stale"
+    assert state["drive_control"]["stale_reason"] == "pid_gone"
+
+    resumed = Harness(project).set_drive_control("resume", reason="recover stale pid")
+    assert resumed["status"] == "idle"
+    assert resumed["drive_control"]["active"] is False
+    assert resumed["drive_control"]["pid"] is None
+    assert resumed["drive_control"]["stale_reason"] is None
+
+    restarted = Harness(project).start_drive()
+    assert restarted["started"] is True
+    Harness(project).finish_drive(status="completed", message="recovered")
+
+
+def test_drive_watchdog_detects_stale_heartbeat_and_resume_recovers(tmp_path):
+    project = tmp_path / "watchdog-stale-heartbeat-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="watchdog-stale-heartbeat-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["drive_watchdog"] = {"stale_after_seconds": 5}
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    assert harness.start_drive()["started"] is True
+    state = harness_state(project)
+    state["drive_control"]["pid"] = os.getpid()
+    state["drive_control"]["last_heartbeat_at"] = "2000-01-01T00:00:00Z"
+    write_harness_state(project, state)
+
+    summary = Harness(project).status_summary()["drive_control"]
+    assert summary["status"] == "stale"
+    assert summary["watchdog"]["stale"] is True
+    assert summary["watchdog"]["reason"] == "heartbeat_stale"
+    assert summary["watchdog"]["threshold_seconds"] == 5
+    assert summary["watchdog"]["heartbeat_age_seconds"] > 5
+
+    start = Harness(project).start_drive()
+    assert start["started"] is False
+    assert start["status"] == "stale"
+
+    resumed = Harness(project).set_drive_control("resume", reason="recover stale heartbeat")
+    assert resumed["status"] == "idle"
+    assert resumed["drive_control"]["stale_reason"] is None
+
+    restarted = Harness(project).start_drive()
+    assert restarted["started"] is True
+    Harness(project).finish_drive(status="completed", message="recovered")
+
+
+def test_drive_watchdog_status_output_includes_heartbeat_metadata(tmp_path, capsys):
+    project = tmp_path / "watchdog-status-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="watchdog-status-project")
+
+    harness = Harness(project)
+    assert harness.start_drive()["started"] is True
+    harness.drive_heartbeat(activity="drive-loop", message="status test heartbeat", clear_task=True)
+
+    assert cli_main(["status", "--project-root", str(project), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    drive_control = payload["drive_control"]
+    assert drive_control["status"] == "running"
+    assert drive_control["pid"] == os.getpid()
+    assert drive_control["current_activity"] == "drive-loop"
+    assert drive_control["last_progress_message"] == "status test heartbeat"
+    assert drive_control["watchdog"]["status"] == "running"
+    assert drive_control["watchdog"]["stale"] is False
+
+    assert cli_main(["status", "--project-root", str(project)]) == 0
+    text = capsys.readouterr().out
+    assert "Drive control: running" in text
+    assert "Drive watchdog: running" in text
+    assert "Drive activity: drive-loop" in text
+    assert "Drive progress: status test heartbeat" in text
+
+    Harness(project).finish_drive(status="completed", message="status output checked")
+
+
 @pytest.mark.parametrize(
     ("gate", "approval_kind", "decision_kind", "marker"),
     [
@@ -2087,6 +2261,257 @@ def test_drive_rolling_advances_and_runs_generated_tasks(tmp_path):
     assert state["tasks"]["generated-test"]["status"] == "passed"
     report = next((project / ".engineering/reports/tasks/drives").glob("*-drive.md"))
     assert "Continuations" in report.read_text(encoding="utf-8")
+
+
+def test_drive_report_goal_gap_retrospective_budget_exhausted(tmp_path, capsys):
+    project = tmp_path / "goal-gap-budget-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="goal-gap-budget-project")
+    (project / "tests").mkdir()
+    (project / "tests/test_goal_gap.py").write_text("def test_marker():\n    assert True\n", encoding="utf-8")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"] = [
+        {
+            "id": "first-task",
+            "title": "First Task",
+            "status": "pending",
+            "file_scope": ["tests/**"],
+            "acceptance": [{"name": "first ok", "command": "python3 -c \"print('first ok')\""}],
+        },
+        {
+            "id": "second-task",
+            "title": "Second Task",
+            "status": "pending",
+            "file_scope": ["tests/**"],
+            "acceptance": [{"name": "second ok", "command": "python3 -c \"print('second ok')\""}],
+        },
+    ]
+    roadmap["self_iteration"] = {
+        "enabled": True,
+        "objective": "Plan the next reliability hardening stage.",
+        "planner": {"name": "local planner", "command": "python3 -c \"print('planner placeholder')\""},
+    }
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    init_git_repo(project)
+
+    exit_code = cli_main(["drive", "--project-root", str(project), "--max-tasks", "1", "--json"])
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "budget_exhausted"
+    retrospective = payload["goal_gap_retrospective"]
+    assert retrospective["kind"] == "engineering-harness.goal-gap-retrospective"
+    assert retrospective["trigger"]["stop_class"] == "budget_exhausted"
+    assert retrospective["task_counts"]["pending"] == 1
+    assert retrospective["evidence"]["manifest_index"]["manifest_count"] == 1
+    assert retrospective["evidence"]["latest_reports"]["task_reports"]["included_count"] == 1
+    assert retrospective["evidence"]["tests"]["total_count"] == 1
+    assert retrospective["evidence"]["git"]["is_repository"] is True
+    assert retrospective["request_self_iteration"]["recommended"] is False
+    assert retrospective["request_self_iteration"]["blocked_by"] == ["budget_exhausted", "pending_task_queue"]
+    risk_ids = {item["id"] for item in retrospective["remaining_risks"]}
+    assert {"budget_exhausted", "pending_roadmap_tasks"}.issubset(risk_ids)
+    theme_ids = {item["id"] for item in retrospective["likely_next_stage_themes"]}
+    assert "drain-queued-tasks" in theme_ids
+    assert drive_report_goal_gap_retrospective(project, payload["drive_report"]) == retrospective
+    sidecar = json.loads((project / payload["drive_report_json"]).read_text(encoding="utf-8"))
+    assert sidecar["goal_gap_retrospective"] == retrospective
+
+
+def test_drive_report_goal_gap_retrospective_queue_empty_requests_self_iteration(tmp_path, capsys):
+    project = tmp_path / "goal-gap-empty-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="goal-gap-empty-project")
+    (project / "tests").mkdir()
+    (project / "tests/test_goal_gap.py").write_text("def test_marker():\n    assert True\n", encoding="utf-8")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0]["command"] = "python3 -c \"print('queue ok')\""
+    roadmap["continuation"] = {"enabled": True, "goal": "Continue reliability hardening.", "stages": []}
+    roadmap["self_iteration"] = {
+        "enabled": True,
+        "objective": "Plan the next reliability hardening stage.",
+        "planner": {"name": "local planner", "command": "python3 -c \"print('planner placeholder')\""},
+    }
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    init_git_repo(project)
+
+    exit_code = cli_main(["drive", "--project-root", str(project), "--json"])
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "completed"
+    assert payload["message"] == "Roadmap queue is empty."
+    retrospective = payload["goal_gap_retrospective"]
+    assert retrospective["trigger"]["stop_class"] == "queue_empty"
+    assert retrospective["request_self_iteration"]["recommended"] is True
+    assert retrospective["request_self_iteration"]["blocked_by"] == []
+    assert retrospective["evidence"]["self_iteration_context_packs"]["included_count"] == 0
+    risk_ids = {item["id"] for item in retrospective["remaining_risks"]}
+    assert {"roadmap_queue_empty", "self_iteration_context_not_refreshed"}.issubset(risk_ids)
+    theme_ids = {item["id"] for item in retrospective["likely_next_stage_themes"]}
+    assert "request-self-iteration" in theme_ids
+    report_text = (project / payload["drive_report"]).read_text(encoding="utf-8")
+    assert "Request self-iteration: `yes`" in report_text
+    assert drive_report_goal_gap_retrospective(project, payload["drive_report"]) == retrospective
+    sidecar = json.loads((project / payload["drive_report_json"]).read_text(encoding="utf-8"))
+    assert sidecar["goal_gap_retrospective"] == retrospective
+
+
+def test_drive_rolling_commit_after_task_checkpoints_materialization_before_generated_task(tmp_path, capsys):
+    project = tmp_path / "rolling-checkpoint-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="rolling-checkpoint-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"] = []
+    roadmap["continuation"] = {
+        "enabled": True,
+        "goal": "Continue with generated tasks.",
+        "stages": [
+            {
+                "id": "stage-a",
+                "title": "Stage A",
+                "objective": "Create an in-scope generated marker.",
+                "tasks": [
+                    {
+                        "id": "generated-test",
+                        "title": "Generated Test",
+                        "file_scope": ["generated.txt"],
+                        "acceptance": [
+                            {
+                                "name": "write marker",
+                                "command": "python3 -c \"from pathlib import Path; Path('generated.txt').write_text('ok')\"",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    init_git_repo(project)
+
+    exit_code = cli_main(
+        [
+            "drive",
+            "--project-root",
+            str(project),
+            "--rolling",
+            "--max-continuations",
+            "1",
+            "--max-tasks",
+            "1",
+            "--commit-after-task",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    materialization = payload["continuations"][0]["materialization_checkpoint"]
+    task_git = payload["results"][0]["git"]
+    assert materialization["status"] == "committed"
+    assert materialization["dirty_before_paths"] == []
+    assert materialization["materialization_paths"] == [".engineering/roadmap.yaml"]
+    assert task_git["status"] == "committed"
+    subjects = subprocess.check_output(
+        ["git", "log", "--format=%s", "-3"],
+        cwd=project,
+        text=True,
+    ).splitlines()
+    assert subjects == [
+        "chore(engineering): complete generated-test",
+        "chore(engineering): materialize roadmap continuation: stage-a",
+        "initial",
+    ]
+    assert subprocess.check_output(["git", "status", "--porcelain"], cwd=project, text=True).strip() == ""
+    report = project / payload["drive_report"]
+    report_text = report.read_text(encoding="utf-8")
+    assert "Materialization checkpoint: `committed`" in report_text
+    assert "No task checkpoint deferral was recorded." in report_text
+
+
+def test_drive_rolling_commit_after_task_defers_when_materialization_has_user_dirtiness(tmp_path, capsys):
+    project = tmp_path / "rolling-checkpoint-dirty-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="rolling-checkpoint-dirty-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"] = []
+    roadmap["continuation"] = {
+        "enabled": True,
+        "goal": "Continue with generated tasks.",
+        "stages": [
+            {
+                "id": "stage-a",
+                "title": "Stage A",
+                "objective": "Create an in-scope generated marker.",
+                "tasks": [
+                    {
+                        "id": "generated-test",
+                        "title": "Generated Test",
+                        "file_scope": ["generated.txt"],
+                        "acceptance": [
+                            {
+                                "name": "write marker",
+                                "command": "python3 -c \"from pathlib import Path; Path('generated.txt').write_text('ok')\"",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    init_git_repo(project)
+    (project / "user.txt").write_text("user change", encoding="utf-8")
+
+    exit_code = cli_main(
+        [
+            "drive",
+            "--project-root",
+            str(project),
+            "--rolling",
+            "--max-continuations",
+            "1",
+            "--max-tasks",
+            "1",
+            "--commit-after-task",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    materialization = payload["continuations"][0]["materialization_checkpoint"]
+    task_git = payload["results"][0]["git"]
+    assert materialization["status"] == "deferred"
+    assert materialization["reason"] == "preexisting_dirty_worktree"
+    assert materialization["dirty_before_paths"] == ["user.txt"]
+    assert task_git["status"] == "deferred"
+    assert task_git["reason"] == "roadmap_materialization_checkpoint_deferred"
+    assert "pre-existing user changes" in task_git["message"]
+    subjects = subprocess.check_output(["git", "log", "--format=%s"], cwd=project, text=True).splitlines()
+    assert subjects == ["initial"]
+    dirty_paths = subprocess.check_output(["git", "status", "--porcelain"], cwd=project, text=True)
+    assert ".engineering/roadmap.yaml" in dirty_paths
+    assert "generated.txt" in dirty_paths
+    assert "user.txt" in dirty_paths
+    state = json.loads((project / ".engineering/state/harness-state.json").read_text(encoding="utf-8"))
+    checkpoint_events = [
+        event for event in state["tasks"]["generated-test"]["phase_history"] if event["phase"] == "checkpoint-intent"
+    ]
+    assert [(event["event"], event["status"]) for event in checkpoint_events] == [
+        ("before", "running"),
+        ("after", "deferred"),
+    ]
+    report = project / payload["drive_report"]
+    report_text = report.read_text(encoding="utf-8")
+    assert "Materialization checkpoint: `deferred`" in report_text
+    assert "Dirty before materialization: `user.txt`" in report_text
+    assert "Task `generated-test` checkpoint deferred" in report_text
 
 
 def test_drive_rolling_stops_when_continuation_is_exhausted(tmp_path):
@@ -2408,6 +2833,23 @@ def test_self_iteration_output_guard_rejects_unsafe_requirements_and_restores(tm
     assert "production deployment" in errors
     assert "paid service" in errors
     assert json.loads(roadmap_path.read_text(encoding="utf-8")) == before
+
+
+def test_self_iteration_output_guard_allows_negated_safety_requirements(tmp_path):
+    project, roadmap_path = self_iteration_guard_project(tmp_path)
+    stage = valid_self_iteration_stage()
+    stage["tasks"][0]["implementation"][0]["prompt"] = (
+        "Implement a local-only guard task free of external services, private keys, "
+        "production deployments, mainnet writes, paid services, or live trading."
+    )
+    write_self_iteration_guard_planner(project, [stage])
+
+    result = Harness(project).run_self_iteration(reason="guard-test")
+
+    assert result["status"] == "planned"
+    assert result["validation"]["status"] == "passed"
+    updated = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    assert [stage["id"] for stage in updated["continuation"]["stages"]] == ["guard-stage"]
 
 
 def test_self_iteration_output_guard_rejects_milestone_mutation_and_restores(tmp_path):

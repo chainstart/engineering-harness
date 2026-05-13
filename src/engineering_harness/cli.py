@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .core import COMPLETED_STATUSES, Harness, discover_projects, init_project, project_from_root, slug_now, utc_now
 from .goal_planner import DEFAULT_GOAL_STAGE_COUNT, materialize_goal_roadmap, plan_goal_roadmap
+from .io import write_json
 from .profiles import list_profiles
 
 
@@ -154,6 +155,16 @@ def cmd_status(args: argparse.Namespace) -> int:
         drive_control = summary.get("drive_control", {})
         approval_queue = summary.get("approval_queue", {})
         print(f"Drive control: {drive_control.get('status', 'idle')}")
+        watchdog = drive_control.get("watchdog", {}) if isinstance(drive_control, dict) else {}
+        if watchdog:
+            print(f"Drive watchdog: {watchdog.get('status', 'idle')} - {watchdog.get('message', '')}")
+        if drive_control.get("current_activity"):
+            print(f"Drive activity: {drive_control.get('current_activity')}")
+        if drive_control.get("current_task"):
+            current_task = drive_control.get("current_task", {})
+            print(f"Drive task: {current_task.get('id', 'unknown')}")
+        if drive_control.get("last_progress_message"):
+            print(f"Drive progress: {drive_control.get('last_progress_message')}")
         print(f"Pending approvals: {approval_queue.get('pending_count', 0)}")
         print("")
         for milestone in summary["milestones"]:
@@ -242,9 +253,17 @@ def maybe_checkpoint_task(
     args: argparse.Namespace,
     *,
     dry_run: bool = False,
+    checkpoint_defer: dict | None = None,
 ) -> None:
-    commit_after_task = bool(getattr(args, "commit_after_task", False) or getattr(args, "push_after_task", False))
-    if dry_run or not commit_after_task or result["status"] not in COMPLETED_STATUSES:
+    if dry_run or not checkpoint_requested(args) or result["status"] not in COMPLETED_STATUSES:
+        return
+    harness.drive_heartbeat(activity="git-checkpoint", message=f"checkpointing task {task.id}", task=task)
+    if checkpoint_defer:
+        result["git"] = harness.defer_git_checkpoint(
+            task,
+            reason=str(checkpoint_defer.get("message") or "task checkpoint deferred by roadmap materialization boundary"),
+            metadata=checkpoint_defer,
+        )
         return
     result["git"] = harness.git_checkpoint(
         task,
@@ -255,10 +274,58 @@ def maybe_checkpoint_task(
     )
 
 
+def checkpoint_requested(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "commit_after_task", False) or getattr(args, "push_after_task", False))
+
+
+def materialization_checkpoint_should_defer_tasks(checkpoint: dict) -> bool:
+    if checkpoint.get("status") in {"committed"}:
+        return bool(checkpoint.get("push") and checkpoint.get("push_status") == "failed")
+    return checkpoint.get("status") in {"deferred", "failed"}
+
+
+def materialization_task_checkpoint_defer_payload(checkpoint: dict) -> dict:
+    reason = str(checkpoint.get("reason") or checkpoint.get("status") or "unknown")
+    dirty_before = checkpoint.get("dirty_before_paths") or []
+    unrelated = checkpoint.get("unrelated_dirty_paths") or []
+    if reason == "preexisting_dirty_worktree":
+        detail = "pre-existing user changes were present before roadmap materialization"
+    elif reason == "unrelated_dirty_paths":
+        detail = "unrelated dirty paths appeared beside the harness-owned roadmap materialization"
+    elif reason == "git_push_failed":
+        detail = "the roadmap materialization commit could not be pushed before generated tasks"
+    else:
+        detail = f"roadmap materialization checkpoint status was {checkpoint.get('status', 'unknown')}"
+    if dirty_before:
+        detail = f"{detail}: {', '.join(str(path) for path in dirty_before[:8])}"
+    elif unrelated:
+        detail = f"{detail}: {', '.join(str(path) for path in unrelated[:8])}"
+    return {
+        "message": f"task checkpoint deferred because roadmap materialization checkpoint was deferred: {detail}",
+        "materialization_checkpoint_status": checkpoint.get("status"),
+        "materialization_checkpoint_reason": checkpoint.get("reason"),
+        "materialization_paths": checkpoint.get("materialization_paths", []),
+        "dirty_before_paths": dirty_before,
+        "unrelated_dirty_paths": unrelated,
+        "materialization_checkpoint": checkpoint,
+    }
+
+
+def checkpoint_requested_payload(payload: dict) -> bool:
+    if payload.get("checkpoint_requested"):
+        return True
+    if any("git" in result for result in payload.get("results", [])):
+        return True
+    return any("materialization_checkpoint_intent" in item for item in payload.get("continuations", []))
+
+
 def write_drive_report(harness: Harness, payload: dict) -> str:
     report_dir = harness.report_dir / "drives"
     report_dir.mkdir(parents=True, exist_ok=True)
     report_path = report_dir / f"{slug_now()}-drive.md"
+    json_path = report_path.with_suffix(".json")
+    payload["drive_report"] = str(report_path.relative_to(harness.project_root))
+    payload["drive_report_json"] = str(json_path.relative_to(harness.project_root))
     lines = [
         "# Harness Drive Report",
         "",
@@ -302,6 +369,44 @@ def write_drive_report(harness: Harness, payload: dict) -> str:
         )
         for milestone in item.get("milestones_added", []):
             lines.append(f"  - Milestone: `{milestone.get('id')}` {milestone.get('title')} ({milestone.get('tasks')} task(s))")
+        intent = item.get("materialization_checkpoint_intent")
+        if intent:
+            lines.append(
+                "  - Materialization checkpoint intent: "
+                f"`{intent.get('status')}` - {intent.get('message')}"
+            )
+        checkpoint = item.get("materialization_checkpoint")
+        if checkpoint:
+            lines.append(
+                "  - Materialization checkpoint: "
+                f"`{checkpoint.get('status')}` - {checkpoint.get('message')}"
+            )
+            if checkpoint.get("reason"):
+                lines.append(f"  - Materialization checkpoint reason: `{checkpoint.get('reason')}`")
+            if checkpoint.get("commit"):
+                lines.append(f"  - Materialization commit: `{checkpoint.get('commit')}`")
+            if checkpoint.get("dirty_before_paths"):
+                dirty = ", ".join(str(path) for path in checkpoint.get("dirty_before_paths", [])[:8])
+                lines.append(f"  - Dirty before materialization: `{dirty}`")
+    lines.extend(["", "## Checkpoint Boundaries", ""])
+    if not checkpoint_requested_payload(payload):
+        lines.append("Task checkpointing was not requested for this drive.")
+    else:
+        lines.append(
+            "Rolling roadmap materialization is checkpointed before generated task execution when it can be "
+            "isolated from pre-existing user changes."
+        )
+        deferred_results = [
+            result
+            for result in payload.get("results", [])
+            if (result.get("git") or {}).get("status") == "deferred"
+        ]
+        if not deferred_results:
+            lines.append("No task checkpoint deferral was recorded.")
+        for result in deferred_results:
+            task = result.get("task", {})
+            git = result.get("git", {})
+            lines.append(f"- Task `{task.get('id')}` checkpoint deferred: {git.get('message')}")
     self_iterations = payload.get("self_iterations", [])
     lines.extend(["", "## Self Iterations", ""])
     if not self_iterations:
@@ -316,9 +421,55 @@ def write_drive_report(harness: Harness, payload: dict) -> str:
         )
         if item.get("report"):
             lines.append(f"  - Report: `{item['report']}`")
+    retrospective = payload.get("goal_gap_retrospective")
+    lines.extend(["", "## Goal-Gap Retrospective", ""])
+    if not retrospective:
+        lines.append("No goal-gap retrospective was generated.")
+    else:
+        request = retrospective.get("request_self_iteration", {})
+        recommendation = "yes" if request.get("recommended") else "no"
+        lines.extend(
+            [
+                f"- Goal: {retrospective.get('goal')}",
+                f"- Stop class: `{retrospective.get('trigger', {}).get('stop_class')}`",
+                f"- Request self-iteration: `{recommendation}` - {request.get('reason')}",
+                "",
+                "Completed reliability capabilities:",
+                "",
+            ]
+        )
+        capabilities = retrospective.get("completed_reliability_capabilities", [])
+        if not capabilities:
+            lines.append("- None recorded.")
+        for item in capabilities:
+            lines.append(f"- `{item.get('id')}`: {item.get('title')} ({item.get('detail')})")
+        lines.extend(["", "Remaining risks:", ""])
+        risks = retrospective.get("remaining_risks", [])
+        if not risks:
+            lines.append("- None recorded.")
+        for item in risks:
+            lines.append(f"- `{item.get('severity')}` `{item.get('id')}`: {item.get('summary')}")
+        lines.extend(["", "Likely next stage themes:", ""])
+        themes = retrospective.get("likely_next_stage_themes", [])
+        if not themes:
+            lines.append("- None recorded.")
+        for item in themes:
+            sources = ", ".join(str(source) for source in item.get("source_risks", []))
+            lines.append(f"- `{item.get('id')}`: {item.get('title')} ({sources})")
+        lines.extend(
+            [
+                "",
+                "Machine-readable retrospective:",
+                "",
+                "```json",
+                json.dumps(retrospective, indent=2, sort_keys=True),
+                "```",
+            ]
+        )
     lines.extend(["", "## Final Status", "", "```json", json.dumps(payload["final_status"], indent=2, sort_keys=True), "```", ""])
     report_path.write_text("\n".join(lines), encoding="utf-8")
-    return str(report_path.relative_to(harness.project_root))
+    write_json(json_path, payload)
+    return payload["drive_report"]
 
 
 def cmd_advance(args: argparse.Namespace) -> int:
@@ -463,6 +614,7 @@ def cmd_drive(args: argparse.Namespace) -> int:
             "self_iterations": [],
             "final_status": final_status,
         }
+        payload["goal_gap_retrospective"] = harness.drive_goal_gap_retrospective(payload, final_status=final_status)
         payload["drive_report"] = write_drive_report(harness, payload)
         if args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
@@ -477,16 +629,19 @@ def cmd_drive(args: argparse.Namespace) -> int:
         return 0 if start["status"] == "paused" else 1
 
     deadline = time.monotonic() + args.time_budget_seconds if args.time_budget_seconds else None
+    harness.drive_heartbeat(activity="drive-loop", message="drive loop started", clear_task=True)
     results = []
     continuations = []
     self_iterations = []
     continuation_count = 0
     self_iteration_count = 0
     no_progress_count = 0
+    task_checkpoint_defer: dict | None = None
     status = "completed"
     message = "No pending task."
 
     while True:
+        harness.drive_heartbeat(activity="drive-loop", message="checking drive controls and budgets", clear_task=True)
         control = harness.drive_control_summary()
         if control.get("cancel_requested") or control.get("status") == "cancelled":
             status = "cancelled"
@@ -504,6 +659,7 @@ def cmd_drive(args: argparse.Namespace) -> int:
             status = "budget_exhausted"
             message = f"Task budget exhausted after {args.max_tasks} task(s)."
             break
+        harness.drive_heartbeat(activity="task-selection", message="selecting next roadmap task", clear_task=True)
         task = harness.next_task()
         if task is None:
             if not args.rolling and not args.self_iterate:
@@ -518,10 +674,37 @@ def cmd_drive(args: argparse.Namespace) -> int:
                         message = f"Continuation budget exhausted after {args.max_continuations} continuation(s)."
                         break
                 else:
+                    harness.drive_heartbeat(
+                        activity="continuation-materialization",
+                        message="materializing continuation because roadmap queue is empty",
+                        clear_task=True,
+                    )
+                    checkpoint_intent = None
+                    if checkpoint_requested(args):
+                        checkpoint_intent = harness.roadmap_materialization_checkpoint_intent(
+                            reason="rolling_drive_queue_empty",
+                            push=bool(getattr(args, "push_after_task", False)),
+                            remote=str(getattr(args, "git_remote", "origin")),
+                            branch=getattr(args, "git_branch", None),
+                        )
                     continuation = harness.advance_roadmap(
                         max_new_milestones=args.continuation_batch_size,
                         reason="rolling_drive_queue_empty",
                     )
+                    if checkpoint_intent is not None:
+                        continuation["materialization_checkpoint_intent"] = checkpoint_intent
+                        materialization_checkpoint = harness.git_checkpoint_roadmap_materialization(
+                            checkpoint_intent,
+                            continuation,
+                            push=bool(getattr(args, "push_after_task", False)),
+                            remote=str(getattr(args, "git_remote", "origin")),
+                            branch=getattr(args, "git_branch", None),
+                        )
+                        continuation["materialization_checkpoint"] = materialization_checkpoint
+                        if materialization_checkpoint_should_defer_tasks(materialization_checkpoint):
+                            task_checkpoint_defer = materialization_task_checkpoint_defer_payload(
+                                materialization_checkpoint
+                            )
                     continuations.append(continuation)
                     if continuation["status"] == "advanced" and continuation.get("tasks_added", 0) > 0:
                         continuation_count += 1
@@ -533,6 +716,11 @@ def cmd_drive(args: argparse.Namespace) -> int:
                     status = "budget_exhausted"
                     message = f"Self-iteration budget exhausted after {args.max_self_iterations} iteration(s)."
                     break
+                harness.drive_heartbeat(
+                    activity="self-iteration",
+                    message="running self-iteration because roadmap queue is empty",
+                    clear_task=True,
+                )
                 iteration = harness.run_self_iteration(
                     reason="drive_queue_empty",
                     allow_agent=args.allow_agent,
@@ -568,14 +756,24 @@ def cmd_drive(args: argparse.Namespace) -> int:
             status = "stalled"
             message = continuation["message"]
             break
+        harness.drive_heartbeat(
+            activity="task-execution",
+            message=f"running task {task.id}",
+            task=task,
+        )
         result = harness.run_task(
             task,
             allow_live=args.allow_live,
             allow_manual=args.allow_manual,
             allow_agent=args.allow_agent,
         )
-        maybe_checkpoint_task(harness, task, result, args)
+        maybe_checkpoint_task(harness, task, result, args, checkpoint_defer=task_checkpoint_defer)
         results.append(result)
+        harness.drive_heartbeat(
+            activity="task-execution",
+            message=f"task {task.id} finished with status {result['status']}",
+            task=task,
+        )
         if result["status"] not in COMPLETED_STATUSES:
             status = result["status"]
             message = f"Stopped at task {task.id}: {result['message']}"
@@ -585,6 +783,7 @@ def cmd_drive(args: argparse.Namespace) -> int:
             message = f"Stopped after task {task.id} because --stop-after-each was set."
             break
 
+    harness.drive_heartbeat(activity="drive-finishing", message=message, clear_task=True)
     harness.finish_drive(status=status, message=message)
     final_status = harness.status_summary()
     payload = {
@@ -597,8 +796,10 @@ def cmd_drive(args: argparse.Namespace) -> int:
         "results": results,
         "continuations": continuations,
         "self_iterations": self_iterations,
+        "checkpoint_requested": checkpoint_requested(args),
         "final_status": final_status,
     }
+    payload["goal_gap_retrospective"] = harness.drive_goal_gap_retrospective(payload, final_status=final_status)
     payload["drive_report"] = write_drive_report(harness, payload)
 
     if args.json:
