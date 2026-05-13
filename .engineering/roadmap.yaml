@@ -2093,6 +2093,202 @@
           "generated_at": "2026-05-13T10:24:32Z"
         }
       ]
+    },
+    {
+      "id": "unattended-runtime-hardening-round-2",
+      "title": "Unattended Runtime Hardening Round 2",
+      "status": "planned",
+      "objective": "Use the next self-bootstrap pass to close the highest remaining gaps for long unattended operation: executor no-progress detection, supervisor-style workspace E2E, and an operator dashboard surface.",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-13T11:19:44Z",
+      "tasks": [
+        {
+          "id": "executor-no-progress-watchdog",
+          "title": "Detect and isolate no-progress executor runs",
+          "status": "pending",
+          "max_attempts": 4,
+          "max_task_iterations": 4,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 4800,
+              "sandbox": "workspace-write",
+              "prompt": "Add child-executor no-progress detection for long unattended task execution. Track start time, last output/progress timestamp, phase, executor id, command name, pid when available, and configured no-progress threshold for implementation, repair, acceptance, E2E, and planner subprocesses. When an executor exceeds the no-progress threshold or runtime timeout, terminate only the owned subprocess tree when safe, mark the run with a deterministic timeout/no_progress status, create failure_isolation evidence with phase, executor metadata, threshold, report paths, and local next action, and keep drive heartbeat/status machine-readable. Add local configuration flags/env defaults that preserve existing short tests. Add focused tests using temporary commands that hang or stay silent, and update docs for no-progress recovery. Keep behavior local-only and do not require external accounts or live operations."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 2400,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing executor no-progress watchdog tests while preserving existing timeout semantics, failure isolation, drive heartbeat, policy gates, and local-only process ownership boundaries."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "executor watchdog tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"executor and (no_progress or timeout or watchdog or silent)\"",
+              "required": true,
+              "timeout_seconds": 900
+            },
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 900
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 180
+            }
+          ],
+          "e2e": [
+            {
+              "name": "status remains machine-readable after executor watchdog",
+              "command": "bin/engh status --project-root . --json",
+              "required": true,
+              "timeout_seconds": 180
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T11:19:44Z"
+        },
+        {
+          "id": "workspace-supervisor-e2e-loop",
+          "title": "Exercise workspace dispatcher as a supervisor loop",
+          "status": "pending",
+          "max_attempts": 4,
+          "max_task_iterations": 4,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 4800,
+              "sandbox": "workspace-write",
+              "prompt": "Add a realistic local E2E supervisor-loop test for workspace-drive. Build temporary workspaces with multiple harness projects, repeated workspace-drive invocations, dispatch lease contention/recovery, one-project-per-tick ordering, skipped projects with approvals or isolated failures, and evidence reports across ticks. Provide a bounded helper/API or CLI pattern for running N local supervisor ticks without external accounts, pushes, deployments, or live operations. The E2E should assert no skipped project is mutated, selected projects advance deterministically, dispatch reports remain machine-readable, and stale/fresh lease cases are visible. Update docs with the recommended cron/supervisor loop and evidence review workflow."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 2400,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing workspace supervisor-loop E2E tests while preserving dispatch lease safety, deterministic project ordering, one-project-per-invocation semantics, no-mutation guarantees for skipped projects, and local-only execution."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "workspace supervisor loop tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"workspace and (supervisor or multi_tick or dispatch_loop or e2e)\"",
+              "required": true,
+              "timeout_seconds": 900
+            },
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 900
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 180
+            }
+          ],
+          "e2e": [
+            {
+              "name": "workspace dispatcher remains machine-readable",
+              "command": "bin/engh workspace-drive --workspace . --max-tasks 1 --time-budget-seconds 1 --json",
+              "required": true,
+              "timeout_seconds": 180
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T11:19:44Z"
+        },
+        {
+          "id": "runtime-dashboard-surface",
+          "title": "Expose unattended runtime state in the dashboard",
+          "status": "pending",
+          "max_attempts": 4,
+          "max_task_iterations": 4,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 4800,
+              "sandbox": "workspace-write",
+              "prompt": "Extend the existing observability/frontend surface so an operator can inspect unattended runtime state without reading raw reports. Include drive watchdog, current task/phase, executor no-progress state, approval lease counts, unresolved failure isolation, workspace dispatch queue/lease status, latest drive/dispatch reports, and goal-gap next actions. Prefer existing frontend/dashboard patterns in the repository; keep it local, static or CLI-generated if that is the established pattern. Add tests that verify the dashboard/status payload includes the new runtime fields and an E2E smoke that renders or generates the dashboard evidence. Update docs for using the dashboard during long unattended runs."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 2400,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing runtime dashboard tests while preserving status JSON compatibility, existing frontend templates, workspace dispatch evidence, approval/failure isolation summaries, and local-only dashboard generation."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "runtime dashboard tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"dashboard and (runtime or watchdog or dispatch or approval or failure)\"",
+              "required": true,
+              "timeout_seconds": 900
+            },
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 900
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 180
+            }
+          ],
+          "e2e": [
+            {
+              "name": "status runtime payload remains machine-readable",
+              "command": "bin/engh status --project-root . --json",
+              "required": true,
+              "timeout_seconds": 180
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T11:19:44Z"
+        }
+      ]
     }
   ],
   "continuation": {
