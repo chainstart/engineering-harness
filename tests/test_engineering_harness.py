@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -1014,23 +1014,26 @@ def test_dagger_executor_selection_blocks_until_explicitly_enabled(tmp_path, mon
 
 
 def test_dagger_executor_invokes_local_cli_when_enabled(tmp_path, monkeypatch):
-    calls = []
-
-    def fake_run(args, cwd, text, capture_output, timeout, env):
-        calls.append(
-            {
-                "args": args,
-                "cwd": cwd,
-                "text": text,
-                "capture_output": capture_output,
-                "timeout": timeout,
-                "env": env,
-            }
-        )
-        return SimpleNamespace(returncode=0, stdout="dagger ok\n", stderr="")
-
+    args_path = tmp_path / "dagger-args.json"
+    dagger_bin = tmp_path / "dagger"
+    dagger_bin.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import json",
+                "import os",
+                "import pathlib",
+                "import sys",
+                "pathlib.Path(os.environ['DAGGER_ARGS_PATH']).write_text(json.dumps(sys.argv[1:]))",
+                "print('dagger ok')",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    dagger_bin.chmod(0o755)
     monkeypatch.setenv(DAGGER_ENABLE_ENV, "1")
-    monkeypatch.setattr("engineering_harness.executors.subprocess.run", fake_run)
+    monkeypatch.setenv("DAGGER_ARGS_PATH", str(args_path))
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}")
     invocation = ExecutorInvocation(
         project_root=tmp_path,
         task_id="dagger-task",
@@ -1044,11 +1047,10 @@ def test_dagger_executor_invokes_local_cli_when_enabled(tmp_path, monkeypatch):
 
     assert result.status == "passed"
     assert result.stdout == "dagger ok\n"
-    assert result.metadata == {"configured": True}
-    assert calls[0]["args"] == ["dagger", "call", "smoke", "--source=."]
-    assert calls[0]["cwd"] == tmp_path
-    assert calls[0]["env"]["ENGINEERING_HARNESS"] == "1"
-    assert calls[0]["env"][DAGGER_ENABLE_ENV] == "1"
+    assert result.metadata["configured"] is True
+    assert result.metadata["watchdog"]["executor_id"] == "dagger"
+    assert result.metadata["watchdog"]["status"] == "passed"
+    assert json.loads(args_path.read_text(encoding="utf-8")) == ["call", "smoke", "--source=."]
 
 
 def test_manifest_index_keeps_repeated_task_runs_with_same_slug(tmp_path, monkeypatch):
@@ -1361,6 +1363,159 @@ def test_status_json_includes_latest_isolated_failures(tmp_path, capsys):
     assert latest["failure_kind"] == "acceptance_failure"
     assert latest["manifest_path"] == result["manifest"]
     assert latest["report_path"] == result["report"]
+
+
+def test_executor_no_progress_watchdog_isolates_silent_acceptance_and_status_json(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    project = tmp_path / "executor-no-progress-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="executor-no-progress-project")
+    (project / "silent_parent.py").write_text(
+        "\n".join(
+            [
+                "import subprocess",
+                "import sys",
+                "import time",
+                "child = \"import pathlib, time; time.sleep(2); pathlib.Path('child-survived.txt').write_text('bad')\"",
+                "subprocess.Popen([sys.executable, '-c', child])",
+                "time.sleep(30)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["max_attempts"] = 1
+    task["acceptance"][0] = {
+        "name": "silent acceptance",
+        "command": "python3 silent_parent.py",
+        "timeout_seconds": 10,
+    }
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    monkeypatch.setenv("ENGINEERING_HARNESS_EXECUTOR_NO_PROGRESS_ACCEPTANCE_SECONDS", "1")
+
+    result = Harness(project).run_task(Harness(project).next_task())
+
+    assert result["status"] == "failed"
+    run = result["runs"][0]
+    assert run["phase"] == "acceptance-1"
+    assert run["status"] == "no_progress"
+    assert run["returncode"] is None
+    watchdog = run["executor_result"]["metadata"]["watchdog"]
+    assert watchdog["status"] == "no_progress"
+    assert watchdog["phase"] == "acceptance-1"
+    assert watchdog["executor_id"] == "shell"
+    assert watchdog["command_name"] == "silent acceptance"
+    assert watchdog["pid"] > 0
+    assert watchdog["no_progress_timeout_seconds"] == 1
+    assert watchdog["threshold_seconds"] == 1
+    assert watchdog["last_output_at"] == watchdog["started_at"]
+    assert watchdog["termination"]["owned_process_group"] is True
+    assert watchdog["termination"]["terminated_process_group"] is True
+
+    time.sleep(2.2)
+    assert not (project / "child-survived.txt").exists()
+
+    manifest = task_manifest(project, result)
+    manifest_run = manifest["runs"][0]
+    assert manifest_run["status"] == "no_progress"
+    assert manifest_run["no_progress_timeout_seconds"] == 1
+    isolation = manifest["failure_isolation"]
+    assert isolation["failure_kind"] == "executor_no_progress"
+    assert isolation["phase"] == "acceptance-1"
+    assert isolation["executor_watchdog"]["executor"] == "shell"
+    assert isolation["executor_watchdog"]["command_name"] == "silent acceptance"
+    assert isolation["executor_watchdog"]["threshold_seconds"] == 1
+    assert isolation["report_paths"]["task_report"] == result["report"]
+    assert "watchdog evidence" in isolation["local_next_action"]
+
+    assert cli_main(["status", "--project-root", str(project), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    latest = payload["failure_isolation"]["latest_isolated_failures"][0]
+    assert latest["failure_kind"] == "executor_no_progress"
+    assert latest["executor_watchdog"]["status"] == "no_progress"
+    assert payload["executor_watchdog"]["phase_no_progress_seconds"]["acceptance"] == 1
+
+
+def test_executor_timeout_watchdog_marks_implementation_timeout(tmp_path):
+    project = tmp_path / "executor-timeout-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="executor-timeout-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["max_attempts"] = 1
+    task["implementation"] = [
+        {
+            "name": "slow implementation",
+            "command": "python3 -c \"import time; time.sleep(30)\"",
+            "timeout_seconds": 1,
+        }
+    ]
+    task["acceptance"][0]["command"] = "python3 -c \"print('should not run')\""
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    result = Harness(project).run_task(Harness(project).next_task(), allow_agent=True)
+
+    assert result["status"] == "failed"
+    assert len(result["runs"]) == 1
+    run = result["runs"][0]
+    assert run["phase"] == "implementation"
+    assert run["status"] == "timeout"
+    assert run["returncode"] is None
+    watchdog = run["executor_result"]["metadata"]["watchdog"]
+    assert watchdog["status"] == "timeout"
+    assert watchdog["reason"] == "runtime_timeout"
+    assert watchdog["timeout_seconds"] == 1
+    assert watchdog["threshold_seconds"] == 1
+
+    manifest = task_manifest(project, result)
+    isolation = manifest["failure_isolation"]
+    assert isolation["failure_kind"] == "executor_timeout"
+    assert isolation["phase"] == "implementation"
+    assert isolation["executor_watchdog"]["timeout_seconds"] == 1
+    assert "timeout evidence" in isolation["local_next_action"]
+
+
+def test_executor_no_progress_watchdog_marks_silent_self_iteration_planner(tmp_path):
+    project = tmp_path / "executor-watchdog-planner-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="executor-watchdog-planner-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["executor_watchdog"] = {
+        "phase_no_progress_seconds": {
+            "planner": 1,
+        },
+    }
+    roadmap["self_iteration"] = {
+        "enabled": True,
+        "max_stages_per_iteration": 1,
+        "planner": {
+            "name": "silent planner",
+            "command": "python3 -c \"import time; time.sleep(30)\"",
+            "timeout_seconds": 10,
+        },
+    }
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    result = Harness(project).run_self_iteration(reason="executor-watchdog-test")
+
+    assert result["status"] == "failed"
+    assert result["run"]["status"] == "no_progress"
+    watchdog = result["run"]["executor_result"]["metadata"]["watchdog"]
+    assert watchdog["phase"] == "self-iteration"
+    assert watchdog["executor_id"] == "shell"
+    assert watchdog["no_progress_timeout_seconds"] == 1
+    assert result["failure_isolation"]["kind"] == "engineering-harness.planner-failure-isolation"
+    assert result["failure_isolation"]["failure_kind"] == "executor_no_progress"
+    assert result["failure_isolation"]["executor_watchdog"]["threshold_seconds"] == 1
+    report = (project / result["report"]).read_text(encoding="utf-8")
+    assert "## Failure Isolation" in report
 
 
 def test_harness_runs_e2e_after_acceptance(tmp_path):

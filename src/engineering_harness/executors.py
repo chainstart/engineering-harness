@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import os
+import select
 import shlex
+import signal
 import subprocess
+import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 
 EXECUTOR_CONTRACT_VERSION = 1
 EXECUTOR_RESULT_CONTRACT_VERSION = 1
+EXECUTOR_WATCHDOG_CONTRACT_VERSION = 1
 DAGGER_ENABLE_ENV = "ENGINEERING_HARNESS_ENABLE_DAGGER"
+PROCESS_TERMINATION_GRACE_SECONDS = 0.5
 
 
 def _utc_now() -> str:
@@ -76,6 +81,9 @@ class ExecutorInvocation:
     model: str | None = None
     sandbox: str = "workspace-write"
     environment: dict[str, str] = field(default_factory=dict)
+    phase: str | None = None
+    no_progress_timeout_seconds: int | None = None
+    progress_callback: Callable[[dict[str, Any]], None] | None = field(default=None, repr=False, compare=False)
 
     def env(self) -> dict[str, str]:
         return {**os.environ, **self.environment, "ENGINEERING_HARNESS": "1"}
@@ -113,6 +121,309 @@ class ExecutorResult:
     stdout: str
     stderr: str
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+def _tail_redacted(chunks: list[bytes]) -> str:
+    return redact(b"".join(chunks).decode("utf-8", errors="replace")[-8000:])
+
+
+def _safe_positive_seconds(value: int | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds > 0 else None
+
+
+def _emit_progress(invocation: ExecutorInvocation, payload: dict[str, Any]) -> None:
+    if invocation.progress_callback is None:
+        return
+    try:
+        invocation.progress_callback(payload)
+    except Exception:
+        return
+
+
+def _terminate_owned_process_tree(
+    process: subprocess.Popen[bytes],
+    *,
+    owned_process_group_id: int | None = None,
+) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "pid": process.pid,
+        "owned_process_group": False,
+        "terminated_process_group": False,
+        "termination_signal": None,
+        "killed": False,
+    }
+    if process.poll() is not None and owned_process_group_id is None:
+        details["already_exited"] = True
+        return details
+
+    pgid: int | None = owned_process_group_id
+    if os.name == "posix":
+        if pgid is None:
+            try:
+                pgid = os.getpgid(process.pid)
+            except OSError:
+                pgid = None
+    details["process_group_id"] = pgid
+    owned_process_group = pgid is not None and (owned_process_group_id is not None or pgid == process.pid)
+    details["owned_process_group"] = owned_process_group
+
+    try:
+        if owned_process_group:
+            os.killpg(pgid, signal.SIGTERM)
+            details["terminated_process_group"] = True
+            details["termination_signal"] = "SIGTERM"
+        else:
+            process.terminate()
+            details["termination_signal"] = "SIGTERM"
+    except ProcessLookupError:
+        return details
+    except OSError as exc:
+        details["termination_error"] = str(exc)
+        return details
+
+    deadline = time.monotonic() + PROCESS_TERMINATION_GRACE_SECONDS
+    while process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    if process.poll() is not None:
+        return details
+
+    try:
+        if owned_process_group:
+            os.killpg(pgid, signal.SIGKILL)
+            details["termination_signal"] = "SIGKILL"
+        else:
+            process.kill()
+            details["termination_signal"] = "SIGKILL"
+        details["killed"] = True
+    except ProcessLookupError:
+        pass
+    except OSError as exc:
+        details["kill_error"] = str(exc)
+    return details
+
+
+def _read_available(fd: int) -> bytes | None:
+    try:
+        return os.read(fd, 4096)
+    except BlockingIOError:
+        return None
+    except OSError:
+        return b""
+
+
+def _run_subprocess_with_watchdog(
+    invocation: ExecutorInvocation,
+    *,
+    args: str | list[str],
+    executor_id: str,
+    shell: bool = False,
+    executable: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> ExecutorResult:
+    started_at = _utc_now()
+    started_monotonic = time.monotonic()
+    last_progress_at = started_at
+    last_progress_monotonic = started_monotonic
+    no_progress_seconds = _safe_positive_seconds(invocation.no_progress_timeout_seconds)
+    timeout_seconds = _safe_positive_seconds(invocation.timeout_seconds)
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+    process: subprocess.Popen[bytes] | None = None
+    owned_process_group_id: int | None = None
+    termination: dict[str, Any] = {}
+    watchdog_status = "running"
+    watchdog_reason: str | None = None
+    watchdog_message: str | None = None
+
+    def watchdog_payload(*, event: str, finished_at: str | None = None) -> dict[str, Any]:
+        now_monotonic = time.monotonic()
+        threshold_seconds = (
+            no_progress_seconds
+            if watchdog_reason == "no_progress"
+            else timeout_seconds
+            if watchdog_reason == "runtime_timeout"
+            else no_progress_seconds
+        )
+        return {
+            "schema_version": EXECUTOR_WATCHDOG_CONTRACT_VERSION,
+            "event": event,
+            "status": watchdog_status,
+            "reason": watchdog_reason,
+            "message": watchdog_message,
+            "phase": invocation.phase,
+            "executor_id": executor_id,
+            "command_name": invocation.name,
+            "pid": process.pid if process is not None else None,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "runtime_seconds": round(max(0.0, now_monotonic - started_monotonic), 3),
+            "timeout_seconds": timeout_seconds,
+            "no_progress_timeout_seconds": no_progress_seconds,
+            "threshold_seconds": threshold_seconds,
+            "last_progress_at": last_progress_at,
+            "last_output_at": last_progress_at,
+            "stdout_bytes": sum(len(chunk) for chunk in stdout_chunks),
+            "stderr_bytes": sum(len(chunk) for chunk in stderr_chunks),
+            **({"termination": termination} if termination else {}),
+        }
+
+    try:
+        process = subprocess.Popen(
+            args,
+            cwd=invocation.project_root,
+            shell=shell,
+            executable=executable,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=invocation.env(),
+            start_new_session=(os.name == "posix"),
+        )
+    except FileNotFoundError:
+        raise
+    if os.name == "posix":
+        try:
+            process_group_id = os.getpgid(process.pid)
+        except OSError:
+            process_group_id = None
+        if process_group_id == process.pid:
+            owned_process_group_id = process_group_id
+
+    _emit_progress(invocation, watchdog_payload(event="started"))
+    streams: dict[int, tuple[str, list[bytes]]] = {}
+    for stream_name, pipe, chunks in (
+        ("stdout", process.stdout, stdout_chunks),
+        ("stderr", process.stderr, stderr_chunks),
+    ):
+        if pipe is None:
+            continue
+        fd = pipe.fileno()
+        os.set_blocking(fd, False)
+        streams[fd] = (stream_name, chunks)
+
+    drain_deadline: float | None = None
+    while streams or process.poll() is None:
+        now = time.monotonic()
+        if watchdog_reason is None:
+            if timeout_seconds is not None and now - started_monotonic >= timeout_seconds:
+                watchdog_status = "timeout"
+                watchdog_reason = "runtime_timeout"
+                watchdog_message = f"Command timed out after {timeout_seconds} seconds."
+                termination = _terminate_owned_process_tree(
+                    process,
+                    owned_process_group_id=owned_process_group_id,
+                )
+                drain_deadline = time.monotonic() + PROCESS_TERMINATION_GRACE_SECONDS
+                _emit_progress(invocation, watchdog_payload(event="timeout"))
+            elif no_progress_seconds is not None and now - last_progress_monotonic >= no_progress_seconds:
+                watchdog_status = "no_progress"
+                watchdog_reason = "no_progress"
+                watchdog_message = f"Command produced no output for {no_progress_seconds} seconds."
+                termination = _terminate_owned_process_tree(
+                    process,
+                    owned_process_group_id=owned_process_group_id,
+                )
+                drain_deadline = time.monotonic() + PROCESS_TERMINATION_GRACE_SECONDS
+                _emit_progress(invocation, watchdog_payload(event="no_progress"))
+
+        if streams:
+            timeout = 0.05
+            if watchdog_reason is None:
+                deadlines = []
+                if timeout_seconds is not None:
+                    deadlines.append(timeout_seconds - (time.monotonic() - started_monotonic))
+                if no_progress_seconds is not None:
+                    deadlines.append(no_progress_seconds - (time.monotonic() - last_progress_monotonic))
+                positive_deadlines = [item for item in deadlines if item > 0]
+                if positive_deadlines:
+                    timeout = max(0.01, min(timeout, min(positive_deadlines)))
+            readable, _, _ = select.select(list(streams), [], [], timeout)
+            for fd in readable:
+                data = _read_available(fd)
+                if data is None:
+                    continue
+                if data == b"":
+                    streams.pop(fd, None)
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                    continue
+                stream_name, chunks = streams[fd]
+                chunks.append(data)
+                last_progress_at = _utc_now()
+                last_progress_monotonic = time.monotonic()
+                _emit_progress(
+                    invocation,
+                    {
+                        **watchdog_payload(event="output"),
+                        "stream": stream_name,
+                        "bytes": len(data),
+                    },
+                )
+        else:
+            time.sleep(0.02)
+
+        if drain_deadline is not None and time.monotonic() >= drain_deadline:
+            for fd in list(streams):
+                streams.pop(fd, None)
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+    try:
+        returncode = process.wait(timeout=PROCESS_TERMINATION_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        termination = termination or _terminate_owned_process_tree(
+            process,
+            owned_process_group_id=owned_process_group_id,
+        )
+        returncode = process.poll()
+
+    finished_at = _utc_now()
+    stdout = _tail_redacted(stdout_chunks)
+    stderr = _tail_redacted(stderr_chunks)
+    if watchdog_message:
+        stderr = f"{stderr}\n{watchdog_message}".strip()
+
+    if watchdog_reason == "runtime_timeout":
+        status = "timeout"
+        returncode_payload = None
+    elif watchdog_reason == "no_progress":
+        status = "no_progress"
+        returncode_payload = None
+    else:
+        watchdog_status = "passed" if returncode == 0 else "failed"
+        status = watchdog_status
+        returncode_payload = returncode
+
+    watchdog = watchdog_payload(event="finished", finished_at=finished_at)
+    watchdog["status"] = status
+    if returncode is not None:
+        watchdog["process_returncode"] = returncode
+    result_metadata = dict(metadata or {})
+    result_metadata["watchdog"] = watchdog
+    if watchdog_reason == "runtime_timeout":
+        result_metadata["timed_out"] = True
+    if watchdog_reason == "no_progress":
+        result_metadata["no_progress"] = True
+    _emit_progress(invocation, watchdog)
+    return ExecutorResult(
+        status=status,
+        returncode=returncode_payload,
+        started_at=started_at,
+        finished_at=finished_at,
+        stdout=stdout,
+        stderr=stderr,
+        metadata=result_metadata,
+    )
 
 
 class Executor(Protocol):
@@ -156,37 +467,13 @@ class ShellExecutorAdapter:
         return invocation.command or ""
 
     def execute(self, invocation: ExecutorInvocation) -> ExecutorResult:
-        started_at = _utc_now()
-        try:
-            completed = subprocess.run(
-                invocation.command or "",
-                cwd=invocation.project_root,
-                shell=True,
-                executable="/bin/bash",
-                text=True,
-                capture_output=True,
-                timeout=invocation.timeout_seconds,
-                env=invocation.env(),
-            )
-            return ExecutorResult(
-                status="passed" if completed.returncode == 0 else "failed",
-                returncode=completed.returncode,
-                started_at=started_at,
-                finished_at=_utc_now(),
-                stdout=redact(completed.stdout[-8000:]),
-                stderr=redact(completed.stderr[-8000:]),
-            )
-        except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-            return ExecutorResult(
-                status="failed",
-                returncode=None,
-                started_at=started_at,
-                finished_at=_utc_now(),
-                stdout=redact(stdout[-8000:]),
-                stderr=f"Command timed out after {invocation.timeout_seconds} seconds.",
-                metadata={"timed_out": True},
-            )
+        return _run_subprocess_with_watchdog(
+            invocation,
+            args=invocation.command or "",
+            executor_id=self.metadata.id,
+            shell=True,
+            executable="/bin/bash",
+        )
 
 
 class CodexExecutorAdapter:
@@ -238,39 +525,11 @@ class CodexExecutorAdapter:
         )
 
     def execute(self, invocation: ExecutorInvocation) -> ExecutorResult:
-        started_at = _utc_now()
         args = ["codex", "exec", "--full-auto", "--sandbox", invocation.sandbox, "-C", str(invocation.project_root)]
         if invocation.model:
             args.extend(["--model", invocation.model])
         args.append(invocation.prompt or invocation.command or "")
-        try:
-            completed = subprocess.run(
-                args,
-                cwd=invocation.project_root,
-                text=True,
-                capture_output=True,
-                timeout=invocation.timeout_seconds,
-                env=invocation.env(),
-            )
-            return ExecutorResult(
-                status="passed" if completed.returncode == 0 else "failed",
-                returncode=completed.returncode,
-                started_at=started_at,
-                finished_at=_utc_now(),
-                stdout=redact(completed.stdout[-8000:]),
-                stderr=redact(completed.stderr[-8000:]),
-            )
-        except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-            return ExecutorResult(
-                status="failed",
-                returncode=None,
-                started_at=started_at,
-                finished_at=_utc_now(),
-                stdout=redact(stdout[-8000:]),
-                stderr=f"Command timed out after {invocation.timeout_seconds} seconds.",
-                metadata={"timed_out": True},
-            )
+        return _run_subprocess_with_watchdog(invocation, args=args, executor_id=self.metadata.id)
 
 
 class DaggerExecutorAdapter:
@@ -350,21 +609,10 @@ class DaggerExecutorAdapter:
             )
 
         try:
-            completed = subprocess.run(
-                ["dagger", *args],
-                cwd=invocation.project_root,
-                text=True,
-                capture_output=True,
-                timeout=invocation.timeout_seconds,
-                env=env,
-            )
-            return ExecutorResult(
-                status="passed" if completed.returncode == 0 else "failed",
-                returncode=completed.returncode,
-                started_at=started_at,
-                finished_at=_utc_now(),
-                stdout=redact(completed.stdout[-8000:]),
-                stderr=redact(completed.stderr[-8000:]),
+            return _run_subprocess_with_watchdog(
+                invocation,
+                args=["dagger", *args],
+                executor_id=self.metadata.id,
                 metadata={"configured": True},
             )
         except FileNotFoundError:
@@ -376,17 +624,6 @@ class DaggerExecutorAdapter:
                 stdout="",
                 stderr="Dagger CLI was not found on PATH.",
                 metadata={"configured": True, "missing_binary": "dagger"},
-            )
-        except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-            return ExecutorResult(
-                status="failed",
-                returncode=None,
-                started_at=started_at,
-                finished_at=_utc_now(),
-                stdout=redact(stdout[-8000:]),
-                stderr=f"Dagger command timed out after {invocation.timeout_seconds} seconds.",
-                metadata={"configured": True, "timed_out": True},
             )
 
     def _dagger_args(self, command: str) -> list[str]:

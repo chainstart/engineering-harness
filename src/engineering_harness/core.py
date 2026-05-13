@@ -7,6 +7,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,7 @@ from typing import Any
 
 from .executors import (
     EXECUTOR_RESULT_CONTRACT_VERSION,
+    EXECUTOR_WATCHDOG_CONTRACT_VERSION,
     ExecutorInvocation,
     ExecutorRegistry,
     ExecutorTaskCommand,
@@ -37,6 +39,10 @@ DRIVE_CONTROL_SCHEMA_VERSION = 2
 DRIVE_WATCHDOG_SCHEMA_VERSION = 1
 DEFAULT_DRIVE_HEARTBEAT_STALE_SECONDS = 60 * 60
 DRIVE_WATCHDOG_STALE_SECONDS_ENV = "ENGINEERING_HARNESS_DRIVE_STALE_AFTER_SECONDS"
+EXECUTOR_NO_PROGRESS_SECONDS_ENV = "ENGINEERING_HARNESS_EXECUTOR_NO_PROGRESS_SECONDS"
+EXECUTOR_NO_PROGRESS_PHASE_ENV_PREFIX = "ENGINEERING_HARNESS_EXECUTOR_NO_PROGRESS_"
+EXECUTOR_WATCHDOG_ENABLED_ENV = "ENGINEERING_HARNESS_EXECUTOR_WATCHDOG_ENABLED"
+DEFAULT_EXECUTOR_NO_PROGRESS_SECONDS = 0
 MATERIALIZATION_CHECKPOINT_SCHEMA_VERSION = 1
 APPROVAL_QUEUE_SCHEMA_VERSION = 2
 APPROVAL_FINGERPRINT_SCHEMA_VERSION = 1
@@ -44,6 +50,7 @@ DEFAULT_APPROVAL_LEASE_TTL_SECONDS = 60 * 60
 FAILURE_ISOLATION_SCHEMA_VERSION = 1
 FAILURE_ISOLATION_SUMMARY_LIMIT = 5
 ISOLATED_FAILURE_STATUSES = {"failed", "blocked"}
+EXECUTOR_WATCHDOG_FAILURE_STATUSES = {"timeout", "no_progress"}
 APPROVAL_DECISION_KINDS = {
     "manual_approval": "manual",
     "agent_approval": "agent",
@@ -498,6 +505,7 @@ class AcceptanceCommand:
     prompt: str | None = None
     model: str | None = None
     sandbox: str = "workspace-write"
+    no_progress_timeout_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -805,6 +813,100 @@ class Harness:
                 return seconds
         return DEFAULT_DRIVE_HEARTBEAT_STALE_SECONDS
 
+    def _executor_watchdog_enabled(self) -> bool:
+        env_value = os.environ.get(EXECUTOR_WATCHDOG_ENABLED_ENV)
+        if env_value is not None:
+            return str(env_value).strip().lower() not in {"0", "false", "no", "off"}
+        config = self.roadmap.get("executor_watchdog")
+        if isinstance(config, dict) and "enabled" in config:
+            return bool(config.get("enabled"))
+        return True
+
+    def _executor_watchdog_phase_key(self, phase: str | None) -> str:
+        normalized = str(phase or "").strip().lower().replace("_", "-")
+        if normalized.startswith("acceptance"):
+            return "acceptance"
+        if normalized.startswith("repair"):
+            return "repair"
+        if normalized.startswith("implementation"):
+            return "implementation"
+        if normalized.startswith("e2e"):
+            return "e2e"
+        if normalized in {"self-iteration", "self-iteration-planner", "planner"}:
+            return "planner"
+        return normalized or "task"
+
+    def _coerce_optional_nonnegative_seconds(self, value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            seconds = int(value)
+        except (TypeError, ValueError):
+            return None
+        return seconds if seconds >= 0 else None
+
+    def _executor_no_progress_timeout_seconds(
+        self,
+        phase: str | None,
+        command: AcceptanceCommand | None = None,
+    ) -> int | None:
+        if not self._executor_watchdog_enabled():
+            return None
+        if command is not None and command.no_progress_timeout_seconds is not None:
+            seconds = self._coerce_optional_nonnegative_seconds(command.no_progress_timeout_seconds)
+            return seconds if seconds and seconds > 0 else None
+
+        phase_key = self._executor_watchdog_phase_key(phase)
+        env_phase = os.environ.get(f"{EXECUTOR_NO_PROGRESS_PHASE_ENV_PREFIX}{phase_key.upper()}_SECONDS")
+        env_global = os.environ.get(EXECUTOR_NO_PROGRESS_SECONDS_ENV)
+        config = self.roadmap.get("executor_watchdog")
+        phase_config: dict[str, Any] = {}
+        if isinstance(config, dict):
+            configured_phases = config.get("phase_no_progress_seconds") or config.get("phases") or {}
+            if isinstance(configured_phases, dict):
+                phase_config = configured_phases
+        candidates: list[Any] = [
+            env_phase,
+            env_global,
+            phase_config.get(phase_key),
+        ]
+        if isinstance(config, dict):
+            candidates.extend(
+                [
+                    config.get(f"{phase_key}_no_progress_seconds"),
+                    config.get("no_progress_timeout_seconds"),
+                    config.get("no_progress_seconds"),
+                ]
+            )
+        candidates.extend(
+            [
+                self.roadmap.get("executor_no_progress_timeout_seconds"),
+                self.roadmap.get("executor_no_progress_seconds"),
+                DEFAULT_EXECUTOR_NO_PROGRESS_SECONDS,
+            ]
+        )
+        for candidate in candidates:
+            seconds = self._coerce_optional_nonnegative_seconds(candidate)
+            if seconds is None:
+                continue
+            return seconds if seconds > 0 else None
+        return None
+
+    def executor_watchdog_summary(self) -> dict[str, Any]:
+        phases = ("implementation", "repair", "acceptance", "e2e", "planner")
+        return {
+            "schema_version": EXECUTOR_WATCHDOG_CONTRACT_VERSION,
+            "enabled": self._executor_watchdog_enabled(),
+            "default_no_progress_seconds": self._executor_no_progress_timeout_seconds(None),
+            "phase_no_progress_seconds": {
+                phase: self._executor_no_progress_timeout_seconds(phase)
+                for phase in phases
+            },
+            "timeout_source": "command.timeout_seconds",
+            "no_progress_env": EXECUTOR_NO_PROGRESS_SECONDS_ENV,
+            "phase_no_progress_env_prefix": EXECUTOR_NO_PROGRESS_PHASE_ENV_PREFIX,
+        }
+
     def _coerce_pid(self, value: Any) -> int | None:
         try:
             pid = int(value)
@@ -844,6 +946,7 @@ class Harness:
         control["stale_after_seconds"] = self._drive_watchdog_stale_after_seconds()
         control.setdefault("current_activity", None)
         control.setdefault("current_task", None)
+        control.setdefault("executor_watchdog", None)
         control.setdefault("last_progress_message", None)
         control.setdefault("stale_reason", None)
         control.setdefault("stale_detected_at", None)
@@ -982,6 +1085,7 @@ class Harness:
         task: HarnessTask | None = None,
         phase: str | None = None,
         clear_task: bool = False,
+        executor_watchdog: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         control = self._drive_control(state)
         if str(control.get("status", "idle")) != "running" or not bool(control.get("active")):
@@ -1001,6 +1105,8 @@ class Harness:
             control["current_task"] = None
         if message is not None:
             control["last_progress_message"] = message
+        if executor_watchdog is not None:
+            control["executor_watchdog"] = deepcopy(executor_watchdog)
         control["stale_reason"] = None
         control["stale_detected_at"] = None
         control["updated_at"] = now
@@ -1014,6 +1120,7 @@ class Harness:
         task: HarnessTask | None = None,
         phase: str | None = None,
         clear_task: bool = False,
+        executor_watchdog: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         state = self.load_state()
         control = self._heartbeat_drive_control_in_state(
@@ -1023,6 +1130,7 @@ class Harness:
             task=task,
             phase=phase,
             clear_task=clear_task,
+            executor_watchdog=executor_watchdog,
         )
         if control is None:
             return None
@@ -1092,6 +1200,7 @@ class Harness:
                     "pid": None,
                     "current_activity": "resume",
                     "current_task": None,
+                    "executor_watchdog": None,
                     "last_progress_message": message,
                     "stale_reason": None,
                     "stale_detected_at": None,
@@ -1190,6 +1299,7 @@ class Harness:
                 "heartbeat_count": 1,
                 "current_activity": "drive-starting",
                 "current_task": None,
+                "executor_watchdog": None,
                 "last_progress_message": "drive started",
                 "stale_reason": None,
                 "stale_detected_at": None,
@@ -1240,6 +1350,7 @@ class Harness:
                 "last_heartbeat_at": now,
                 "current_activity": "drive-finished",
                 "current_task": None,
+                "executor_watchdog": None,
                 "last_progress_message": message,
                 "stale_reason": None,
                 "stale_detected_at": None,
@@ -1483,6 +1594,7 @@ class Harness:
             prompt = command.prompt
             required = command.required
             timeout_seconds = command.timeout_seconds
+            no_progress_timeout_seconds = command.no_progress_timeout_seconds
             model = command.model
             sandbox = command.sandbox
             executor = command.executor
@@ -1492,6 +1604,7 @@ class Harness:
             prompt = command.get("prompt")
             required = bool(command.get("required", True))
             timeout_seconds = command.get("timeout_seconds")
+            no_progress_timeout_seconds = command.get("no_progress_timeout_seconds", command.get("no_progress_seconds"))
             model = command.get("model")
             sandbox = command.get("sandbox")
             executor = str(command.get("executor") or "")
@@ -1500,6 +1613,7 @@ class Harness:
             "executor": executor,
             "required": required,
             "timeout_seconds": timeout_seconds,
+            "no_progress_timeout_seconds": no_progress_timeout_seconds,
             "model": model,
             "sandbox": sandbox,
             "command_sha256": self._approval_text_digest(command_text),
@@ -2223,6 +2337,7 @@ class Harness:
             "executor": run.executor,
             "started_at": run.started_at,
             "finished_at": run.finished_at,
+            "executor_watchdog": run.result_metadata.get("watchdog") if isinstance(run.result_metadata, dict) else None,
         }
 
     def _command_group_state_metadata(self, commands: tuple[AcceptanceCommand, ...]) -> dict[str, Any]:
@@ -2234,6 +2349,7 @@ class Harness:
                     "executor": command.executor,
                     "required": command.required,
                     "timeout_seconds": command.timeout_seconds,
+                    "no_progress_timeout_seconds": command.no_progress_timeout_seconds,
                     "has_command": command.command is not None,
                     "has_prompt": command.prompt is not None,
                     "model": command.model,
@@ -2581,7 +2697,13 @@ class Harness:
             message=f"running self-iteration planner: {command.name}",
             clear_task=True,
         )
-        run = self._run_command(command, phase="self-iteration", task=planner_task)
+        run = self._run_command(
+            command,
+            phase="self-iteration",
+            task=planner_task,
+            state=self.load_state(),
+            persist_state=True,
+        )
         self.drive_heartbeat(
             activity="self-iteration-planner",
             message=f"self-iteration planner finished with status {run.status}",
@@ -2641,6 +2763,15 @@ class Harness:
 
         final_after = self.continuation_summary()
 
+        failure_isolation = self._self_iteration_failure_isolation(
+            run,
+            status=status,
+            message=message,
+            report_path=report_path,
+            snapshot_path=snapshot_path,
+            context_path=context_path,
+        )
+
         self._write_self_iteration_report(
             report_path,
             reason,
@@ -2650,6 +2781,7 @@ class Harness:
             run,
             validation=validation,
             context_pack=context_info,
+            failure_isolation=failure_isolation,
         )
         append_jsonl(
             self.decision_log_path,
@@ -2688,7 +2820,11 @@ class Harness:
                 "command": run.command,
                 "status": run.status,
                 "returncode": run.returncode,
+                "executor": run.executor,
+                "executor_metadata": run.executor_metadata,
+                "executor_result": self._executor_result_contract(run),
             },
+            **({"failure_isolation": failure_isolation} if failure_isolation else {}),
         }
 
     def _self_iteration_context_pack(
@@ -3779,6 +3915,7 @@ continuation stage(s) were appended.
         run: CommandRun,
         validation: dict[str, Any] | None = None,
         context_pack: dict[str, Any] | None = None,
+        failure_isolation: dict[str, Any] | None = None,
     ) -> None:
         report_path.parent.mkdir(parents=True, exist_ok=True)
         lines = [
@@ -3847,7 +3984,62 @@ continuation stage(s) were appended.
             lines.extend(["Stdout:", "", "```text", run.stdout, "```", ""])
         if run.stderr:
             lines.extend(["Stderr:", "", "```text", run.stderr, "```", ""])
+        if failure_isolation is not None:
+            lines.extend(
+                [
+                    "## Failure Isolation",
+                    "",
+                    f"- Phase: `{failure_isolation.get('phase')}`",
+                    f"- Failure kind: `{failure_isolation.get('failure_kind')}`",
+                    f"- Local next action: {failure_isolation.get('local_next_action')}",
+                    "",
+                    "```json",
+                    json.dumps(failure_isolation, indent=2, sort_keys=True),
+                    "```",
+                    "",
+                ]
+            )
         report_path.write_text("\n".join(lines), encoding="utf-8")
+
+    def _self_iteration_failure_isolation(
+        self,
+        run: CommandRun,
+        *,
+        status: str,
+        message: str,
+        report_path: Path,
+        snapshot_path: Path,
+        context_path: Path,
+    ) -> dict[str, Any] | None:
+        if run.status not in EXECUTOR_WATCHDOG_FAILURE_STATUSES:
+            return None
+        report_relative = str(report_path.relative_to(self.project_root))
+        snapshot_relative = str(snapshot_path.relative_to(self.project_root))
+        context_relative = str(context_path.relative_to(self.project_root))
+        executor_watchdog = self._failure_isolation_executor_watchdog([run], phase=run.phase) or {}
+        failure_kind = "executor_no_progress" if run.status == "no_progress" else "executor_timeout"
+        return {
+            "schema_version": FAILURE_ISOLATION_SCHEMA_VERSION,
+            "kind": "engineering-harness.planner-failure-isolation",
+            "status": status,
+            "phase": run.phase,
+            "failure_kind": failure_kind,
+            "message": message,
+            "started_at": run.started_at,
+            "finished_at": run.finished_at,
+            "report_paths": {
+                "self_iteration_report": report_relative,
+                "self_iteration_snapshot": snapshot_relative,
+                "self_iteration_context": context_relative,
+            },
+            "relevant_report_paths": [report_relative, snapshot_relative, context_relative],
+            "executor_watchdog": executor_watchdog,
+            "local_next_action": (
+                f"Inspect the self-iteration planner watchdog evidence in {report_relative}, "
+                "fix the local planner command or its no-progress threshold, then rerun self-iteration."
+            ),
+            "resolved": False,
+        }
 
     def _continuation_stage_payload(self, stage: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -3944,6 +4136,9 @@ continuation stage(s) were appended.
             command = item.get("command")
             prompt = item.get("prompt")
             name = item.get("name") or command or prompt or default_name
+            no_progress_timeout = self._coerce_optional_nonnegative_seconds(
+                item.get("no_progress_timeout_seconds", item.get("no_progress_seconds"))
+            )
             commands.append(
                 AcceptanceCommand(
                     name=str(name),
@@ -3954,6 +4149,7 @@ continuation stage(s) were appended.
                     prompt=str(prompt) if prompt is not None else None,
                     model=str(item["model"]) if item.get("model") else None,
                     sandbox=str(item.get("sandbox", "workspace-write")),
+                    no_progress_timeout_seconds=no_progress_timeout,
                 )
             )
         return commands
@@ -4018,6 +4214,7 @@ continuation stage(s) were appended.
             "continuation": self.continuation_summary(),
             "self_iteration": self.self_iteration_summary(),
             "drive_control": self.drive_control_summary(),
+            "executor_watchdog": self.executor_watchdog_summary(),
             "approval_queue": (
                 self.approval_queue_summary(status_filter="pending")
                 if refresh_approvals
@@ -5665,6 +5862,13 @@ continuation stage(s) were appended.
                 errors.append(f"{location} timeout_seconds must be positive")
         except (TypeError, ValueError):
             errors.append(f"{location} timeout_seconds must be an integer")
+        no_progress_value = item.get("no_progress_timeout_seconds", item.get("no_progress_seconds"))
+        if no_progress_value is not None:
+            try:
+                if int(no_progress_value) < 0:
+                    errors.append(f"{location} no_progress_timeout_seconds must be non-negative")
+            except (TypeError, ValueError):
+                errors.append(f"{location} no_progress_timeout_seconds must be an integer")
 
     def task_payload(self, task: HarnessTask | None) -> dict[str, Any] | None:
         if task is None:
@@ -5682,6 +5886,8 @@ continuation stage(s) were appended.
                 payload["prompt"] = command.prompt
             if command.model is not None:
                 payload["model"] = command.model
+            if command.no_progress_timeout_seconds is not None:
+                payload["no_progress_timeout_seconds"] = command.no_progress_timeout_seconds
             return payload
 
         return {
@@ -6765,7 +6971,7 @@ continuation stage(s) were appended.
         state: dict[str, Any] | None = None,
         persist_state: bool = False,
     ) -> tuple[str, str]:
-        state_payload = state if state is not None else {}
+        state_payload = state if state is not None else (self.load_state() if persist_state else {})
         self._record_phase_state(
             state_payload,
             task,
@@ -6919,7 +7125,7 @@ continuation stage(s) were appended.
                     )
                 )
                 continue
-            run = self._run_command(command, phase=phase, task=task)
+            run = self._run_command(command, phase=phase, task=task, state=state_payload, persist_state=persist_state)
             runs.append(run)
             if persist_state:
                 self._heartbeat_drive_control_in_state(
@@ -6932,6 +7138,8 @@ continuation stage(s) were appended.
                 self.save_state(state_payload)
             if command.required and run.status == "blocked":
                 return finish("blocked", run.stderr or f"Required {phase} command blocked: {command.name}")
+            if command.required and run.status in EXECUTOR_WATCHDOG_FAILURE_STATUSES:
+                return finish("failed", f"Required {phase} command {run.status}: {command.name}")
             if command.required and run.returncode != 0:
                 return finish("failed", f"Required {phase} command failed: {command.name}")
         return finish("passed", f"All required {phase} commands passed.")
@@ -7086,7 +7294,14 @@ continuation stage(s) were appended.
             return command.command or command.prompt or command.executor
         return executor.display_command(self._executor_invocation(command, task))
 
-    def _executor_invocation(self, command: AcceptanceCommand, task: HarnessTask) -> ExecutorInvocation:
+    def _executor_invocation(
+        self,
+        command: AcceptanceCommand,
+        task: HarnessTask,
+        *,
+        phase: str | None = None,
+        progress_callback: Any = None,
+    ) -> ExecutorInvocation:
         invocation = ExecutorInvocation(
             project_root=self.project_root,
             task_id=task.id,
@@ -7096,6 +7311,9 @@ continuation stage(s) were appended.
             timeout_seconds=command.timeout_seconds,
             model=command.model,
             sandbox=command.sandbox,
+            phase=phase,
+            no_progress_timeout_seconds=self._executor_no_progress_timeout_seconds(phase, command),
+            progress_callback=progress_callback,
         )
         executor = self.executor_registry.get(command.executor)
         if executor is None:
@@ -7104,6 +7322,72 @@ continuation stage(s) were appended.
         if prepare_invocation is None:
             return invocation
         return prepare_invocation(invocation, self._executor_task_context(task))
+
+    def _executor_progress_callback(
+        self,
+        state: dict[str, Any],
+        *,
+        task: HarnessTask,
+        phase: str,
+        command: AcceptanceCommand,
+        executor_id: str,
+        persist: bool,
+    ) -> Any:
+        last_saved_at = 0.0
+
+        def callback(event: dict[str, Any]) -> None:
+            nonlocal last_saved_at
+            if not persist:
+                return
+            event_name = str(event.get("event") or event.get("status") or "progress")
+            now = time.monotonic()
+            if event_name == "output" and now - last_saved_at < 1.0:
+                return
+            last_saved_at = now
+            watchdog = {
+                key: deepcopy(value)
+                for key, value in event.items()
+                if key
+                in {
+                    "schema_version",
+                    "event",
+                    "status",
+                    "reason",
+                    "message",
+                    "phase",
+                    "executor_id",
+                    "command_name",
+                    "pid",
+                    "started_at",
+                    "finished_at",
+                    "runtime_seconds",
+                    "timeout_seconds",
+                    "no_progress_timeout_seconds",
+                    "threshold_seconds",
+                    "last_progress_at",
+                    "last_output_at",
+                    "stdout_bytes",
+                    "stderr_bytes",
+                    "termination",
+                    "process_returncode",
+                }
+            }
+            watchdog.setdefault("phase", phase)
+            watchdog.setdefault("executor_id", executor_id)
+            watchdog.setdefault("command_name", command.name)
+            message = str(watchdog.get("message") or f"{phase} command {command.name} {event_name}")
+            control = self._heartbeat_drive_control_in_state(
+                state,
+                activity=f"{phase}:executor",
+                message=message,
+                task=task,
+                phase=phase,
+                executor_watchdog=watchdog,
+            )
+            if control is not None:
+                self.save_state(state)
+
+        return callback
 
     def _executor_task_context(self, task: HarnessTask) -> ExecutorTaskContext:
         def task_command(command: AcceptanceCommand) -> ExecutorTaskCommand:
@@ -7125,7 +7409,15 @@ continuation stage(s) were appended.
             e2e=tuple(task_command(item) for item in task.e2e),
         )
 
-    def _run_command(self, acceptance: AcceptanceCommand, *, phase: str, task: HarnessTask) -> CommandRun:
+    def _run_command(
+        self,
+        acceptance: AcceptanceCommand,
+        *,
+        phase: str,
+        task: HarnessTask,
+        state: dict[str, Any] | None = None,
+        persist_state: bool = False,
+    ) -> CommandRun:
         executor = self.executor_registry.get(acceptance.executor)
         if executor is None:
             return CommandRun(
@@ -7141,7 +7433,21 @@ continuation stage(s) were appended.
                 executor=acceptance.executor,
                 executor_metadata=self.executor_registry.metadata_for(acceptance.executor),
             )
-        invocation = self._executor_invocation(acceptance, task)
+        state_payload = state if state is not None else {}
+        progress_callback = self._executor_progress_callback(
+            state_payload,
+            task=task,
+            phase=phase,
+            command=acceptance,
+            executor_id=executor.metadata.id,
+            persist=persist_state,
+        )
+        invocation = self._executor_invocation(
+            acceptance,
+            task,
+            phase=phase,
+            progress_callback=progress_callback,
+        )
         display_command = executor.display_command(invocation)
         result = executor.execute(invocation)
         return CommandRun(
@@ -7473,6 +7779,7 @@ continuation stage(s) were appended.
             "finished_at": run.finished_at,
             "required": metadata.get("required"),
             "timeout_seconds": metadata.get("timeout_seconds"),
+            "no_progress_timeout_seconds": self._command_run_no_progress_timeout_seconds(task, run, metadata),
             "model": metadata.get("model"),
             "sandbox": metadata.get("sandbox"),
             "stdout": stdout_summary,
@@ -7505,6 +7812,25 @@ continuation stage(s) were appended.
             "metadata": run.result_metadata,
         }
 
+    def _command_run_no_progress_timeout_seconds(
+        self,
+        task: HarnessTask,
+        run: CommandRun,
+        metadata: dict[str, Any],
+    ) -> int | None:
+        watchdog = run.result_metadata.get("watchdog") if isinstance(run.result_metadata, dict) else None
+        if isinstance(watchdog, dict):
+            value = watchdog.get("no_progress_timeout_seconds")
+            if value is not None:
+                return self._coerce_optional_nonnegative_seconds(value)
+        configured = self._coerce_optional_nonnegative_seconds(metadata.get("no_progress_timeout_seconds"))
+        if configured is not None and configured > 0:
+            return configured
+        for command in (*task.implementation, *task.repair, *task.acceptance, *task.e2e):
+            if command.name == run.name and self._display_command(command, task) == run.command:
+                return self._executor_no_progress_timeout_seconds(run.phase, command)
+        return self._executor_no_progress_timeout_seconds(run.phase)
+
     def _configured_command_metadata(self, task: HarnessTask, run: CommandRun) -> dict[str, Any]:
         for command in (*task.implementation, *task.repair, *task.acceptance, *task.e2e):
             if command.name == run.name and self._display_command(command, task) == run.command:
@@ -7512,6 +7838,7 @@ continuation stage(s) were appended.
                     "executor": command.executor,
                     "required": command.required,
                     "timeout_seconds": command.timeout_seconds,
+                    "no_progress_timeout_seconds": command.no_progress_timeout_seconds,
                     "model": command.model,
                     "sandbox": command.sandbox,
                     "executor_metadata": self.executor_registry.metadata_for(command.executor),
@@ -7520,6 +7847,7 @@ continuation stage(s) were appended.
             "executor": run.executor or ("codex" if run.command.startswith("codex exec ") else "shell"),
             "required": None,
             "timeout_seconds": None,
+            "no_progress_timeout_seconds": None,
             "model": None,
             "sandbox": None,
             "executor_metadata": run.executor_metadata
@@ -7714,6 +8042,7 @@ continuation stage(s) were appended.
         failure_kind = self._failure_isolation_kind(
             status=status,
             phase=phase,
+            runs=runs,
             file_scope_violations=file_scope_violations,
             blocking_policy_decisions=blocking,
         )
@@ -7724,7 +8053,8 @@ continuation stage(s) were appended.
             attempt=attempt,
             runs=runs,
         )
-        return {
+        executor_watchdog = self._failure_isolation_executor_watchdog(runs, phase=phase)
+        payload = {
             "schema_version": FAILURE_ISOLATION_SCHEMA_VERSION,
             "kind": "engineering-harness.task-failure-isolation",
             "status": status,
@@ -7755,6 +8085,9 @@ continuation stage(s) were appended.
             ),
             "resolved": False,
         }
+        if executor_watchdog is not None:
+            payload["executor_watchdog"] = executor_watchdog
+        return payload
 
     def _failure_isolation_phase(
         self,
@@ -7767,6 +8100,8 @@ continuation stage(s) were appended.
         if file_scope_violations:
             return "file-scope-guard"
         for run in reversed(runs):
+            if run.status in EXECUTOR_WATCHDOG_FAILURE_STATUSES:
+                return run.phase
             if run.status == "blocked":
                 return run.phase
             if run.returncode not in (None, 0):
@@ -7780,6 +8115,7 @@ continuation stage(s) were appended.
         *,
         status: str,
         phase: str,
+        runs: list[CommandRun],
         file_scope_violations: list[str],
         blocking_policy_decisions: list[dict[str, Any]],
     ) -> str:
@@ -7789,10 +8125,48 @@ continuation stage(s) were appended.
             return "policy_block"
         if status == "blocked":
             return "task_blocked"
+        for run in reversed(runs):
+            if run.phase == phase and run.status == "no_progress":
+                return "executor_no_progress"
+            if run.phase == phase and run.status == "timeout":
+                return "executor_timeout"
         phase_root = phase.split("-", 1)[0]
         if phase_root in {"implementation", "acceptance", "repair", "e2e"}:
             return f"{phase_root}_failure"
         return "task_failure"
+
+    def _failure_isolation_executor_watchdog(
+        self,
+        runs: list[CommandRun],
+        *,
+        phase: str,
+    ) -> dict[str, Any] | None:
+        for run in reversed(runs):
+            if run.phase != phase or run.status not in EXECUTOR_WATCHDOG_FAILURE_STATUSES:
+                continue
+            watchdog = run.result_metadata.get("watchdog") if isinstance(run.result_metadata, dict) else {}
+            if not isinstance(watchdog, dict):
+                watchdog = {}
+            return {
+                "schema_version": EXECUTOR_WATCHDOG_CONTRACT_VERSION,
+                "status": run.status,
+                "phase": run.phase,
+                "executor": run.executor,
+                "executor_metadata": run.executor_metadata,
+                "command_name": run.name,
+                "pid": watchdog.get("pid"),
+                "started_at": watchdog.get("started_at") or run.started_at,
+                "finished_at": watchdog.get("finished_at") or run.finished_at,
+                "last_progress_at": watchdog.get("last_progress_at"),
+                "last_output_at": watchdog.get("last_output_at"),
+                "timeout_seconds": watchdog.get("timeout_seconds"),
+                "no_progress_timeout_seconds": watchdog.get("no_progress_timeout_seconds"),
+                "threshold_seconds": watchdog.get("threshold_seconds"),
+                "reason": watchdog.get("reason") or run.status,
+                "message": watchdog.get("message") or run.stderr,
+                "termination": deepcopy(watchdog.get("termination")) if isinstance(watchdog.get("termination"), dict) else {},
+            }
+        return None
 
     def _failure_isolation_retry_exhaustion(
         self,
@@ -7842,6 +8216,16 @@ continuation stage(s) were appended.
                 f"Review the blocking policy decisions for task {task.id}, approve the required local gate "
                 "or adjust the task command, then rerun the task."
             )
+        if failure_kind == "executor_no_progress":
+            return (
+                f"Inspect the executor watchdog evidence for phase {phase} in {report_relative}, "
+                "fix the silent or hung local command, then rerun the task."
+            )
+        if failure_kind == "executor_timeout":
+            return (
+                f"Inspect the executor timeout evidence for phase {phase} in {report_relative}, "
+                "shorten, repair, or raise the local timeout for the command, then rerun the task."
+            )
         return (
             f"Inspect phase {phase} in {report_relative}, apply a local fix within the task file_scope, "
             "then rerun the task."
@@ -7860,6 +8244,11 @@ continuation stage(s) were appended.
         )
         blocking = failure_isolation.get("blocking_policy_decisions")
         violations = failure_isolation.get("file_scope_violations")
+        executor_watchdog = (
+            failure_isolation.get("executor_watchdog")
+            if isinstance(failure_isolation.get("executor_watchdog"), dict)
+            else None
+        )
         compact = {
             "schema_version": failure_isolation.get("schema_version", FAILURE_ISOLATION_SCHEMA_VERSION),
             "task_id": failure_isolation.get("task_id"),
@@ -7877,6 +8266,21 @@ continuation stage(s) were appended.
             "file_scope_violation_count": len(violations) if isinstance(violations, list) else 0,
             "local_next_action": failure_isolation.get("local_next_action"),
         }
+        if executor_watchdog is not None:
+            compact["executor_watchdog"] = {
+                "schema_version": executor_watchdog.get("schema_version", EXECUTOR_WATCHDOG_CONTRACT_VERSION),
+                "status": executor_watchdog.get("status"),
+                "phase": executor_watchdog.get("phase"),
+                "executor": executor_watchdog.get("executor"),
+                "command_name": executor_watchdog.get("command_name"),
+                "pid": executor_watchdog.get("pid"),
+                "threshold_seconds": executor_watchdog.get("threshold_seconds"),
+                "timeout_seconds": executor_watchdog.get("timeout_seconds"),
+                "no_progress_timeout_seconds": executor_watchdog.get("no_progress_timeout_seconds"),
+                "last_progress_at": executor_watchdog.get("last_progress_at"),
+                "last_output_at": executor_watchdog.get("last_output_at"),
+                "reason": executor_watchdog.get("reason"),
+            }
         return {key: value for key, value in compact.items() if value is not None}
 
     def _git_context(self, safety: dict[str, Any]) -> dict[str, Any]:

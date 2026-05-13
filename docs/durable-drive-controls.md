@@ -125,12 +125,54 @@ Local recovery is intentionally explicit:
 - for `policy_block`, review the blocking policy decisions and either approve the local gate or
   adjust the command/task before rerunning;
 - for `file_scope_violation`, inspect the listed paths, keep changes within `file_scope`, then rerun;
+- for `executor_no_progress`, inspect the executor watchdog evidence, fix the silent or hung local
+  command, or raise the local no-progress threshold before rerunning;
+- for `executor_timeout`, inspect the timeout evidence, shorten or repair the local command, or raise
+  the command `timeout_seconds` before rerunning;
 - for implementation, acceptance, repair, or E2E failures, inspect the named phase in the task report,
   apply a local fix inside the task file scope, then rerun the task.
 
 Rolling drives and self-iteration will not extend the roadmap while unresolved isolated failures
 exist. A later `drive --rolling --self-iterate` stops with status `isolated_failure` before adding or
 materializing continuation work, and the drive report points back to the isolated task evidence.
+
+## Executor No-Progress Watchdog
+
+Built-in subprocess executors run in an owned local process group. The harness records executor
+watchdog metadata for implementation, repair, acceptance, E2E, and self-iteration planner
+subprocesses: phase, executor id, command name, pid, start time, last output/progress time,
+`timeout_seconds`, configured no-progress threshold, and termination evidence when a watchdog fires.
+
+Runtime timeout uses each command's `timeout_seconds`. No-progress detection is disabled by default
+to preserve short local tests, and can be enabled locally in the roadmap:
+
+```yaml
+executor_watchdog:
+  enabled: true
+  no_progress_seconds: 900
+  phase_no_progress_seconds:
+    implementation: 1800
+    repair: 900
+    acceptance: 300
+    e2e: 600
+    planner: 1200
+```
+
+Individual commands may override the roadmap with `no_progress_timeout_seconds`. Environment
+variables override roadmap defaults for local recovery runs:
+
+```bash
+ENGINEERING_HARNESS_EXECUTOR_NO_PROGRESS_SECONDS=300 \
+  python3 -m engineering_harness.cli drive --project-root /path/to/project
+
+ENGINEERING_HARNESS_EXECUTOR_NO_PROGRESS_ACCEPTANCE_SECONDS=60 \
+  python3 -m engineering_harness.cli run --project-root /path/to/project
+```
+
+Use `ENGINEERING_HARNESS_EXECUTOR_WATCHDOG_ENABLED=0` to disable no-progress checks locally.
+Runtime `timeout_seconds` still applies. When a watchdog fires, only the process group started for
+that executor invocation is terminated; the drive continues to write machine-readable status,
+manifest, task report, and `failure_isolation.executor_watchdog` evidence.
 
 ## Pause A Long Drive
 

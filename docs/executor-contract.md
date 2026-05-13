@@ -2,7 +2,8 @@
 
 Executor adapters let the harness run shell commands, Codex prompts, and future execution backends
 without changing task semantics. Roadmap tasks still define command groups with `executor`,
-`command` or `prompt`, `timeout_seconds`, `required`, `model`, and `sandbox`.
+`command` or `prompt`, `timeout_seconds`, optional `no_progress_timeout_seconds`, `required`,
+`model`, and `sandbox`.
 
 ## Adapter Interface
 
@@ -36,6 +37,7 @@ Each run keeps the legacy manifest fields for compatibility:
 - `stderr`
 - `required`
 - `timeout_seconds`
+- `no_progress_timeout_seconds`
 - `model`
 - `sandbox`
 
@@ -48,6 +50,24 @@ Each run also includes normalized executor fields:
 
 This keeps reports and manifest readers compatible while giving future adapters a stable place to
 record capabilities and result details.
+
+## Watchdog Results
+
+Built-in subprocess adapters (`shell`, enabled `dagger`, and `codex`) enforce `timeout_seconds` with
+an owned local process group. When `no_progress_timeout_seconds` or the local
+`executor_watchdog` roadmap defaults are configured, the same process monitor also terminates runs
+that produce no stdout/stderr progress before the threshold.
+
+Watchdog outcomes use deterministic executor statuses:
+
+- `timeout`: the command exceeded `timeout_seconds`;
+- `no_progress`: the command exceeded the configured no-progress threshold.
+
+Task status remains `failed` for required commands, and the task manifest records
+`failure_isolation.executor_watchdog` with the phase, executor metadata, command name, pid when
+available, thresholds, last output/progress timestamp, report paths, and local next action.
+Self-iteration planner watchdog failures return planner failure-isolation evidence in the
+self-iteration result and report.
 
 ## Dagger Adapter Stub
 
