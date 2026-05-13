@@ -702,6 +702,145 @@
           "generated_at": "2026-05-12T23:12:47Z"
         }
       ]
+    },
+    {
+      "id": "frontend-experience-planning",
+      "title": "Frontend Experience Planning",
+      "status": "planned",
+      "objective": "Require each substantial project to define the right frontend or operator surface for its domain.",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-13T04:36:20Z",
+      "tasks": [
+        {
+          "id": "experience-profile-defaults",
+          "title": "Add frontend experience archetypes to profiles",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 1,
+          "manual_approval_required": false,
+          "agent_approval_required": false,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [],
+          "repair": [],
+          "acceptance": [
+            {
+              "name": "profile experience tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T04:36:20Z"
+        },
+        {
+          "id": "experience-status-summary",
+          "title": "Expose frontend readiness and E2E journeys in status output",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 1,
+          "manual_approval_required": false,
+          "agent_approval_required": false,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**"
+          ],
+          "implementation": [],
+          "repair": [],
+          "acceptance": [
+            {
+              "name": "status experience tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T04:36:20Z"
+        }
+      ]
+    },
+    {
+      "id": "frontend-templates",
+      "title": "Frontend Templates and UI Workflows",
+      "status": "planned",
+      "objective": "Generate project-specific frontend plans and starter tasks without forcing one UI stack.",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-13T04:36:25Z",
+      "tasks": [
+        {
+          "id": "dashboard-template-pack",
+          "title": "Add dashboard template pack for autonomous workers",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 1,
+          "manual_approval_required": false,
+          "agent_approval_required": false,
+          "file_scope": [
+            "templates/**",
+            "docs/**",
+            "tests/**"
+          ],
+          "implementation": [],
+          "repair": [],
+          "acceptance": [
+            {
+              "name": "template tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T04:36:25Z"
+        },
+        {
+          "id": "submission-review-template-pack",
+          "title": "Add submission and revision workflow template pack",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 1,
+          "manual_approval_required": false,
+          "agent_approval_required": false,
+          "file_scope": [
+            "templates/**",
+            "docs/**",
+            "tests/**"
+          ],
+          "implementation": [],
+          "repair": [],
+          "acceptance": [
+            {
+              "name": "submission template tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T04:36:25Z"
+        },
+        {
+          "id": "multi-role-template-pack",
+          "title": "Add multi-role authenticated application planning template",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 1,
+          "manual_approval_required": false,
+          "agent_approval_required": false,
+          "file_scope": [
+            "templates/**",
+            "docs/**",
+            "tests/**"
+          ],
+          "implementation": [],
+          "repair": [],
+          "acceptance": [
+            {
+              "name": "multi-role template tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T04:36:25Z"
+        }
+      ]
     }
   ],
   "continuation": {
