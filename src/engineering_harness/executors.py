@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import select
 import shlex
 import signal
@@ -15,8 +16,44 @@ from typing import Any, Callable, Protocol
 EXECUTOR_CONTRACT_VERSION = 1
 EXECUTOR_RESULT_CONTRACT_VERSION = 1
 EXECUTOR_WATCHDOG_CONTRACT_VERSION = 1
+CAPABILITY_CLASSIFICATION_SCHEMA_VERSION = 1
 DAGGER_ENABLE_ENV = "ENGINEERING_HARNESS_ENABLE_DAGGER"
 PROCESS_TERMINATION_GRACE_SECONDS = 0.5
+SENSITIVE_ENV_NAME_PATTERN = (
+    r"[A-Z0-9_]*(?:API[-_]?KEY|ACCESS[-_]?KEY|TOKEN|SECRET|PASSWORD|PASS|"
+    r"PRIVATE[-_]?KEY|MNEMONIC|SEED(?:[-_]?PHRASE)?|CREDENTIALS?)[A-Z0-9_]*"
+)
+SENSITIVE_QUOTED_VALUE_RE = re.compile(
+    rf"(?i)\b({SENSITIVE_ENV_NAME_PATTERN})\b(\s*[:=]\s*)(['\"])(.*?)(\3)"
+)
+SENSITIVE_UNQUOTED_VALUE_RE = re.compile(
+    rf"(?i)\b({SENSITIVE_ENV_NAME_PATTERN})\b(\s*=\s*)([^\s\"'`]+)"
+)
+BEARER_TOKEN_RE = re.compile(r"(?i)\b(Bearer\s+)([A-Za-z0-9._~+/=-]{8,})")
+OPENAI_STYLE_TOKEN_RE = re.compile(r"\b(sk-[A-Za-z0-9][A-Za-z0-9_-]{8,})\b")
+CAPABILITY_CLASS_BY_NAME = {
+    "agent": "agent",
+    "browser_automation": "network",
+    "containerized_execution": "filesystem",
+    "deployment": "deploy",
+    "deploy": "deploy",
+    "exit_code": "observability",
+    "filesystem_escape": "filesystem",
+    "host_filesystem_write": "filesystem",
+    "live": "deploy",
+    "live_operations": "deploy",
+    "local_dagger_cli": "process",
+    "local_process": "process",
+    "network": "network",
+    "network_access": "network",
+    "requires_explicit_configuration": "configuration",
+    "secret_access": "secret",
+    "secrets": "secret",
+    "stderr": "observability",
+    "stdout": "observability",
+    "workspace_write": "filesystem",
+}
+CORE_CAPABILITY_CLASSES = ("filesystem", "network", "secret", "deploy")
 
 
 def _utc_now() -> str:
@@ -24,25 +61,41 @@ def _utc_now() -> str:
 
 
 def redact(text: str) -> str:
-    redacted = text
-    for marker in ("PRIVATE_KEY=", "OPENAI_API_KEY=", "ANTHROPIC_API_KEY=", "MNEMONIC="):
-        cursor = 0
-        while True:
-            index = redacted.find(marker, cursor)
-            if index < 0:
-                break
-            token_start = index + len(marker)
-            if redacted.startswith("[REDACTED]", token_start):
-                cursor = token_start + len("[REDACTED]")
-                continue
-            after = redacted[token_start:]
-            token = after.split()[0] if after.split() else ""
-            if not token:
-                cursor = token_start
-                continue
-            redacted = redacted[:token_start] + "[REDACTED]" + redacted[token_start + len(token) :]
-            cursor = token_start + len("[REDACTED]")
+    redacted = str(text)
+    redacted = SENSITIVE_QUOTED_VALUE_RE.sub(r"\1\2\3[REDACTED]\5", redacted)
+    redacted = SENSITIVE_UNQUOTED_VALUE_RE.sub(r"\1\2[REDACTED]", redacted)
+    redacted = BEARER_TOKEN_RE.sub(r"\1[REDACTED]", redacted)
+    redacted = OPENAI_STYLE_TOKEN_RE.sub("[REDACTED]", redacted)
     return redacted
+
+
+def classify_capabilities(capabilities: tuple[str, ...] | list[str]) -> dict[str, Any]:
+    classes: dict[str, list[str]] = {class_name: [] for class_name in CORE_CAPABILITY_CLASSES}
+    for class_name in ("process", "observability", "agent", "configuration"):
+        classes.setdefault(class_name, [])
+    unknown: list[str] = []
+    for capability in capabilities:
+        name = str(capability).strip()
+        if not name:
+            continue
+        class_name = CAPABILITY_CLASS_BY_NAME.get(name)
+        if class_name is None:
+            unknown.append(name)
+            continue
+        classes.setdefault(class_name, []).append(name)
+    classes = {key: sorted(dict.fromkeys(value)) for key, value in classes.items()}
+    return {
+        "schema_version": CAPABILITY_CLASSIFICATION_SCHEMA_VERSION,
+        "classes": classes,
+        "core_classes": {
+            class_name: {
+                "capabilities": classes.get(class_name, []),
+                "supported": bool(classes.get(class_name)),
+            }
+            for class_name in CORE_CAPABILITY_CLASSES
+        },
+        "unknown": sorted(dict.fromkeys(unknown)),
+    }
 
 
 @dataclass(frozen=True)
@@ -57,6 +110,7 @@ class ExecutorMetadata:
     uses_command_policy: bool = False
 
     def as_contract(self) -> dict[str, Any]:
+        capability_classifications = classify_capabilities(self.capabilities)
         return {
             "schema_version": EXECUTOR_CONTRACT_VERSION,
             "id": self.id,
@@ -65,6 +119,7 @@ class ExecutorMetadata:
             "adapter": self.adapter,
             "input_mode": self.input_mode,
             "capabilities": list(self.capabilities),
+            "capability_classifications": capability_classifications,
             "requires_agent_approval": self.requires_agent_approval,
             "uses_command_policy": self.uses_command_policy,
         }
@@ -656,6 +711,7 @@ class ExecutorRegistry:
                 "adapter": None,
                 "input_mode": "unknown",
                 "capabilities": [],
+                "capability_classifications": classify_capabilities(()),
                 "requires_agent_approval": None,
                 "uses_command_policy": None,
             }

@@ -1492,6 +1492,119 @@ def test_capability_policy_existing_tasks_unchanged_without_requests(tmp_path):
     assert manifest["policy_decision_summary"]["total"] == 8
 
 
+def unsafe_policy_project(tmp_path: Path, command_text: str, *, sandbox: str = "workspace-write") -> tuple[Path, dict]:
+    project = tmp_path / "unsafe-policy-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="unsafe-policy-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    command = roadmap["milestones"][0]["tasks"][0]["acceptance"][0]
+    command["command"] = command_text
+    command["sandbox"] = sandbox
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    result = Harness(project).run_task(Harness(project).next_task())
+    return project, result
+
+
+def test_policy_blocks_network_command_without_requested_capability(tmp_path):
+    project, result = unsafe_policy_project(
+        tmp_path,
+        "python3 -c \"import urllib.request; urllib.request.urlopen('https://example.invalid')\"",
+    )
+
+    assert result["status"] == "blocked"
+    manifest = task_manifest(project, result)
+    decision = policy_decision(manifest, "capability_policy", outcome="denied")
+    assert decision["metadata"]["detected_capabilities"] == ["network_access"]
+    assert decision["metadata"]["unsafe_classes"] == ["network"]
+    assert decision["metadata"]["operation_classification"]["matches"]["network"]
+
+
+def test_policy_blocks_secret_env_access_and_redacts_reports(tmp_path):
+    secret_value = "sk-secret-value-that-must-not-leak"
+    project, result = unsafe_policy_project(
+        tmp_path,
+        f"python3 -c \"import os; print(os.environ.get('OPENAI_API_KEY', '{secret_value}'))\"",
+    )
+
+    assert result["status"] == "blocked"
+    manifest_text = (project / result["manifest"]).read_text(encoding="utf-8")
+    report_text = (project / result["report"]).read_text(encoding="utf-8")
+    assert secret_value not in manifest_text
+    assert secret_value not in report_text
+    assert "[REDACTED]" in manifest_text
+    assert "[REDACTED]" in report_text
+    manifest = json.loads(manifest_text)
+    decision = policy_decision(manifest, "capability_policy", outcome="denied")
+    assert decision["metadata"]["detected_capabilities"] == ["secret_access"]
+    assert decision["metadata"]["unsafe_classes"] == ["secret"]
+
+
+def test_policy_blocks_deploy_command_without_requested_capability(tmp_path):
+    project, result = unsafe_policy_project(
+        tmp_path,
+        "python3 -c \"print('publish')\" && npm publish",
+    )
+
+    assert result["status"] == "blocked"
+    manifest = task_manifest(project, result)
+    decision = policy_decision(manifest, "capability_policy", outcome="denied")
+    assert decision["metadata"]["detected_capabilities"] == ["deployment"]
+    assert decision["metadata"]["unsafe_classes"] == ["deploy"]
+
+
+def test_policy_blocks_unsafe_sandbox_mode(tmp_path):
+    project, result = unsafe_policy_project(
+        tmp_path,
+        "python3 -c \"print('sandbox should not run')\"",
+        sandbox="danger-full-access",
+    )
+
+    assert result["status"] == "blocked"
+    manifest = task_manifest(project, result)
+    decision = policy_decision(manifest, "capability_policy", outcome="denied")
+    classification = decision["metadata"]["operation_classification"]
+    assert decision["metadata"]["detected_capabilities"] == ["filesystem_escape", "host_filesystem_write"]
+    assert decision["metadata"]["unsafe_classes"] == ["filesystem"]
+    assert classification["sandbox"]["unsafe"] is True
+    assert classification["sandbox"]["mode"] == "danger-full-access"
+
+
+def test_policy_records_local_audit_evidence_for_unsafe_capability_block(tmp_path):
+    project, result = unsafe_policy_project(
+        tmp_path,
+        "python3 -c \"import socket; socket.socket()\"",
+    )
+
+    manifest = task_manifest(project, result)
+    assert manifest["safety_audit"]["deny_by_default"] is True
+    assert manifest["safety_audit"]["unsafe_decision_count"] == 1
+    assert manifest["safety_audit"]["unsafe_classes"] == ["network"]
+    report_text = (project / result["report"]).read_text(encoding="utf-8")
+    assert "## Safety Audit" in report_text
+    status = Harness(project).status_summary()
+    assert status["safety_audit"]["unsafe_decision_count"] == 1
+    decision_log = (project / ".engineering/state/decision-log.jsonl").read_text(encoding="utf-8")
+    assert "safety_audit" in decision_log
+
+
+def test_unsafe_capability_blocked_e2e(tmp_path):
+    project, result = unsafe_policy_project(
+        tmp_path,
+        "python3 -c \"from pathlib import Path; Path('unsafe-e2e-ran.txt').write_text('bad'); import requests\"",
+    )
+
+    assert result["status"] == "blocked"
+    assert not (project / "unsafe-e2e-ran.txt").exists()
+    manifest = task_manifest(project, result)
+    run = manifest["runs"][0]
+    assert run["status"] == "blocked"
+    assert run["safety_classification"]["unsafe_classes"] == ["network"]
+    assert policy_decision(manifest, "capability_policy", outcome="denied")["metadata"][
+        "unsafe_capabilities"
+    ] == ["network_access"]
+
+
 def test_policy_decision_schema_records_manual_approval_gate(tmp_path):
     project = tmp_path / "agent-project"
     project.mkdir()

@@ -21,6 +21,7 @@ from .executors import (
     ExecutorRegistry,
     ExecutorTaskCommand,
     ExecutorTaskContext,
+    classify_capabilities,
     default_executor_registry,
 )
 from .domain_frontend import (
@@ -79,7 +80,11 @@ FAILURE_ISOLATION_SUMMARY_LIMIT = 5
 ISOLATED_FAILURE_STATUSES = {"failed", "blocked"}
 EXECUTOR_WATCHDOG_FAILURE_STATUSES = {"timeout", "no_progress"}
 CAPABILITY_POLICY_SCHEMA_VERSION = 1
+COMMAND_SAFETY_CLASSIFICATION_SCHEMA_VERSION = 1
+SAFETY_AUDIT_SCHEMA_VERSION = 1
 UNSAFE_EXECUTOR_CAPABILITIES = {
+    "filesystem_escape",
+    "host_filesystem_write",
     "network",
     "network_access",
     "secret_access",
@@ -94,6 +99,8 @@ LOCAL_CAPABILITY_VOCABULARY = {
     "agent",
     "containerized_execution",
     "exit_code",
+    "filesystem_escape",
+    "host_filesystem_write",
     "local_dagger_cli",
     "local_process",
     "requires_explicit_configuration",
@@ -103,6 +110,91 @@ LOCAL_CAPABILITY_VOCABULARY = {
     *UNSAFE_EXECUTOR_CAPABILITIES,
 }
 COMMAND_CAPABILITY_REQUEST_FIELDS = ("requested_capabilities", "capabilities")
+UNSAFE_CAPABILITY_CLASSES = {
+    "filesystem": ("filesystem_escape", "host_filesystem_write"),
+    "network": ("network_access",),
+    "secret": ("secret_access",),
+    "deploy": ("deployment",),
+}
+SAFE_SANDBOX_MODES = {"workspace-write", "read-only"}
+UNSAFE_SANDBOX_MODES = {
+    "danger-full-access",
+    "full-access",
+    "full_auto",
+    "none",
+    "no-sandbox",
+    "off",
+    "unconfined",
+    "unsandboxed",
+}
+COMMAND_UNSAFE_OPERATION_PATTERNS: dict[str, tuple[tuple[str, re.Pattern[str]], ...]] = {
+    "network": (
+        ("network_url", re.compile(r"\b(?:https?|wss?|ftp)://", re.IGNORECASE)),
+        ("python_network_module", re.compile(r"\b(?:requests|urllib|httpx|aiohttp|socket)\b")),
+        ("network_cli", re.compile(r"\b(?:curl|wget|nc|netcat|telnet|ssh|scp|rsync)\b", re.IGNORECASE)),
+        ("git_remote_network", re.compile(r"\bgit\s+(?:clone|fetch|pull|push)\b", re.IGNORECASE)),
+    ),
+    "secret": (
+        (
+            "sensitive_env_name",
+            re.compile(
+                r"\b(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|PRIVATE_KEY|MNEMONIC|"
+                r"[A-Z0-9_]*(?:API_KEY|ACCESS_KEY)|"
+                r"[A-Z0-9_]+_(?:TOKEN|SECRET|PASSWORD|CREDENTIALS?)|"
+                r"(?:TOKEN|SECRET|PASSWORD|CREDENTIALS?)_[A-Z0-9_]+)\b",
+                re.IGNORECASE,
+            ),
+        ),
+        (
+            "secret_file_path",
+            re.compile(
+                r"(?:~|/home/[^\\s\"']+)/(?:\\.ssh|\\.aws|\\.config/gcloud)|"
+                r"\b(?:id_rsa|id_ed25519|\\.env)\b",
+                re.IGNORECASE,
+            ),
+        ),
+    ),
+    "filesystem": (
+        (
+            "destructive_filesystem",
+            re.compile(r"\b(?:rm\s+-rf\s+/|git\s+reset\s+--hard|git\s+checkout\s+--|git\s+clean\s+-fd)\b"),
+        ),
+        (
+            "host_filesystem_path",
+            re.compile(
+                r"(?:Path|open)\(\s*['\"](?:\.\./|/etc/|/root/|/home/|~/(?:\.ssh|\.aws)|\$HOME)|"
+                r"(?:>\s*|>>\s*|touch\s+|mkdir\s+|cp\s+.*\s+|mv\s+.*\s+)(?:\.\./|/etc/|/root/|~/(?:\.ssh|\.aws))",
+                re.IGNORECASE,
+            ),
+        ),
+    ),
+    "deploy": (
+        ("git_push", re.compile(r"\bgit\s+push\b", re.IGNORECASE)),
+        ("package_publish", re.compile(r"\b(?:npm\s+publish|pnpm\s+publish|yarn\s+npm\s+publish|twine\s+upload)\b", re.IGNORECASE)),
+        ("container_push", re.compile(r"\bdocker\s+push\b", re.IGNORECASE)),
+        ("infra_apply", re.compile(r"\b(?:kubectl\s+apply|helm\s+upgrade|terraform\s+apply|pulumi\s+up)\b", re.IGNORECASE)),
+        (
+            "production_deploy",
+            re.compile(
+                r"\b(?:vercel\s+--prod|netlify\s+deploy\s+--prod|firebase\s+deploy|"
+                r"deploy:mainnet|verify:mainnet|cast\s+send|--broadcast)\b",
+                re.IGNORECASE,
+            ),
+        ),
+    ),
+}
+SENSITIVE_ENV_NAME_PATTERN = (
+    r"[A-Z0-9_]*(?:API[-_]?KEY|ACCESS[-_]?KEY|TOKEN|SECRET|PASSWORD|PASS|"
+    r"PRIVATE[-_]?KEY|MNEMONIC|SEED(?:[-_]?PHRASE)?|CREDENTIALS?)[A-Z0-9_]*"
+)
+SENSITIVE_QUOTED_VALUE_RE = re.compile(
+    rf"(?i)\b({SENSITIVE_ENV_NAME_PATTERN})\b(\s*[:=]\s*)(['\"])(.*?)(\3)"
+)
+SENSITIVE_UNQUOTED_VALUE_RE = re.compile(
+    rf"(?i)\b({SENSITIVE_ENV_NAME_PATTERN})\b(\s*=\s*)([^\s\"'`]+)"
+)
+BEARER_TOKEN_RE = re.compile(r"(?i)\b(Bearer\s+)([A-Za-z0-9._~+/=-]{8,})")
+OPENAI_STYLE_TOKEN_RE = re.compile(r"\b(sk-[A-Za-z0-9][A-Za-z0-9_-]{8,})\b")
 APPROVAL_DECISION_KINDS = {
     "manual_approval": "manual",
     "agent_approval": "agent",
@@ -573,25 +665,24 @@ def slug_now() -> str:
 
 
 def redact(text: str) -> str:
-    redacted = text
-    for marker in ("PRIVATE_KEY=", "OPENAI_API_KEY=", "ANTHROPIC_API_KEY=", "MNEMONIC="):
-        cursor = 0
-        while True:
-            index = redacted.find(marker, cursor)
-            if index < 0:
-                break
-            token_start = index + len(marker)
-            if redacted.startswith("[REDACTED]", token_start):
-                cursor = token_start + len("[REDACTED]")
-                continue
-            after = redacted[token_start:]
-            token = after.split()[0] if after.split() else ""
-            if not token:
-                cursor = token_start
-                continue
-            redacted = redacted[:token_start] + "[REDACTED]" + redacted[token_start + len(token) :]
-            cursor = token_start + len("[REDACTED]")
+    redacted = str(text)
+    redacted = SENSITIVE_QUOTED_VALUE_RE.sub(r"\1\2\3[REDACTED]\5", redacted)
+    redacted = SENSITIVE_UNQUOTED_VALUE_RE.sub(r"\1\2[REDACTED]", redacted)
+    redacted = BEARER_TOKEN_RE.sub(r"\1[REDACTED]", redacted)
+    redacted = OPENAI_STYLE_TOKEN_RE.sub("[REDACTED]", redacted)
     return redacted
+
+
+def redact_evidence(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): redact_evidence(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_evidence(item) for item in value]
+    if isinstance(value, tuple):
+        return [redact_evidence(item) for item in value]
+    if isinstance(value, str):
+        return redact(value)
+    return value
 
 
 @dataclass(frozen=True)
@@ -7229,6 +7320,8 @@ continuation stage(s) were appended.
             "schema_version": CAPABILITY_POLICY_SCHEMA_VERSION,
             "known_capabilities": sorted(self._known_capability_names()),
             "unsafe_capabilities": sorted(UNSAFE_EXECUTOR_CAPABILITIES),
+            "capability_classifications": classify_capabilities(tuple(sorted(self._known_capability_names()))),
+            "deny_by_default_classes": sorted(UNSAFE_CAPABILITY_CLASSES),
             "decision_count": int(policy_summary.get("by_kind", {}).get("capability_policy", 0))
             if isinstance(policy_summary.get("by_kind"), dict)
             else 0,
@@ -7274,6 +7367,7 @@ continuation stage(s) were appended.
         )
         manifest_index = self.manifest_index_summary()
         capability_policy = self.capability_policy_summary(manifest_index)
+        safety_audit = manifest_index.get("safety_audit", {}) if isinstance(manifest_index, dict) else {}
         failure_isolation = self.latest_isolated_failures_summary()
         replay_guard = self.replay_guard_summary()
         next_task = self.next_task()
@@ -7288,7 +7382,7 @@ continuation stage(s) were appended.
             "roadmap": str(self.roadmap_path),
             "state": str(self.state_path),
             "milestones": list(milestones.values()),
-            "next_task": self.task_payload(next_task),
+            "next_task": redact_evidence(self.task_payload(next_task)),
             "checkpoint_readiness": checkpoint_readiness,
             "experience": experience,
             "domain_frontend": deepcopy(experience.get("decision_contract", {})),
@@ -7300,6 +7394,7 @@ continuation stage(s) were appended.
             "approval_queue": approval_queue,
             "manifest_index": manifest_index,
             "capability_policy": capability_policy,
+            "safety_audit": safety_audit,
             "failure_isolation": failure_isolation,
             "replay_guard": replay_guard,
             "daemon_supervisor_runtime": daemon_supervisor_runtime,
@@ -8449,6 +8544,7 @@ continuation stage(s) were appended.
             "latest_manifest": index["latest_manifest"],
             "status_counts": index["status_counts"],
             "policy_decision_summary": index.get("policy_decision_summary", {}),
+            "safety_audit": index.get("safety_audit", {}),
             "failure_isolation": index.get("failure_isolation", {}),
         }
 
@@ -8489,6 +8585,7 @@ continuation stage(s) were appended.
         latest_manifest = manifests[-1]["manifest_path"] if manifests else None
         latest_finished_at = max((str(item.get("finished_at") or "") for item in manifests), default="") or None
         policy_decision_summary = self._aggregate_policy_decision_summaries(manifests)
+        safety_audit = self._aggregate_safety_audit_summaries(manifests)
         failure_isolation = self._manifest_index_failure_isolation_summary(manifests)
         return {
             "schema_version": 1,
@@ -8502,6 +8599,7 @@ continuation stage(s) were appended.
             "manifest_count": len(manifests),
             "status_counts": dict(sorted(status_counts.items())),
             "policy_decision_summary": policy_decision_summary,
+            "safety_audit": safety_audit,
             "failure_isolation": failure_isolation,
             "latest_manifest": latest_manifest,
             "latest_by_task": dict(sorted(latest_by_task.items())),
@@ -8528,6 +8626,11 @@ continuation stage(s) were appended.
             if isinstance(manifest.get("policy_decision_summary"), dict)
             else self._policy_decision_summary(policy_decisions)
         )
+        safety_audit = (
+            manifest.get("safety_audit")
+            if isinstance(manifest.get("safety_audit"), dict)
+            else self._safety_audit_evidence(policy_decisions)
+        )
         failure_isolation = (
             self._compact_failure_isolation(manifest["failure_isolation"])
             if isinstance(manifest.get("failure_isolation"), dict)
@@ -8548,6 +8651,7 @@ continuation stage(s) were appended.
             "attempt": manifest.get("attempt"),
             "run_count": len(runs),
             "policy_decision_summary": policy_decision_summary,
+            "safety_audit": safety_audit,
             "runs": [
                 {
                     "phase": str(run.get("phase") or ""),
@@ -8578,6 +8682,30 @@ continuation stage(s) were appended.
         if failure_isolation is not None:
             entry["failure_isolation"] = failure_isolation
         return entry
+
+    def _aggregate_safety_audit_summaries(self, manifests: list[dict[str, Any]]) -> dict[str, Any]:
+        unsafe_decision_count = 0
+        unsafe_classes: set[str] = set()
+        unsafe_capabilities: set[str] = set()
+        latest: dict[str, Any] | None = None
+        for manifest in manifests:
+            audit = manifest.get("safety_audit") if isinstance(manifest.get("safety_audit"), dict) else {}
+            if not audit:
+                continue
+            unsafe_decision_count += int(audit.get("unsafe_decision_count", 0) or 0)
+            unsafe_classes.update(str(item) for item in audit.get("unsafe_classes", []) if str(item).strip())
+            unsafe_capabilities.update(str(item) for item in audit.get("unsafe_capabilities", []) if str(item).strip())
+            if int(audit.get("unsafe_decision_count", 0) or 0) > 0:
+                latest = deepcopy(audit)
+        return {
+            "schema_version": SAFETY_AUDIT_SCHEMA_VERSION,
+            "kind": "engineering-harness.safety-audit-summary",
+            "deny_by_default": True,
+            "unsafe_decision_count": unsafe_decision_count,
+            "unsafe_classes": sorted(unsafe_classes),
+            "unsafe_capabilities": sorted(unsafe_capabilities),
+            "latest_unsafe_audit": latest,
+        }
 
     def _aggregate_policy_decision_summaries(self, manifests: list[dict[str, Any]]) -> dict[str, Any]:
         by_kind: dict[str, int] = {}
@@ -9101,6 +9229,28 @@ continuation stage(s) were appended.
                     warnings.append(f"{location} command is not currently allowlisted: {reason}")
         if executor_metadata.input_mode == "prompt" and not str(item.get("prompt", "") or item.get("command", "")).strip():
             errors.append(f"{location} {executor} prompt is required")
+        safety_classification = self._command_safety_classification(
+            AcceptanceCommand(
+                name=str(item.get("name") or item.get("command") or item.get("prompt") or location),
+                command=str(item["command"]) if item.get("command") is not None else None,
+                prompt=str(item["prompt"]) if item.get("prompt") is not None else None,
+                timeout_seconds=int(item.get("timeout_seconds", self.default_timeout))
+                if str(item.get("timeout_seconds", self.default_timeout)).isdigit()
+                else self.default_timeout,
+                executor=executor,
+                sandbox=str(item.get("sandbox", "workspace-write")),
+                requested_capabilities=self._normalize_requested_capabilities(
+                    item.get(self._requested_capability_field(item))
+                    if self._requested_capability_field(item) is not None
+                    else None
+                ),
+            )
+        )
+        if safety_classification.get("unsafe"):
+            warnings.append(
+                f"{location} command declares or implies unsafe capability classes: "
+                f"{', '.join(safety_classification.get('unsafe_classes', []))}"
+            )
         try:
             if int(item.get("timeout_seconds", self.default_timeout)) <= 0:
                 errors.append(f"{location} timeout_seconds must be positive")
@@ -9136,6 +9286,7 @@ continuation stage(s) were appended.
                 payload["requested_capabilities"] = list(command.requested_capabilities)
             if command.user_experience_gate:
                 payload["user_experience_gate"] = deepcopy(command.user_experience_gate)
+            payload["safety_classification"] = self._command_safety_classification(command)
             return payload
 
         return {
@@ -9177,6 +9328,7 @@ continuation stage(s) were appended.
         live_matches: list[str] = []
         if command is not None:
             live_matches = self._live_policy_matches(command.command)
+            safety_classification = self._command_safety_classification(command)
             command_payload = {
                 "name": command.name,
                 "command": command.command,
@@ -9188,6 +9340,7 @@ continuation stage(s) were appended.
                 "executor": command.executor,
                 "requested_capabilities": list(command.requested_capabilities),
                 "user_experience_gate": deepcopy(command.user_experience_gate),
+                "safety_classification": safety_classification,
             }
         roadmap_path = (
             str(self.roadmap_path.relative_to(self.project_root))
@@ -9270,6 +9423,73 @@ continuation stage(s) were appended.
             for pattern in self.command_policy.get("requires_live_flag_patterns", [])
             if str(pattern) in stripped
         ]
+
+    def _command_safety_classification(self, command: AcceptanceCommand) -> dict[str, Any]:
+        command_text = command.command or ""
+        matches_by_class: dict[str, list[dict[str, Any]]] = {}
+        for class_name, patterns in COMMAND_UNSAFE_OPERATION_PATTERNS.items():
+            for pattern_id, pattern in patterns:
+                match = pattern.search(command_text)
+                if match is None:
+                    continue
+                start = max(0, match.start() - 40)
+                end = min(len(command_text), match.end() + 40)
+                matches_by_class.setdefault(class_name, []).append(
+                    {
+                        "id": pattern_id,
+                        "evidence": redact(command_text[start:end]),
+                    }
+                )
+
+        sandbox_mode = str(command.sandbox or "workspace-write").strip()
+        sandbox_key = sandbox_mode.lower()
+        sandbox: dict[str, Any] = {
+            "mode": sandbox_mode,
+            "allowed_modes": sorted(SAFE_SANDBOX_MODES),
+            "unsafe_modes": sorted(UNSAFE_SANDBOX_MODES),
+            "classification": "workspace" if sandbox_key in SAFE_SANDBOX_MODES else "unsafe",
+            "unsafe": False,
+            "reason": "sandbox mode is locally constrained",
+        }
+        if sandbox_key in UNSAFE_SANDBOX_MODES:
+            sandbox.update(
+                {
+                    "unsafe": True,
+                    "reason": f"sandbox mode `{sandbox_mode}` disables local isolation",
+                }
+            )
+        elif sandbox_key not in SAFE_SANDBOX_MODES:
+            sandbox.update(
+                {
+                    "unsafe": True,
+                    "reason": f"sandbox mode `{sandbox_mode}` is not in the local safety allowlist",
+                }
+            )
+        if sandbox["unsafe"]:
+            matches_by_class.setdefault("filesystem", []).append(
+                {
+                    "id": "unsafe_sandbox_mode",
+                    "evidence": sandbox["reason"],
+                }
+            )
+
+        unsafe_classes = sorted(matches_by_class)
+        detected_capabilities: list[str] = []
+        for class_name in unsafe_classes:
+            detected_capabilities.extend(UNSAFE_CAPABILITY_CLASSES.get(class_name, ()))
+        detected_capabilities = sorted(dict.fromkeys(detected_capabilities))
+        requested_capabilities = list(command.requested_capabilities)
+        return {
+            "schema_version": COMMAND_SAFETY_CLASSIFICATION_SCHEMA_VERSION,
+            "deny_by_default": True,
+            "unsafe": bool(unsafe_classes),
+            "unsafe_classes": unsafe_classes,
+            "detected_capabilities": detected_capabilities,
+            "requested_capabilities": requested_capabilities,
+            "requested_capability_classifications": classify_capabilities(requested_capabilities),
+            "matches": matches_by_class,
+            "sandbox": sandbox,
+        }
 
     def _command_policy_match(self, command: str | None, *, allow_live: bool = False) -> tuple[str, str, dict[str, Any]]:
         if command is None:
@@ -9387,34 +9607,63 @@ continuation stage(s) were appended.
     def _capability_policy_decision(self, policy_input: PolicyInput) -> PolicyDecision | None:
         command = policy_input.command or {}
         requested = self._normalize_requested_capabilities(command.get("requested_capabilities"))
-        if not requested:
-            return None
+        safety_classification = (
+            command.get("safety_classification")
+            if isinstance(command.get("safety_classification"), dict)
+            else {}
+        )
+        detected = self._normalize_requested_capabilities(safety_classification.get("detected_capabilities"))
         executor = policy_input.executor or {}
         executor_id = str(command.get("executor") or executor.get("id") or "")
+        if detected and not requested and executor.get("uses_command_policy"):
+            command_outcome, _reason, _metadata = self._command_policy_match(
+                command.get("command"),
+                allow_live=bool(policy_input.live.get("allow_live")),
+            )
+            if command_outcome == "denied":
+                detected = ()
+        if not requested and not detected:
+            return None
         executor_capabilities = [
             str(capability)
             for capability in executor.get("capabilities", [])
             if str(capability).strip()
         ]
         executor_capability_set = set(executor_capabilities)
-        unsafe = [capability for capability in requested if capability in UNSAFE_EXECUTOR_CAPABILITIES]
-        unsupported = [capability for capability in requested if capability not in executor_capability_set]
+        effective_requested = tuple(dict.fromkeys([*requested, *detected]))
+        unsafe = [capability for capability in effective_requested if capability in UNSAFE_EXECUTOR_CAPABILITIES]
+        unsupported = [
+            capability
+            for capability in requested
+            if capability not in executor_capability_set and capability not in unsafe
+        ]
         metadata = {
             "schema_version": CAPABILITY_POLICY_SCHEMA_VERSION,
             "requested_capabilities": list(requested),
+            "detected_capabilities": list(detected),
+            "effective_requested_capabilities": list(effective_requested),
             "executor_capabilities": executor_capabilities,
             "unsupported_capabilities": unsupported,
             "unsafe_capabilities": unsafe,
+            "unsafe_classes": safety_classification.get("unsafe_classes", []),
+            "operation_classification": safety_classification,
+            "executor_capability_classifications": executor.get("capability_classifications")
+            if isinstance(executor.get("capability_classifications"), dict)
+            else classify_capabilities(executor_capabilities),
             "known_capabilities": sorted(self._known_capability_names()),
         }
         if unsafe:
+            source = "detected command behavior" if detected else "requested executor capabilities"
             return PolicyDecision(
                 kind="capability_policy",
                 scope="command",
                 outcome="denied",
                 effect="deny",
                 severity="error",
-                reason=f"unsafe executor capabilities are not locally approvable: {', '.join(unsafe)}",
+                reason=(
+                    f"unsafe {source} is denied by default and is not locally approvable: "
+                    f"{', '.join(unsafe)}"
+                ),
                 policy_input=policy_input,
                 metadata=metadata,
             )
@@ -11207,6 +11456,7 @@ continuation stage(s) were appended.
             mutate_stale=persist,
         )
         policy_decision_summary = self._policy_decision_summary(policy_decisions)
+        safety_audit = self._safety_audit_evidence(policy_decisions)
         report_relative = str(report_path.relative_to(self.project_root))
         manifest_relative = str(manifest_path.relative_to(self.project_root))
         attempt = int(state.get("tasks", {}).get(task.id, {}).get("attempts", 0))
@@ -11255,6 +11505,7 @@ continuation stage(s) were appended.
             safety=safety_payload,
             policy_decisions=policy_decisions,
             policy_decision_summary=policy_decision_summary,
+            safety_audit=safety_audit,
             failure_isolation=failure_isolation,
             approval_queue=approval_queue_summary,
             replay_guard=replay_guard,
@@ -11278,6 +11529,7 @@ continuation stage(s) were appended.
             policy_input=policy_input.as_contract(),
             policy_decisions=policy_decisions,
             policy_decision_summary=policy_decision_summary,
+            safety_audit=safety_audit,
             failure_isolation=failure_isolation,
             approval_queue=approval_queue_summary,
             replay_guard=replay_guard,
@@ -11355,10 +11607,12 @@ continuation stage(s) were appended.
                 "dry_run": not persist,
                 "report": str(report_path.relative_to(self.project_root)),
                 "manifest": str(manifest_path.relative_to(self.project_root)),
+                "policy_decision_summary": policy_decision_summary,
+                "safety_audit": safety_audit,
             },
         )
         return {
-            "task": self.task_payload(task),
+            "task": redact_evidence(self.task_payload(task)),
             "status": status,
             "message": message,
             "report": str(report_path.relative_to(self.project_root)),
@@ -11367,7 +11621,7 @@ continuation stage(s) were appended.
                 self._command_run_result_payload(task, run)
                 for run in runs
             ],
-            "safety": safety or {},
+            "safety": redact_evidence(safety or {}),
             "approval_queue": approval_queue_summary,
             **({"replay_guard": replay_guard} if replay_guard is not None else {}),
             **({"failure_isolation": failure_isolation} if failure_isolation else {}),
@@ -11394,6 +11648,7 @@ continuation stage(s) were appended.
         policy_input: dict[str, Any] | None = None,
         policy_decisions: list[dict[str, Any]] | None = None,
         policy_decision_summary: dict[str, Any] | None = None,
+        safety_audit: dict[str, Any] | None = None,
         failure_isolation: dict[str, Any] | None = None,
         approval_queue: dict[str, Any] | None = None,
         replay_guard: dict[str, Any] | None = None,
@@ -11421,6 +11676,7 @@ continuation stage(s) were appended.
         policy_decision_summary_payload = policy_decision_summary or self._policy_decision_summary(
             policy_decision_payload
         )
+        safety_audit_payload = safety_audit or self._safety_audit_evidence(policy_decision_payload)
         payload = {
             "schema_version": 1,
             "kind": "engineering-harness.task-run-manifest",
@@ -11454,6 +11710,7 @@ continuation stage(s) were appended.
             "policy_input": policy_input_payload,
             "policy_decisions": policy_decision_payload,
             "policy_decision_summary": policy_decision_summary_payload,
+            "safety_audit": safety_audit_payload,
             "git": git_payload,
         }
         if approval_queue is not None:
@@ -11462,7 +11719,7 @@ continuation stage(s) were appended.
             payload["replay_guard"] = replay_guard
         if failure_isolation is not None:
             payload["failure_isolation"] = failure_isolation
-        write_json(manifest_path, payload)
+        write_json(manifest_path, redact_evidence(payload))
 
     def _command_run_manifest(self, task: HarnessTask, run: CommandRun) -> dict[str, Any]:
         metadata = self._configured_command_metadata(task, run)
@@ -11477,7 +11734,7 @@ continuation stage(s) were appended.
             "phase": run.phase,
             "name": run.name,
             "executor": metadata["executor"],
-            "command": run.command,
+            "command": redact(run.command),
             "status": run.status,
             "returncode": run.returncode,
             "started_at": run.started_at,
@@ -11488,6 +11745,7 @@ continuation stage(s) were appended.
             "model": metadata.get("model"),
             "sandbox": metadata.get("sandbox"),
             "requested_capabilities": metadata.get("requested_capabilities", []),
+            "safety_classification": self._command_run_safety_classification(task, run, metadata),
             "user_experience_gate": deepcopy(metadata.get("user_experience_gate", {})),
             "executor_capabilities": executor_metadata.get("capabilities", []) if isinstance(executor_metadata, dict) else [],
             "stdout": stdout_summary,
@@ -11510,6 +11768,7 @@ continuation stage(s) were appended.
             "returncode": manifest_payload["returncode"],
             "executor": manifest_payload["executor"],
             "requested_capabilities": manifest_payload.get("requested_capabilities", []),
+            "safety_classification": manifest_payload.get("safety_classification", {}),
             "user_experience_gate": manifest_payload.get("user_experience_gate", {}),
             "executor_capabilities": manifest_payload.get("executor_capabilities", []),
             "executor_metadata": manifest_payload.get("executor_metadata", {}),
@@ -11552,6 +11811,34 @@ continuation stage(s) were appended.
             if command.name == run.name and self._display_command(command, task) == run.command:
                 return self._executor_no_progress_timeout_seconds(run.phase, command)
         return self._executor_no_progress_timeout_seconds(run.phase)
+
+    def _command_run_safety_classification(
+        self,
+        task: HarnessTask,
+        run: CommandRun,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        for command in (*task.implementation, *task.repair, *task.acceptance, *task.e2e):
+            if command.name == run.name and self._display_command(command, task) == run.command:
+                return self._command_safety_classification(command)
+        return {
+            "schema_version": COMMAND_SAFETY_CLASSIFICATION_SCHEMA_VERSION,
+            "deny_by_default": True,
+            "unsafe": False,
+            "unsafe_classes": [],
+            "detected_capabilities": [],
+            "requested_capabilities": metadata.get("requested_capabilities", []),
+            "requested_capability_classifications": classify_capabilities(metadata.get("requested_capabilities", [])),
+            "matches": {},
+            "sandbox": {
+                "mode": metadata.get("sandbox"),
+                "allowed_modes": sorted(SAFE_SANDBOX_MODES),
+                "unsafe_modes": sorted(UNSAFE_SANDBOX_MODES),
+                "classification": "unknown",
+                "unsafe": False,
+                "reason": "command definition was not available",
+            },
+        }
 
     def _configured_command_metadata(self, task: HarnessTask, run: CommandRun) -> dict[str, Any]:
         for command in (*task.implementation, *task.repair, *task.acceptance, *task.e2e):
@@ -11736,6 +12023,50 @@ continuation stage(s) were appended.
             "status": decision.get("status"),
         }
         return {key: value for key, value in compact.items() if value is not None}
+
+    def _safety_audit_evidence(self, decisions: list[dict[str, Any]]) -> dict[str, Any]:
+        unsafe_decisions: list[dict[str, Any]] = []
+        unsafe_classes: set[str] = set()
+        unsafe_capabilities: set[str] = set()
+        for decision in decisions:
+            if not isinstance(decision, dict) or decision.get("kind") != "capability_policy":
+                continue
+            metadata = decision.get("metadata") if isinstance(decision.get("metadata"), dict) else {}
+            operation = (
+                metadata.get("operation_classification")
+                if isinstance(metadata.get("operation_classification"), dict)
+                else {}
+            )
+            classes = [str(item) for item in metadata.get("unsafe_classes", []) if str(item).strip()]
+            capabilities = [
+                str(item)
+                for item in metadata.get("unsafe_capabilities", [])
+                if str(item).strip()
+            ]
+            unsafe_classes.update(classes)
+            unsafe_capabilities.update(capabilities)
+            if decision.get("effect") in {"deny", "requires_approval"} or operation.get("unsafe"):
+                unsafe_decisions.append(
+                    {
+                        **self._compact_policy_decision(decision),
+                        "unsafe_classes": classes,
+                        "unsafe_capabilities": capabilities,
+                        "detected_capabilities": metadata.get("detected_capabilities", []),
+                        "requested_capabilities": metadata.get("requested_capabilities", []),
+                        "operation_classification": operation,
+                    }
+                )
+        return redact_evidence(
+            {
+                "schema_version": SAFETY_AUDIT_SCHEMA_VERSION,
+                "kind": "engineering-harness.safety-audit",
+                "deny_by_default": True,
+                "unsafe_decision_count": len(unsafe_decisions),
+                "unsafe_classes": sorted(unsafe_classes),
+                "unsafe_capabilities": sorted(unsafe_capabilities),
+                "unsafe_decisions": unsafe_decisions,
+            }
+        )
 
     def _failure_isolation_block(
         self,
@@ -12074,6 +12405,7 @@ continuation stage(s) were appended.
         safety: dict[str, Any] | None = None,
         policy_decisions: list[dict[str, Any]] | None = None,
         policy_decision_summary: dict[str, Any] | None = None,
+        safety_audit: dict[str, Any] | None = None,
         failure_isolation: dict[str, Any] | None = None,
         approval_queue: dict[str, Any] | None = None,
         replay_guard: dict[str, Any] | None = None,
@@ -12085,10 +12417,10 @@ continuation stage(s) were appended.
             f"- Status: `{status}`",
             f"- Project: `{self.roadmap.get('project', self.project_root.name)}`",
             f"- Milestone: `{task.milestone_id}` {task.milestone_title}",
-            f"- Task: {task.title}",
+            f"- Task: {redact(task.title)}",
             f"- Started: {started_at}",
             f"- Finished: {finished_at}",
-            f"- Message: {message}",
+            f"- Message: {redact(message)}",
             "",
             "## Task Runs",
             "",
@@ -12117,15 +12449,15 @@ continuation stage(s) were appended.
                     f"- Executor capabilities: `{json.dumps(executor_capabilities)}`",
                     "",
                     "```bash",
-                    run.command,
+                    redact(run.command),
                     "```",
                     "",
                 ]
             )
             if run.stdout:
-                lines.extend(["Stdout:", "", "```text", run.stdout, "```", ""])
+                lines.extend(["Stdout:", "", "```text", redact(run.stdout), "```", ""])
             if run.stderr:
-                lines.extend(["Stderr:", "", "```text", run.stderr, "```", ""])
+                lines.extend(["Stderr:", "", "```text", redact(run.stderr), "```", ""])
         if safety:
             git_preflight = safety.get("git_preflight", {})
             file_scope_guard = safety.get("file_scope_guard", {})
@@ -12168,7 +12500,7 @@ continuation stage(s) were appended.
             lines.extend(
                 [
                     "```json",
-                    json.dumps(approval_queue, indent=2, sort_keys=True),
+                    json.dumps(redact_evidence(approval_queue), indent=2, sort_keys=True),
                     "```",
                     "",
                 ]
@@ -12183,7 +12515,21 @@ continuation stage(s) were appended.
                     f"- Reused phases: `{len(reused_phases) if isinstance(reused_phases, list) else 0}`",
                     "",
                     "```json",
-                    json.dumps(replay_guard, indent=2, sort_keys=True),
+                    json.dumps(redact_evidence(replay_guard), indent=2, sort_keys=True),
+                    "```",
+                    "",
+                ]
+            )
+        if safety_audit is not None:
+            lines.extend(
+                [
+                    "## Safety Audit",
+                    "",
+                    f"- Unsafe decisions: `{safety_audit.get('unsafe_decision_count', 0)}`",
+                    f"- Unsafe classes: `{json.dumps(safety_audit.get('unsafe_classes', []), sort_keys=True)}`",
+                    "",
+                    "```json",
+                    json.dumps(redact_evidence(safety_audit), indent=2, sort_keys=True),
                     "```",
                     "",
                 ]
@@ -12200,7 +12546,7 @@ continuation stage(s) were appended.
                     f"- Local next action: {failure_isolation.get('local_next_action')}",
                     "",
                     "```json",
-                    json.dumps(failure_isolation, indent=2, sort_keys=True),
+                    json.dumps(redact_evidence(failure_isolation), indent=2, sort_keys=True),
                     "```",
                     "",
                 ]
@@ -12232,10 +12578,10 @@ continuation stage(s) were appended.
                 [
                     "```json",
                     json.dumps(
-                        {
+                        redact_evidence({
                             "policy_decision_summary": summary,
                             "policy_decisions": policy_decisions,
-                        },
+                        }),
                         indent=2,
                         sort_keys=True,
                     ),
