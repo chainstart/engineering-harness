@@ -26,6 +26,7 @@ The shared harness provides a common CLI:
 
 ```bash
 PYTHONPATH=src python3 -m engineering_harness.cli profiles
+PYTHONPATH=src python3 -m engineering_harness.cli plan-goal --project-root /home/biostar/work/projects/new-agent --profile python-agent --goal "Build a local autonomous report worker."
 PYTHONPATH=src python3 -m engineering_harness.cli scan --workspace /home/biostar/work
 PYTHONPATH=src python3 -m engineering_harness.cli status --project-root /home/biostar/work/projects/utopiai
 PYTHONPATH=src python3 -m engineering_harness.cli next --project-root /home/biostar/work/projects/utopiai
@@ -61,6 +62,36 @@ PYTHONPATH=src python3 -m engineering_harness.cli init \
   --profile python-agent \
   --name ara-math
 ```
+
+## Goal Roadmap Planner
+
+Generate a starter roadmap from a high-level goal without editing the target project:
+
+```bash
+PYTHONPATH=src python3 -m engineering_harness.cli plan-goal \
+  --project-root /home/biostar/work/projects/report-worker \
+  --name report-worker \
+  --profile python-agent \
+  --goal "Build an autonomous dashboard worker for local research artifacts."
+```
+
+Write `.engineering/roadmap.yaml` when the proposal is acceptable:
+
+```bash
+PYTHONPATH=src python3 -m engineering_harness.cli plan-goal \
+  --project-root /home/biostar/work/projects/report-worker \
+  --name report-worker \
+  --profile python-agent \
+  --goal-file docs/goal.txt \
+  --blueprint docs/blueprint.md \
+  --materialize
+```
+
+Use `--force` to replace an existing roadmap. The planner is deterministic and local-only: it
+normalizes the goal, derives an experience block, adds a baseline milestone, creates a continuation
+stage with implementation/repair/acceptance/e2e gates, and includes self-iteration guidance for
+autonomous profiles and goals. It does not call paid APIs, require accounts, perform live
+deployment, use private keys, or trade live funds.
 
 ## Safety
 

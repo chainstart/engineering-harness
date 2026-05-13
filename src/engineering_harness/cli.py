@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from .core import COMPLETED_STATUSES, Harness, discover_projects, init_project, project_from_root, slug_now, utc_now
+from .goal_planner import DEFAULT_GOAL_STAGE_COUNT, materialize_goal_roadmap, plan_goal_roadmap
 from .profiles import list_profiles
 
 
@@ -64,6 +65,57 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(f"Initialized {result['project']} with profile {result['profile']}")
         print(f"Roadmap: {result['roadmap']}")
     return 0
+
+
+def cmd_plan_goal(args: argparse.Namespace) -> int:
+    project_root = Path(args.project_root).resolve()
+    project_name = args.name or project_root.name
+    goal_text = _goal_text_from_args(args)
+    if args.materialize:
+        result = materialize_goal_roadmap(
+            project_root=project_root,
+            project_name=project_name,
+            profile=args.profile,
+            goal_text=goal_text,
+            blueprint_path=args.blueprint,
+            constraints=args.constraint,
+            desired_experience_kind=args.experience_kind,
+            stage_count=args.stage_count,
+            force=args.force,
+        )
+    else:
+        result = plan_goal_roadmap(
+            project_root=project_root,
+            project_name=project_name,
+            profile=args.profile,
+            goal_text=goal_text,
+            blueprint_path=args.blueprint,
+            constraints=args.constraint,
+            desired_experience_kind=args.experience_kind,
+            stage_count=args.stage_count,
+        )
+
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        action = "Materialized" if result["materialized"] else "Proposed"
+        print(f"{action} starter roadmap for {result['project']} ({result['profile']})")
+        print(f"Roadmap: {result['roadmap_path']}")
+        print(f"Experience: {result['experience'].get('kind')}")
+        milestones = result["roadmap"].get("milestones", [])
+        continuation = result["roadmap"].get("continuation", {})
+        stages = continuation.get("stages", []) if isinstance(continuation, dict) else []
+        print(f"Baseline milestones: {len(milestones)}")
+        print(f"Continuation stages: {len(stages)}")
+        if not result["materialized"]:
+            print("Run again with --materialize to write .engineering/roadmap.yaml.")
+    return 0
+
+
+def _goal_text_from_args(args: argparse.Namespace) -> str:
+    if args.goal_file:
+        return Path(args.goal_file).read_text(encoding="utf-8")
+    return str(args.goal or "")
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -584,6 +636,22 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--force", action="store_true")
     init.add_argument("--json", action="store_true")
     init.set_defaults(func=cmd_init)
+
+    plan_goal = subparsers.add_parser("plan-goal", help="Propose or materialize a starter roadmap from a high-level goal")
+    plan_goal.add_argument("--project-root", type=Path, required=True)
+    plan_goal.add_argument("--name", default=None)
+    plan_goal.add_argument("--profile", required=True)
+    goal_source = plan_goal.add_mutually_exclusive_group(required=True)
+    goal_source.add_argument("--goal", default=None)
+    goal_source.add_argument("--goal-file", type=Path, default=None)
+    plan_goal.add_argument("--blueprint", default=None)
+    plan_goal.add_argument("--constraint", action="append", default=None)
+    plan_goal.add_argument("--experience-kind", default=None)
+    plan_goal.add_argument("--stage-count", type=int, default=DEFAULT_GOAL_STAGE_COUNT)
+    plan_goal.add_argument("--materialize", action="store_true")
+    plan_goal.add_argument("--force", action="store_true")
+    plan_goal.add_argument("--json", action="store_true")
+    plan_goal.set_defaults(func=cmd_plan_goal)
 
     for name, help_text, func in [
         ("status", "Show project or workspace status", cmd_status),

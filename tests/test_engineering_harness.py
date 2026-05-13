@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from engineering_harness.goal_intake import GoalIntakeValidationError, normalize_goal_intake, validate_goal_intake
 from engineering_harness.core import Harness, discover_projects, init_project
 from engineering_harness.executors import (
     DAGGER_ENABLE_ENV,
@@ -124,6 +125,214 @@ def test_profiles_are_available():
     assert "evm-protocol" in profile_ids
     assert "python-agent" in profile_ids
     assert "trading-research" in profile_ids
+
+
+def test_goal_intake_normalizes_local_contract_shape():
+    contract = normalize_goal_intake(
+        project_name="  Autonomous Report Worker  ",
+        profile=" Python-Agent ",
+        goal_text="Build a local autonomous report generator.\nInclude deterministic tests.",
+        blueprint_path=Path("docs/blueprint.md"),
+        constraints=[" local only ", "no private keys", "local only"],
+        desired_experience_kind="dashboard",
+    )
+
+    assert contract["schema_version"] == 1
+    assert contract["kind"] == "engineering-harness.goal-intake.v1"
+    assert contract["project"] == {
+        "name": "Autonomous Report Worker",
+        "slug": "autonomous-report-worker",
+        "profile": "python-agent",
+    }
+    assert contract["goal"] == {
+        "text": "Build a local autonomous report generator. Include deterministic tests.",
+    }
+    assert contract["blueprint"] == {"path": "docs/blueprint.md", "provided": True}
+    assert contract["constraints"] == ["local only", "no private keys"]
+    assert contract["experience"] == {"kind": "dashboard", "provided": True}
+    assert contract["safety"]["mode"] == "local-only"
+    assert contract["safety"]["allow_live_services"] is False
+    assert contract["safety"]["blocked_requirements"] == []
+    assert contract["roadmap_seed"] == {
+        "project": "Autonomous Report Worker",
+        "profile": "python-agent",
+        "goal": "Build a local autonomous report generator. Include deterministic tests.",
+        "blueprint_path": "docs/blueprint.md",
+        "constraints": ["local only", "no private keys"],
+        "experience_kind": "dashboard",
+    }
+
+
+def test_goal_intake_validation_rejects_empty_goal():
+    result = validate_goal_intake(
+        project_name="agent-project",
+        profile="python-agent",
+        goal_text=" \n\t ",
+        constraints=[],
+        desired_experience_kind="api only",
+    )
+
+    assert result["status"] == "failed"
+    assert result["goal_intake"] is None
+    assert result["errors"] == ["`goal_text` is required"]
+
+    with pytest.raises(GoalIntakeValidationError) as excinfo:
+        normalize_goal_intake(project_name="agent-project", profile="python-agent", goal_text="")
+    assert excinfo.value.errors == ["`goal_text` is required"]
+
+
+@pytest.mark.parametrize(
+    ("goal_text", "constraints", "expected_match"),
+    [
+        ("Deploy to production after generating the roadmap.", [], "Deploy to production"),
+        ("Build a trading agent that can place live orders.", [], "place live orders"),
+        ("Build a local dashboard.", ["Must execute real trades during acceptance."], "execute real trades"),
+    ],
+)
+def test_goal_intake_rejects_unsafe_live_service_requirements(goal_text, constraints, expected_match):
+    result = validate_goal_intake(
+        project_name="agent-project",
+        profile="python-agent",
+        goal_text=goal_text,
+        constraints=constraints,
+        desired_experience_kind="dashboard",
+    )
+
+    assert result["status"] == "failed"
+    assert result["goal_intake"] is None
+    assert result["blocked_requirements"]
+    assert any(expected_match in item["match"] for item in result["blocked_requirements"])
+    assert any("unsafe live-service requirement" in error for error in result["errors"])
+
+
+def test_goal_intake_validation_rejects_nonlocal_blueprint_and_unknown_kind():
+    result = validate_goal_intake(
+        project_name="agent-project",
+        profile="python-agent",
+        goal_text="Build a local API planner.",
+        blueprint_path="https://example.com/blueprint.md",
+        desired_experience_kind="desktop-app",
+    )
+
+    assert result["status"] == "failed"
+    assert "`blueprint_path` must be a local path, not a URL" in result["errors"]
+    assert any("desired_experience_kind `desktop-app` is not supported" in error for error in result["errors"])
+
+
+def test_plan_goal_cli_proposes_starter_roadmap_without_writing(tmp_path, capsys):
+    project = tmp_path / "planner-project"
+
+    exit_code = cli_main(
+        [
+            "plan-goal",
+            "--project-root",
+            str(project),
+            "--name",
+            "Local Report CLI",
+            "--profile",
+            "python-agent",
+            "--goal",
+            "Build a CLI tool that generates local reports and documented command output.",
+            "--experience-kind",
+            "cli",
+            "--constraint",
+            "Keep examples deterministic.",
+            "--stage-count",
+            "3",
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    roadmap = payload["roadmap"]
+    stages = roadmap["continuation"]["stages"]
+
+    assert exit_code == 0
+    assert payload["status"] == "proposed"
+    assert payload["materialized"] is False
+    assert payload["stage_count"] == 3
+    assert not (project / ".engineering/roadmap.yaml").exists()
+    assert roadmap["project"] == "Local Report CLI"
+    assert roadmap["experience"]["kind"] == "cli-only"
+    assert roadmap["experience"]["derived"] is False
+    assert roadmap["goal"]["constraints"] == ["Keep examples deterministic."]
+    assert [stage["id"] for stage in stages] == [
+        "stage-1-local-slice",
+        "stage-2-experience-validation",
+        "stage-3-policy-evidence-observability",
+    ]
+    assert roadmap["milestones"][0]["id"] == "baseline"
+    assert roadmap["milestones"][0]["tasks"][0]["acceptance"]
+    for stage in stages:
+        task = stage["tasks"][0]
+        assert task["file_scope"]
+        assert task["implementation"][0]["executor"] == "codex"
+        assert task["repair"][0]["executor"] == "codex"
+        assert task["acceptance"][0]["command"].startswith("python3 ")
+        assert task["e2e"][0]["command"].startswith("python3 ")
+    assert payload["goal_intake"]["safety"]["allow_live_services"] is False
+
+
+def test_plan_goal_cli_materializes_goal_file_roadmap_and_validates(tmp_path, capsys):
+    project = tmp_path / "autonomous-worker"
+    project.mkdir()
+    goal_file = tmp_path / "goal.txt"
+    goal_file.write_text("Build an autonomous dashboard worker for local research artifacts.", encoding="utf-8")
+
+    exit_code = cli_main(
+        [
+            "plan-goal",
+            "--project-root",
+            str(project),
+            "--name",
+            "Autonomous Dashboard Worker",
+            "--profile",
+            "python-agent",
+            "--goal-file",
+            str(goal_file),
+            "--blueprint",
+            "docs/blueprint.md",
+            "--materialize",
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert payload["status"] == "materialized"
+    assert payload["materialized"] is True
+    assert roadmap["generated_by"] == "engineering-harness-goal-roadmap-planner"
+    assert roadmap["goal"]["blueprint"] == "docs/blueprint.md"
+    assert roadmap["experience"]["kind"] == "dashboard"
+    assert roadmap["continuation"]["enabled"] is True
+    assert [stage["id"] for stage in roadmap["continuation"]["stages"]] == [
+        "stage-1-local-slice",
+        "stage-2-experience-validation",
+        "stage-3-policy-evidence-observability",
+        "stage-4-unattended-drive-readiness",
+    ]
+    assert roadmap["continuation"]["stages"][0]["tasks"][0]["implementation"][0]["executor"] == "codex"
+    assert roadmap["self_iteration"]["enabled"] is True
+    assert Harness(project).validate_roadmap()["status"] == "passed"
+
+    assert cli_main(
+        [
+            "plan-goal",
+            "--project-root",
+            str(project),
+            "--name",
+            "Autonomous Dashboard Worker",
+            "--profile",
+            "python-agent",
+            "--goal-file",
+            str(goal_file),
+            "--materialize",
+            "--json",
+        ]
+    ) == 2
 
 
 def test_init_project_creates_config_and_policy(tmp_path):
@@ -1701,6 +1910,7 @@ def test_advance_materializes_next_continuation_stage(tmp_path):
                         "title": "Generated Test",
                         "file_scope": ["tests/**"],
                         "acceptance": [{"name": "ok", "command": "python3 -c \"print('ok')\""}],
+                        "e2e": [{"name": "journey ok", "command": "python3 -c \"print('e2e')\""}],
                     }
                 ],
             }
@@ -1714,6 +1924,7 @@ def test_advance_materializes_next_continuation_stage(tmp_path):
     updated = json.loads(roadmap_path.read_text(encoding="utf-8"))
     assert updated["milestones"][0]["id"] == "stage-a"
     assert updated["milestones"][0]["tasks"][0]["id"] == "generated-test"
+    assert updated["milestones"][0]["tasks"][0]["e2e"][0]["name"] == "journey ok"
 
 
 def test_validate_allows_materialized_continuation_stage_task_ids(tmp_path):

@@ -841,6 +841,450 @@
           "generated_at": "2026-05-13T04:36:25Z"
         }
       ]
+    },
+    {
+      "id": "e2e-user-simulation",
+      "title": "E2E and Real User Simulation",
+      "status": "planned",
+      "objective": "Make final-user experience validation a standard project completion gate.",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-13T04:37:39Z",
+      "tasks": [
+        {
+          "id": "browser-e2e-conventions",
+          "title": "Define browser, API, CLI, and multi-role E2E conventions",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 1,
+          "manual_approval_required": false,
+          "agent_approval_required": false,
+          "file_scope": [
+            "docs/**",
+            "src/engineering_harness/**",
+            "tests/**"
+          ],
+          "implementation": [],
+          "repair": [],
+          "acceptance": [
+            {
+              "name": "e2e convention tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T04:37:39Z"
+        },
+        {
+          "id": "e2e-artifact-index",
+          "title": "Capture screenshots, traces, logs, and accessibility reports as E2E artifacts",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 1,
+          "manual_approval_required": false,
+          "agent_approval_required": false,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [],
+          "repair": [],
+          "acceptance": [
+            {
+              "name": "e2e artifact tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T04:37:39Z"
+        }
+      ]
+    },
+    {
+      "id": "observability-dashboard",
+      "title": "Observability and Dashboard",
+      "status": "planned",
+      "objective": "Provide a visual surface for project state, task progress, policy gates, and E2E evidence.",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-13T04:37:48Z",
+      "tasks": [
+        {
+          "id": "dashboard-data-api",
+          "title": "Expose dashboard-ready JSON data from manifests and state",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 1,
+          "manual_approval_required": false,
+          "agent_approval_required": false,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [],
+          "repair": [],
+          "acceptance": [
+            {
+              "name": "dashboard data tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T04:37:48Z"
+        },
+        {
+          "id": "static-dashboard-viewer",
+          "title": "Add a local static dashboard viewer",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 1,
+          "manual_approval_required": false,
+          "agent_approval_required": false,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "templates/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [],
+          "repair": [],
+          "acceptance": [
+            {
+              "name": "dashboard tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T04:37:48Z"
+        }
+      ]
+    },
+    {
+      "id": "github-ci-integration",
+      "title": "GitHub and CI Integration",
+      "status": "planned",
+      "objective": "Connect local harness runs to repository-native CI, PR checks, and comments.",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-13T04:37:54Z",
+      "tasks": [
+        {
+          "id": "github-actions-generator",
+          "title": "Generate GitHub Actions workflows for validation, acceptance, and E2E",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 1,
+          "manual_approval_required": false,
+          "agent_approval_required": false,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**",
+            ".github/**"
+          ],
+          "implementation": [],
+          "repair": [],
+          "acceptance": [
+            {
+              "name": "ci generator tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T04:37:54Z"
+        },
+        {
+          "id": "pr-report-integration",
+          "title": "Design PR report publishing and CI failure mapping",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 1,
+          "manual_approval_required": false,
+          "agent_approval_required": false,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [],
+          "repair": [],
+          "acceptance": [
+            {
+              "name": "pr integration tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T04:37:54Z"
+        }
+      ]
+    },
+    {
+      "id": "intelligent-selection-caching",
+      "title": "Intelligent Task Selection and Caching",
+      "status": "planned",
+      "objective": "Use changed files, dependency scopes, caching, and concurrency to pick relevant work.",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-13T04:38:00Z",
+      "tasks": [
+        {
+          "id": "affected-task-selection",
+          "title": "Select tasks from changed files and file scopes",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 1,
+          "manual_approval_required": false,
+          "agent_approval_required": false,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [],
+          "repair": [],
+          "acceptance": [
+            {
+              "name": "affected task tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T04:38:00Z"
+        },
+        {
+          "id": "safe-result-cache",
+          "title": "Cache safe acceptance results by inputs and environment",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 1,
+          "manual_approval_required": false,
+          "agent_approval_required": false,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [],
+          "repair": [],
+          "acceptance": [
+            {
+              "name": "cache tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T04:38:00Z"
+        }
+      ]
+    },
+    {
+      "id": "production-hardening-release",
+      "title": "Production Hardening and Release",
+      "status": "planned",
+      "objective": "Make the harness stable enough for long-lived autonomous engineering projects.",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-13T04:38:06Z",
+      "tasks": [
+        {
+          "id": "schema-migrations",
+          "title": "Add schema migration and compatibility tests",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 1,
+          "manual_approval_required": false,
+          "agent_approval_required": false,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [],
+          "repair": [],
+          "acceptance": [
+            {
+              "name": "migration tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T04:38:06Z"
+        },
+        {
+          "id": "security-review-checklist",
+          "title": "Add security review checklist for execution, secrets, reports, and agents",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 1,
+          "manual_approval_required": false,
+          "agent_approval_required": false,
+          "file_scope": [
+            "docs/**",
+            "tests/**"
+          ],
+          "implementation": [],
+          "repair": [],
+          "acceptance": [
+            {
+              "name": "security docs smoke",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T04:38:06Z"
+        }
+      ]
+    },
+    {
+      "id": "goal-intake-roadmap-synthesis",
+      "title": "Goal Intake and Roadmap Synthesis",
+      "status": "planned",
+      "objective": "Let the harness turn a plain-language project goal into a safe, reviewable starter roadmap with experience, milestones, continuation stages, policy-aware tasks, and local E2E gates.",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-13T04:41:42Z",
+      "tasks": [
+        {
+          "id": "goal-intake-contract",
+          "title": "Define the local goal intake contract",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 2,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 1800,
+              "sandbox": "workspace-write",
+              "prompt": "Add a deterministic local goal intake contract for new autonomous projects. Define the accepted inputs (project name, profile, high-level goal text, optional blueprint path, constraints, and desired experience kind), the normalized output shape, and validation rules that reject empty goals and unsafe live-service requirements. Add focused tests and docs. Keep changes scoped to src/engineering_harness, tests, and docs; do not require external services or private credentials."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 1200,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing goal intake contract tests while preserving deterministic local behavior, actionable validation errors, and the no-external-services constraint."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "goal intake tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 600
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T04:41:42Z"
+        },
+        {
+          "id": "goal-roadmap-planner-cli",
+          "title": "Generate a starter roadmap from a high-level goal",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 2,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**",
+            "README.md"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 2400,
+              "sandbox": "workspace-write",
+              "prompt": "Implement a local `plan-goal` CLI workflow that can propose or materialize a starter `.engineering/roadmap.yaml` from a high-level goal. It should accept `--project-root`, `--name`, `--profile`, `--goal` or `--goal-file`, optional `--blueprint`, `--materialize`, `--force`, and `--json`. The generated roadmap must include an experience block or derived experience, a first baseline milestone with acceptance commands, at least one continuation stage with implementation/repair/acceptance/e2e gates, and self-iteration guidance when appropriate. Keep the planner deterministic and template-driven; do not call paid APIs, require accounts, or perform live deployments. Add tests, docs, and README usage."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 1200,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing goal roadmap planner CLI tests while keeping the generated roadmap valid, deterministic, local-first, and free of external account or live-service requirements."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "goal planner tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 600
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T04:41:42Z"
+        }
+      ]
+    },
+    {
+      "id": "goal-stage-decomposition",
+      "title": "Goal Stage Decomposition Engine",
+      "status": "planned",
+      "objective": "Extend high-level goal planning from a single starter slice into a deterministic, ordered backlog of safe autonomous stages with implementation, repair, acceptance, E2E, policy, and observability gates.",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-13T04:58:22Z",
+      "tasks": [
+        {
+          "id": "goal-stage-decomposer",
+          "title": "Generate a multi-stage autonomous backlog from a normalized goal",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 2,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 2400,
+              "sandbox": "workspace-write",
+              "prompt": "Implement deterministic goal stage decomposition for `plan-goal`. Use the normalized goal intake, profile, constraints, blueprint hint, and explicit or derived experience plan to render an ordered continuation backlog instead of only one generic starter stage. Keep the first local slice, then add focused stages for user/experience validation, policy/evidence/observability hardening, and unattended drive readiness where appropriate. Add a small bounded configuration such as `--stage-count` or equivalent internal default, keep output deterministic, and ensure every generated task has file_scope, codex implementation, codex repair, local acceptance commands, and E2E gates when user-visible behavior is affected. Add tests and docs; do not call paid APIs, require accounts, perform live deployments, use private keys, write to mainnet, or trade live funds."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 1200,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing goal stage decomposition tests while preserving deterministic local planning, safe bounded stage counts, valid roadmap output, and no external service requirements."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "goal decomposition tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 120
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T04:58:22Z"
+        }
+      ]
     }
   ],
   "continuation": {
@@ -1691,6 +2135,188 @@
               {
                 "name": "security docs smoke",
                 "command": "python3 -m pytest tests/test_engineering_harness.py -q"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "goal-intake-roadmap-synthesis",
+        "title": "Goal Intake and Roadmap Synthesis",
+        "objective": "Let the harness turn a plain-language project goal into a safe, reviewable starter roadmap with experience, milestones, continuation stages, policy-aware tasks, and local E2E gates.",
+        "tasks": [
+          {
+            "id": "goal-intake-contract",
+            "title": "Define the local goal intake contract",
+            "max_attempts": 2,
+            "max_task_iterations": 2,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 1800,
+                "sandbox": "workspace-write",
+                "prompt": "Add a deterministic local goal intake contract for new autonomous projects. Define the accepted inputs (project name, profile, high-level goal text, optional blueprint path, constraints, and desired experience kind), the normalized output shape, and validation rules that reject empty goals and unsafe live-service requirements. Add focused tests and docs. Keep changes scoped to src/engineering_harness, tests, and docs; do not require external services or private credentials."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 1200,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing goal intake contract tests while preserving deterministic local behavior, actionable validation errors, and the no-external-services constraint."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "goal intake tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 600
+              }
+            ],
+            "e2e": [
+              {
+                "name": "current roadmap still validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 120
+              }
+            ]
+          },
+          {
+            "id": "goal-roadmap-planner-cli",
+            "title": "Generate a starter roadmap from a high-level goal",
+            "max_attempts": 2,
+            "max_task_iterations": 2,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**",
+              "README.md"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 2400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement a local `plan-goal` CLI workflow that can propose or materialize a starter `.engineering/roadmap.yaml` from a high-level goal. It should accept `--project-root`, `--name`, `--profile`, `--goal` or `--goal-file`, optional `--blueprint`, `--materialize`, `--force`, and `--json`. The generated roadmap must include an experience block or derived experience, a first baseline milestone with acceptance commands, at least one continuation stage with implementation/repair/acceptance/e2e gates, and self-iteration guidance when appropriate. Keep the planner deterministic and template-driven; do not call paid APIs, require accounts, or perform live deployments. Add tests, docs, and README usage."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 1200,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing goal roadmap planner CLI tests while keeping the generated roadmap valid, deterministic, local-first, and free of external account or live-service requirements."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "goal planner tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 600
+              }
+            ],
+            "e2e": [
+              {
+                "name": "materialize a goal roadmap in tmp",
+                "command": "bin/engh plan-goal --project-root /tmp/engineering-harness-goal-smoke --name goal-smoke --profile python-agent --goal \"Build a CLI-only local research assistant that writes reports and has deterministic tests.\" --materialize --force --json",
+                "required": true,
+                "timeout_seconds": 120
+              },
+              {
+                "name": "generated goal roadmap validates",
+                "command": "bin/engh validate --project-root /tmp/engineering-harness-goal-smoke",
+                "required": true,
+                "timeout_seconds": 120
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "goal-stage-decomposition",
+        "title": "Goal Stage Decomposition Engine",
+        "objective": "Extend high-level goal planning from a single starter slice into a deterministic, ordered backlog of safe autonomous stages with implementation, repair, acceptance, E2E, policy, and observability gates.",
+        "generated_by": "engineering-harness-continuation",
+        "generated_at": "2026-05-13T04:57:14Z",
+        "tasks": [
+          {
+            "id": "goal-stage-decomposer",
+            "title": "Generate a multi-stage autonomous backlog from a normalized goal",
+            "max_attempts": 2,
+            "max_task_iterations": 2,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 2400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement deterministic goal stage decomposition for `plan-goal`. Use the normalized goal intake, profile, constraints, blueprint hint, and explicit or derived experience plan to render an ordered continuation backlog instead of only one generic starter stage. Keep the first local slice, then add focused stages for user/experience validation, policy/evidence/observability hardening, and unattended drive readiness where appropriate. Add a small bounded configuration such as `--stage-count` or equivalent internal default, keep output deterministic, and ensure every generated task has file_scope, codex implementation, codex repair, local acceptance commands, and E2E gates when user-visible behavior is affected. Add tests and docs; do not call paid APIs, require accounts, perform live deployments, use private keys, write to mainnet, or trade live funds."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 1200,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing goal stage decomposition tests while preserving deterministic local planning, safe bounded stage counts, valid roadmap output, and no external service requirements."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "goal decomposition tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 600
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 120
+              }
+            ],
+            "e2e": [
+              {
+                "name": "materialize decomposed goal roadmap in tmp",
+                "command": "bin/engh plan-goal --project-root /tmp/engineering-harness-decompose-smoke --name staged-goal-smoke --profile python-agent --goal \"Build a dashboard agent that summarizes local research runs and lets an operator inspect evidence.\" --materialize --force --json",
+                "required": true,
+                "timeout_seconds": 120
+              },
+              {
+                "name": "generated roadmap contains staged backlog",
+                "command": "python3 -c \"import json; from pathlib import Path; data=json.loads(Path('/tmp/engineering-harness-decompose-smoke/.engineering/roadmap.yaml').read_text()); stages=data.get('continuation', {}).get('stages', []); tasks=[task for stage in stages for task in stage.get('tasks', [])]; assert len(stages) >= 3; assert tasks; assert all(task.get('file_scope') and task.get('implementation') and task.get('repair') and task.get('acceptance') for task in tasks); assert any(task.get('e2e') for task in tasks); print('staged decomposition ok')\"",
+                "required": true,
+                "timeout_seconds": 120
+              },
+              {
+                "name": "generated staged roadmap validates",
+                "command": "bin/engh validate --project-root /tmp/engineering-harness-decompose-smoke",
+                "required": true,
+                "timeout_seconds": 120
               }
             ]
           }

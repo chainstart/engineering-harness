@@ -1583,6 +1583,7 @@ Rules:
                     "implementation": task.get("implementation", []),
                     "repair": task.get("repair", []),
                     "acceptance": acceptance,
+                    "e2e": task.get("e2e", []),
                     "generated_by": "engineering-harness-continuation",
                     "generated_at": utc_now(),
                 }

@@ -388,6 +388,7 @@ Acceptance:
 
 ## Roadmap Operating Model
 
+- Use `engh plan-goal` to create the first local starter roadmap from a high-level project goal.
 - Use explicit milestones for work that is already committed to the current repository.
 - Use `continuation.stages` for future planned work that can be materialized by `engh advance` or
   `engh drive --rolling`.
