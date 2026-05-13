@@ -5831,6 +5831,538 @@
             ]
           }
         ]
+      },
+      {
+        "id": "daemon-supervisor-runtime",
+        "title": "Add daemon-style long-running supervisor runtime controls",
+        "objective": "Close the gap that the harness is still a budgeted batch runner rather than a daemon/scheduler. Add local daemon-style supervisor primitives for long unattended operation: durable run windows, restartable loop metadata, idle/sleep/backoff decisions, operator-v",
+        "status": "planned",
+        "generated_by": "operator-gap-seed",
+        "generated_at": "2026-05-13T15:05:00Z",
+        "tasks": [
+          {
+            "id": "add-daemon-supervisor-runtime",
+            "title": "Add daemon-style long-running supervisor runtime controls",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Close the gap that the harness is still a budgeted batch runner rather than a daemon/scheduler. Add local daemon-style supervisor primitives for long unattended operation: durable run windows, restartable loop metadata, idle/sleep/backoff decisions, operator-visible stop reasons, and status/runtime-dashboard evidence. The implementation should remain CLI/local-file based, but model how a system supervisor would resume after process restart. Add deterministic tests using temporary projects that simulate restart and verify the supervisor can continue without duplicating completed work and records clear evidence.\nKeep the work local-only. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes unless the existing harness checkpoint path explicitly handles git in local tests."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests for this stage while preserving existing drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "daemon supervisor tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"daemon or supervisor_runtime or run_window or restartable_loop\"",
+                "required": true,
+                "timeout_seconds": 1500
+              },
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300
+              }
+            ],
+            "e2e": [
+              {
+                "name": "daemon supervisor local smoke",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k daemon_supervisor_runtime_smoke",
+                "required": true,
+                "timeout_seconds": 1500
+              },
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "automatic-checkpoint-boundaries",
+        "title": "Make automatic checkpoint boundaries reliable during rolling self-iteration",
+        "objective": "Close the gap where passed self-iteration tasks can defer git checkpoints because materialization or prior harness-owned changes are already dirty. Implement a safer automatic checkpoint boundary model that distinguishes harness-owned accumulated changes from ",
+        "status": "planned",
+        "generated_by": "operator-gap-seed",
+        "generated_at": "2026-05-13T15:05:00Z",
+        "tasks": [
+          {
+            "id": "harden-automatic-checkpoint-boundaries",
+            "title": "Make automatic checkpoint boundaries reliable during rolling self-iteration",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Close the gap where passed self-iteration tasks can defer git checkpoints because materialization or prior harness-owned changes are already dirty. Implement a safer automatic checkpoint boundary model that distinguishes harness-owned accumulated changes from unrelated user dirtiness, commits safe stage/task batches at deterministic boundaries, records checkpoint intent/result evidence, and keeps the worktree clean after successful bounded drives when allowed. Add tests that synthesize rolling self-iteration/materialization dirtiness and prove safe paths are committed while unrelated paths block without mutation.\nKeep the work local-only. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes unless the existing harness checkpoint path explicitly handles git in local tests."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests for this stage while preserving existing drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "automatic checkpoint tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"checkpoint and (automatic or boundary or deferred or clean)\"",
+                "required": true,
+                "timeout_seconds": 1500
+              },
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300
+              }
+            ],
+            "e2e": [
+              {
+                "name": "automatic checkpoint local e2e",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k automatic_checkpoint_boundary_e2e",
+                "required": true,
+                "timeout_seconds": 1500
+              },
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "multi-project-scheduler-hardening",
+        "title": "Harden multi-project and multi-agent workspace scheduling",
+        "objective": "Close the multi-project/multi-agent scheduling gap. Extend workspace dispatch beyond a simple fair queue with durable queue evidence, per-project lease ownership, retry/backoff summaries, priority/resource budget fields, starvation prevention, and status/runti",
+        "status": "planned",
+        "generated_by": "operator-gap-seed",
+        "generated_at": "2026-05-13T15:05:00Z",
+        "tasks": [
+          {
+            "id": "harden-multi-project-scheduler",
+            "title": "Harden multi-project and multi-agent workspace scheduling",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Close the multi-project/multi-agent scheduling gap. Extend workspace dispatch beyond a simple fair queue with durable queue evidence, per-project lease ownership, retry/backoff summaries, priority/resource budget fields, starvation prevention, and status/runtime-dashboard reporting. Add deterministic tests with multiple temporary projects proving fair selection, backoff, lease protection, skipped-project no-mutation behavior, and clear queue JSON for operators.\nKeep the work local-only. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes unless the existing harness checkpoint path explicitly handles git in local tests."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests for this stage while preserving existing drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "multi-project scheduler tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"workspace and (scheduler or lease or queue or backoff or priority)\"",
+                "required": true,
+                "timeout_seconds": 1500
+              },
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300
+              }
+            ],
+            "e2e": [
+              {
+                "name": "workspace scheduler e2e",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k multi_project_scheduler_e2e",
+                "required": true,
+                "timeout_seconds": 1500
+              },
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "domain-frontend-generator",
+        "title": "Add domain-aware default frontend planning and generation hooks",
+        "objective": "Close the frontend gap. Add a domain-aware frontend module that inspects a target project goal/task profile and emits a required frontend experience plan by default: dashboard-only for autonomous theorem provers, submission/review/return workflows for student ",
+        "status": "planned",
+        "generated_by": "operator-gap-seed",
+        "generated_at": "2026-05-13T15:05:00Z",
+        "tasks": [
+          {
+            "id": "add-domain-frontend-generator",
+            "title": "Add domain-aware default frontend planning and generation hooks",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Close the frontend gap. Add a domain-aware frontend module that inspects a target project goal/task profile and emits a required frontend experience plan by default: dashboard-only for autonomous theorem provers, submission/review/return workflows for student paper review systems, account/role flows for multi-role systems, and app-specific views for ordinary software. Expose this plan in roadmap generation, frontend-tasks, status/runtime-dashboard evidence, and tests. Keep generated artifacts local and minimal, but make the decision contract explicit and enforceable.\nKeep the work local-only. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes unless the existing harness checkpoint path explicitly handles git in local tests."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests for this stage while preserving existing drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "domain frontend generator tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"frontend and (domain or role or dashboard or submission or account)\"",
+                "required": true,
+                "timeout_seconds": 1500
+              },
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300
+              }
+            ],
+            "e2e": [
+              {
+                "name": "domain frontend planning e2e",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k domain_frontend_generator_e2e",
+                "required": true,
+                "timeout_seconds": 1500
+              },
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "browser-e2e-user-experience",
+        "title": "Add browser-style end-user E2E gates for generated applications",
+        "objective": "Close the real user experience E2E gap. Add local browser-style E2E planning and gating support for generated web/front-end projects: Playwright-compatible command templates when dependencies are present, fallback static/HTML smoke when not, route/form/role jo",
+        "status": "planned",
+        "generated_by": "operator-gap-seed",
+        "generated_at": "2026-05-13T15:05:00Z",
+        "tasks": [
+          {
+            "id": "add-browser-e2e-user-experience-gates",
+            "title": "Add browser-style end-user E2E gates for generated applications",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Close the real user experience E2E gap. Add local browser-style E2E planning and gating support for generated web/front-end projects: Playwright-compatible command templates when dependencies are present, fallback static/HTML smoke when not, route/form/role journey declarations, screenshot or DOM evidence paths, and status/dashboard reporting. Add deterministic tests that generate a small local frontend fixture, run the available E2E smoke without external services, and prove failures are reported as user-experience gates rather than generic command failures.\nKeep the work local-only. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes unless the existing harness checkpoint path explicitly handles git in local tests."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests for this stage while preserving existing drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "browser e2e tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"e2e and (browser or playwright or user_experience or journey)\"",
+                "required": true,
+                "timeout_seconds": 1500
+              },
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300
+              }
+            ],
+            "e2e": [
+              {
+                "name": "browser user journey smoke",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k browser_user_experience_e2e",
+                "required": true,
+                "timeout_seconds": 1500
+              },
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "production-safety-sandboxing",
+        "title": "Harden safety, sandboxing, network, and secret boundaries",
+        "objective": "Close the production-grade safety isolation gap. Strengthen capability policy and executor contracts with explicit network/secret/filesystem/deploy capability classifications, deny-by-default unsafe operations, local audit evidence, redaction of sensitive env-",
+        "status": "planned",
+        "generated_by": "operator-gap-seed",
+        "generated_at": "2026-05-13T15:05:00Z",
+        "tasks": [
+          {
+            "id": "harden-safety-sandboxing-and-secrets",
+            "title": "Harden safety, sandboxing, network, and secret boundaries",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Close the production-grade safety isolation gap. Strengthen capability policy and executor contracts with explicit network/secret/filesystem/deploy capability classifications, deny-by-default unsafe operations, local audit evidence, redaction of sensitive env-like values in reports, and tests for blocked unsafe commands. Preserve current local development workflows while making long unattended runs safer by requiring explicit approval or configuration for live/network/secret/deploy behavior.\nKeep the work local-only. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes unless the existing harness checkpoint path explicitly handles git in local tests."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests for this stage while preserving existing drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "safety sandbox tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"policy and (sandbox or secret or network or deploy or audit)\"",
+                "required": true,
+                "timeout_seconds": 1500
+              },
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300
+              }
+            ],
+            "e2e": [
+              {
+                "name": "unsafe capability blocked e2e",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k unsafe_capability_blocked_e2e",
+                "required": true,
+                "timeout_seconds": 1500
+              },
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "operator-observability-console",
+        "title": "Upgrade observability from status JSON to an operator console model",
+        "objective": "Close the observability gap. Add an operator-console data model and local generated console artifact or structured summary that aggregates run history, task timelines, queue state, failures, approvals, checkpoint readiness, goal-gap scorecards, replay-guard ev",
+        "status": "planned",
+        "generated_by": "operator-gap-seed",
+        "generated_at": "2026-05-13T15:05:00Z",
+        "tasks": [
+          {
+            "id": "add-operator-observability-console",
+            "title": "Upgrade observability from status JSON to an operator console model",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Close the observability gap. Add an operator-console data model and local generated console artifact or structured summary that aggregates run history, task timelines, queue state, failures, approvals, checkpoint readiness, goal-gap scorecards, replay-guard evidence, E2E artifacts, and recommended actions. Keep it static/local and compatible with current status JSON. Add tests that verify the console payload is bounded, deterministic, includes historical trends, and can be generated after a drive without requiring external services.\nKeep the work local-only. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes unless the existing harness checkpoint path explicitly handles git in local tests."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests for this stage while preserving existing drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "operator console tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"observability and (console or timeline or history or operator)\"",
+                "required": true,
+                "timeout_seconds": 1500
+              },
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300
+              }
+            ],
+            "e2e": [
+              {
+                "name": "operator console generation e2e",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k operator_observability_console_e2e",
+                "required": true,
+                "timeout_seconds": 1500
+              },
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300
+              }
+            ]
+          }
+        ]
       }
     ]
   },
