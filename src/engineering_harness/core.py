@@ -35,8 +35,11 @@ EXPERIENCE_KINDS = {"dashboard", "submission-review", "multi-role-app", "api-onl
 POLICY_INPUT_SCHEMA_VERSION = 1
 POLICY_DECISION_SCHEMA_VERSION = 1
 PHASE_STATE_SCHEMA_VERSION = 1
+REPLAY_GUARD_SCHEMA_VERSION = 1
+REPLAY_GUARD_SUMMARY_LIMIT = 25
 DRIVE_CONTROL_SCHEMA_VERSION = 2
 DRIVE_WATCHDOG_SCHEMA_VERSION = 1
+STALE_RUNNING_RECOVERY_SCHEMA_VERSION = 1
 DEFAULT_DRIVE_HEARTBEAT_STALE_SECONDS = 60 * 60
 DRIVE_WATCHDOG_STALE_SECONDS_ENV = "ENGINEERING_HARNESS_DRIVE_STALE_AFTER_SECONDS"
 EXECUTOR_NO_PROGRESS_SECONDS_ENV = "ENGINEERING_HARNESS_EXECUTOR_NO_PROGRESS_SECONDS"
@@ -44,6 +47,7 @@ EXECUTOR_NO_PROGRESS_PHASE_ENV_PREFIX = "ENGINEERING_HARNESS_EXECUTOR_NO_PROGRES
 EXECUTOR_WATCHDOG_ENABLED_ENV = "ENGINEERING_HARNESS_EXECUTOR_WATCHDOG_ENABLED"
 DEFAULT_EXECUTOR_NO_PROGRESS_SECONDS = 0
 MATERIALIZATION_CHECKPOINT_SCHEMA_VERSION = 1
+CHECKPOINT_READINESS_SCHEMA_VERSION = 1
 APPROVAL_QUEUE_SCHEMA_VERSION = 2
 APPROVAL_FINGERPRINT_SCHEMA_VERSION = 1
 DEFAULT_APPROVAL_LEASE_TTL_SECONDS = 60 * 60
@@ -51,6 +55,31 @@ FAILURE_ISOLATION_SCHEMA_VERSION = 1
 FAILURE_ISOLATION_SUMMARY_LIMIT = 5
 ISOLATED_FAILURE_STATUSES = {"failed", "blocked"}
 EXECUTOR_WATCHDOG_FAILURE_STATUSES = {"timeout", "no_progress"}
+CAPABILITY_POLICY_SCHEMA_VERSION = 1
+UNSAFE_EXECUTOR_CAPABILITIES = {
+    "network",
+    "network_access",
+    "secret_access",
+    "secrets",
+    "browser_automation",
+    "deployment",
+    "deploy",
+    "live_operations",
+    "live",
+}
+LOCAL_CAPABILITY_VOCABULARY = {
+    "agent",
+    "containerized_execution",
+    "exit_code",
+    "local_dagger_cli",
+    "local_process",
+    "requires_explicit_configuration",
+    "stderr",
+    "stdout",
+    "workspace_write",
+    *UNSAFE_EXECUTOR_CAPABILITIES,
+}
+COMMAND_CAPABILITY_REQUEST_FIELDS = ("requested_capabilities", "capabilities")
 APPROVAL_DECISION_KINDS = {
     "manual_approval": "manual",
     "agent_approval": "agent",
@@ -210,7 +239,9 @@ EXPERIENCE_KEYWORDS: dict[str, tuple[str, ...]] = {
 FRONTEND_TASK_MILESTONE_ID = "frontend-visualization"
 FRONTEND_TASK_GENERATOR = "engineering-harness-frontend-task-generator"
 SELF_ITERATION_CONTEXT_SCHEMA_VERSION = 1
+SELF_ITERATION_ASSESSMENT_SCHEMA_VERSION = 1
 GOAL_GAP_RETROSPECTIVE_SCHEMA_VERSION = 1
+GOAL_GAP_SCORECARD_SCHEMA_VERSION = 1
 RUNTIME_DASHBOARD_SCHEMA_VERSION = 1
 WORKSPACE_DISPATCH_LEASE_SCHEMA_VERSION = 1
 WORKSPACE_DISPATCH_LEASE_DIRNAME = "workspace-dispatch-lease"
@@ -234,7 +265,22 @@ SELF_ITERATION_CONTEXT_LIMITS = {
     "manifest_run_count": 8,
     "message_chars": 500,
     "git_commit_count": 8,
+    "goal_gap_scorecard_evidence_paths": 8,
+    "goal_gap_scorecard_themes": 4,
 }
+GOAL_GAP_SCORECARD_CATEGORY_ORDER = (
+    "stuck_detection",
+    "stale_running_recovery",
+    "checkpoint_boundaries",
+    "failure_isolation",
+    "duplicate_plan_guard",
+    "goal_gap_retrospective",
+    "runtime_dashboard",
+    "approval_capability_policy_safety",
+    "workspace_dispatch_fairness_backoff",
+    "real_e2e_evidence",
+)
+GOAL_GAP_SCORECARD_STATUS_ORDER = ("complete", "partial", "missing", "blocked")
 SELF_ITERATION_DOC_EXTENSIONS = {".md", ".markdown", ".rst", ".txt"}
 SELF_ITERATION_TEST_EXTENSIONS = {".py", ".js", ".jsx", ".ts", ".tsx", ".sh"}
 SELF_ITERATION_SOURCE_EXTENSIONS = {
@@ -510,6 +556,7 @@ class AcceptanceCommand:
     model: str | None = None
     sandbox: str = "workspace-write"
     no_progress_timeout_seconds: int | None = None
+    requested_capabilities: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -954,6 +1001,9 @@ class Harness:
         control.setdefault("last_progress_message", None)
         control.setdefault("stale_reason", None)
         control.setdefault("stale_detected_at", None)
+        control.setdefault("stale_running_recovery", None)
+        control.setdefault("stale_running_preflight", None)
+        control.setdefault("stale_running_block", None)
         history = control.setdefault("history", [])
         if not isinstance(history, list):
             control["history"] = []
@@ -981,14 +1031,8 @@ class Harness:
                 stale = True
                 reason = str(control.get("stale_reason") or "stale")
                 message = f"drive is stale: {reason}"
-            elif pid is None:
-                stale = True
-                reason = "missing_pid"
-                message = "running drive has no recorded pid"
-            elif pid_alive is False:
-                stale = True
-                reason = "pid_gone"
-                message = f"recorded drive process is not running: pid {pid}"
+            elif heartbeat_dt is not None and heartbeat_age_seconds is not None and heartbeat_age_seconds <= threshold:
+                message = "drive heartbeat is fresh"
             elif heartbeat_dt is None:
                 stale = True
                 reason = "missing_heartbeat"
@@ -1011,10 +1055,201 @@ class Harness:
             "heartbeat_age_seconds": heartbeat_age_seconds,
         }
 
+    def _stale_running_recovery_follow_up(self) -> str:
+        return (
+            "Inspect the previous drive task state, latest report, and local worktree for partial "
+            "changes before treating recovered work as complete."
+        )
+
+    def _stale_running_heartbeat_is_stale(self, watchdog: dict[str, Any]) -> bool:
+        heartbeat_age_seconds = watchdog.get("heartbeat_age_seconds")
+        threshold = int(watchdog.get("threshold_seconds", self._drive_watchdog_stale_after_seconds()) or 0)
+        if heartbeat_age_seconds is None:
+            return watchdog.get("heartbeat_at") is None
+        try:
+            return int(heartbeat_age_seconds) > threshold
+        except (TypeError, ValueError):
+            return False
+
+    def _stale_running_recovery_reason(self, watchdog: dict[str, Any]) -> str:
+        pid = self._coerce_pid(watchdog.get("pid"))
+        heartbeat_missing = watchdog.get("heartbeat_at") is None
+        pid_reason = "missing_pid" if pid is None else "dead_pid"
+        heartbeat_reason = "missing_heartbeat" if heartbeat_missing else "stale_heartbeat"
+        return f"{pid_reason}_and_{heartbeat_reason}"
+
+    def _stale_running_preflight_from_control(
+        self,
+        control: dict[str, Any],
+        *,
+        watchdog: dict[str, Any] | None = None,
+        reason: str = "drive_preflight",
+    ) -> dict[str, Any]:
+        watchdog_payload = watchdog or self._drive_watchdog_status(control)
+        status = str(control.get("status", "idle"))
+        active = bool(control.get("active", False))
+        checked_at = str(watchdog_payload.get("checked_at") or utc_now())
+        pid = self._coerce_pid(watchdog_payload.get("pid"))
+        pid_alive = watchdog_payload.get("pid_alive")
+        heartbeat_stale = self._stale_running_heartbeat_is_stale(watchdog_payload)
+        heartbeat_fresh = watchdog_payload.get("heartbeat_at") is not None and not heartbeat_stale
+        payload: dict[str, Any] = {
+            "schema_version": STALE_RUNNING_RECOVERY_SCHEMA_VERSION,
+            "kind": "engineering-harness.stale-running-recovery-preflight",
+            "status": "not_needed",
+            "reason": "not_running",
+            "message": "drive control is not in a running state",
+            "checked_at": checked_at,
+            "previous_status": status,
+            "previous_active": active,
+            "previous_pid": pid,
+            "pid_alive": pid_alive,
+            "heartbeat_at": watchdog_payload.get("heartbeat_at"),
+            "heartbeat_age_seconds": watchdog_payload.get("heartbeat_age_seconds"),
+            "threshold_seconds": watchdog_payload.get("threshold_seconds"),
+            "watchdog_status": watchdog_payload.get("status"),
+            "watchdog_reason": watchdog_payload.get("reason"),
+            "preflight_reason": reason,
+            "recoverable": False,
+            "blocking": False,
+            "recommended_follow_up": self._stale_running_recovery_follow_up(),
+        }
+        if status != "running" and not active:
+            return payload
+
+        if heartbeat_stale and (pid is None or pid_alive is False):
+            recovery_reason = self._stale_running_recovery_reason(watchdog_payload)
+            payload.update(
+                {
+                    "status": "recoverable",
+                    "reason": recovery_reason,
+                    "message": (
+                        "running drive control can be recovered because the heartbeat is stale "
+                        "and the recorded process is absent or dead"
+                    ),
+                    "recoverable": True,
+                    "blocking": False,
+                }
+            )
+            return payload
+
+        if heartbeat_fresh:
+            payload.update(
+                {
+                    "status": "in_progress",
+                    "reason": "heartbeat_fresh",
+                    "message": "running drive control is protected by a fresh heartbeat",
+                    "recoverable": False,
+                    "blocking": False,
+                }
+            )
+            return payload
+
+        if pid_alive is True:
+            block_reason = "pid_alive"
+            message = "running drive control is still owned by a live process"
+        else:
+            block_reason = "running_state_not_recoverable"
+            message = "running drive control does not meet stale recovery requirements"
+        payload.update(
+            {
+                "status": "blocked",
+                "reason": block_reason,
+                "message": message,
+                "recoverable": False,
+                "blocking": True,
+            }
+        )
+        return payload
+
+    def _recover_stale_running_in_state(
+        self,
+        state: dict[str, Any],
+        control: dict[str, Any],
+        preflight: dict[str, Any],
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        from_status = str(control.get("status", "running"))
+        recovered_at = utc_now()
+        evidence = {
+            **deepcopy(preflight),
+            "kind": "engineering-harness.stale-running-recovery",
+            "status": "recovered",
+            "reason": preflight.get("reason"),
+            "message": "stale running drive state recovered to idle before selecting new work",
+            "recovered_at": recovered_at,
+            "preflight_reason": reason,
+            "recoverable": True,
+            "blocking": False,
+        }
+        control.update(
+            {
+                "status": "idle",
+                "active": False,
+                "pause_requested": False,
+                "cancel_requested": False,
+                "pid": None,
+                "current_activity": "stale-running-recovery",
+                "current_task": None,
+                "executor_watchdog": None,
+                "last_progress_message": evidence["message"],
+                "stale_reason": None,
+                "stale_detected_at": None,
+                "stale_running_recovery": evidence,
+                "stale_running_preflight": evidence,
+                "stale_running_block": None,
+                "last_drive_status": "recovered",
+                "last_drive_message": evidence["message"],
+                "recovered_at": recovered_at,
+                "reason": reason,
+                "updated_at": recovered_at,
+            }
+        )
+        self._record_drive_control_event(
+            state,
+            command="stale-running-recovery",
+            from_status=from_status,
+            to_status="idle",
+            reason=str(evidence.get("reason") or "stale_running_recovery"),
+        )
+        self.save_state(state)
+        append_jsonl(
+            self.decision_log_path,
+            {
+                "at": recovered_at,
+                "event": "stale_running_recovery",
+                "status": "recovered",
+                "reason": evidence.get("reason"),
+                "previous_pid": evidence.get("previous_pid"),
+                "pid_alive": evidence.get("pid_alive"),
+                "heartbeat_at": evidence.get("heartbeat_at"),
+                "heartbeat_age_seconds": evidence.get("heartbeat_age_seconds"),
+                "threshold_seconds": evidence.get("threshold_seconds"),
+                "recommended_follow_up": evidence.get("recommended_follow_up"),
+            },
+        )
+        return deepcopy(evidence)
+
+    def recover_stale_running_preflight(self, *, reason: str = "drive_preflight") -> dict[str, Any]:
+        state = self.load_state()
+        control = self._drive_control(state)
+        preflight = self._stale_running_preflight_from_control(control, reason=reason)
+        if preflight.get("status") != "recoverable":
+            return preflight
+        return self._recover_stale_running_in_state(state, control, preflight, reason=reason)
+
     def _drive_control_summary_from_state(self, state: dict[str, Any]) -> dict[str, Any]:
         control = deepcopy(self._drive_control(state))
         watchdog = self._drive_watchdog_status(control)
+        preflight = self._stale_running_preflight_from_control(
+            control,
+            watchdog=watchdog,
+            reason="status_summary",
+        )
         control["watchdog"] = watchdog
+        control["stale_running_preflight"] = preflight
+        control["stale_running_block"] = preflight if preflight.get("status") == "blocked" else None
         control["stale"] = bool(watchdog.get("stale"))
         if watchdog.get("stale"):
             control["status"] = "stale"
@@ -1185,14 +1420,36 @@ class Harness:
             )
         elif command == "resume":
             watchdog = self._drive_watchdog_status(control)
-            if from_status == "running" and bool(control.get("active")) and not watchdog.get("stale"):
+            preflight = self._stale_running_preflight_from_control(
+                control,
+                watchdog=watchdog,
+                reason="manual_resume",
+            )
+            if from_status == "running" and bool(control.get("active")) and preflight.get("status") == "recoverable":
+                recovery = self._recover_stale_running_in_state(
+                    state,
+                    control,
+                    preflight,
+                    reason="manual_resume",
+                )
+                return {
+                    "status": "idle",
+                    "message": "stale running drive controls recovered; run `drive` to continue",
+                    "drive_control": self._drive_control_summary_from_state(self.load_state()),
+                    "stale_running_recovery": recovery,
+                    "stale_running_preflight": recovery,
+                }
+            if from_status == "running" and bool(control.get("active")):
                 summary = deepcopy(control)
                 summary["watchdog"] = watchdog
-                summary["stale"] = False
+                summary["stale"] = bool(watchdog.get("stale"))
+                summary["stale_running_preflight"] = preflight
+                summary["stale_running_block"] = preflight if preflight.get("status") == "blocked" else None
                 return {
                     "status": "running",
-                    "message": "drive is already running; resume did not clear active state",
+                    "message": f"drive is already running; resume did not clear active state: {preflight.get('reason')}",
                     "drive_control": summary,
+                    "stale_running_preflight": preflight,
                 }
             message = "drive controls cleared; run `drive` to continue"
             control.update(
@@ -1255,6 +1512,24 @@ class Harness:
         control = self._drive_control(state)
         from_status = str(control.get("status", "idle"))
         watchdog = self._drive_watchdog_status(control)
+        preflight = self._stale_running_preflight_from_control(control, watchdog=watchdog, reason=reason)
+        recovery: dict[str, Any] | None = None
+        if preflight.get("status") == "recoverable":
+            recovery = self._recover_stale_running_in_state(state, control, preflight, reason=reason)
+            from_status = str(control.get("status", "idle"))
+            watchdog = self._drive_watchdog_status(control)
+            preflight = recovery
+        elif preflight.get("status") == "blocked":
+            summary = self._drive_control_summary_from_state(state)
+            summary["stale_running_preflight"] = preflight
+            summary["stale_running_block"] = preflight
+            return {
+                "started": False,
+                "status": str(summary.get("status") or from_status or "running"),
+                "message": f"drive is already running; stale recovery blocked: {preflight.get('reason')}",
+                "drive_control": summary,
+                "stale_running_preflight": preflight,
+            }
         if (from_status == "running" or bool(control.get("active"))) and not watchdog.get("stale"):
             summary = deepcopy(control)
             summary["watchdog"] = watchdog
@@ -1264,16 +1539,16 @@ class Harness:
                 "status": "running",
                 "message": "drive is already running; inspect status or wait for the active drive to finish",
                 "drive_control": summary,
+                "stale_running_preflight": preflight,
             }
         if from_status == "stale" or watchdog.get("stale"):
-            message = self._mark_drive_stale(state, control, watchdog=watchdog)
-            self.save_state(state)
             summary = self._drive_control_summary_from_state(state)
             return {
                 "started": False,
                 "status": "stale",
-                "message": f"{message}; run `resume` to clear stale drive state before starting another drive",
+                "message": "stale drive state must be reviewed before starting another drive",
                 "drive_control": summary,
+                "stale_running_preflight": summary.get("stale_running_preflight"),
             }
         if bool(control.get("pause_requested")) or from_status == "paused":
             return {
@@ -1281,6 +1556,7 @@ class Harness:
                 "status": "paused",
                 "message": "drive is paused; run `resume` before starting another drive",
                 "drive_control": self._drive_control_summary_from_state(state),
+                "stale_running_preflight": preflight,
             }
         if bool(control.get("cancel_requested")) or from_status == "cancelled":
             return {
@@ -1288,6 +1564,7 @@ class Harness:
                 "status": "cancelled",
                 "message": "drive is cancelled; run `resume` to clear the cancellation before driving again",
                 "drive_control": self._drive_control_summary_from_state(state),
+                "stale_running_preflight": preflight,
             }
         now = utc_now()
         control.update(
@@ -1324,6 +1601,8 @@ class Harness:
             "status": "running",
             "message": "drive started",
             "drive_control": self._drive_control_summary_from_state(state),
+            "stale_running_recovery": recovery,
+            "stale_running_preflight": preflight,
         }
 
     def finish_drive(self, *, status: str, message: str) -> dict[str, Any]:
@@ -1602,6 +1881,7 @@ class Harness:
             model = command.model
             sandbox = command.sandbox
             executor = command.executor
+            requested_capabilities = list(command.requested_capabilities)
         else:
             name = str(command.get("name") or "")
             command_text = command.get("command")
@@ -1612,6 +1892,7 @@ class Harness:
             model = command.get("model")
             sandbox = command.get("sandbox")
             executor = str(command.get("executor") or "")
+            requested_capabilities = self._normalize_requested_capabilities(command.get("requested_capabilities"))
         return {
             "name": name,
             "executor": executor,
@@ -1620,6 +1901,7 @@ class Harness:
             "no_progress_timeout_seconds": no_progress_timeout_seconds,
             "model": model,
             "sandbox": sandbox,
+            "requested_capabilities": list(requested_capabilities),
             "command_sha256": self._approval_text_digest(command_text),
             "prompt_sha256": self._approval_text_digest(prompt),
             "has_command": command_text is not None,
@@ -2344,9 +2626,291 @@ class Harness:
             "executor_watchdog": run.result_metadata.get("watchdog") if isinstance(run.result_metadata, dict) else None,
         }
 
+    def _replay_guard_is_enabled_for_task_state(self, task_state: dict[str, Any]) -> bool:
+        status = str(task_state.get("status", "") or "").strip()
+        if status in COMPLETED_STATUSES or status in ISOLATED_FAILURE_STATUSES or status in BLOCKED_STATUSES:
+            return False
+        if task_state.get("last_finished_at"):
+            return False
+        return True
+
+    def _phase_replay_guard_decision(
+        self,
+        state: dict[str, Any],
+        task: HarnessTask,
+        *,
+        phase: str,
+        commands: tuple[AcceptanceCommand, ...],
+    ) -> dict[str, Any]:
+        task_state = state.setdefault("tasks", {}).setdefault(task.id, {})
+        fingerprint = self._command_group_fingerprint(commands)
+        payload: dict[str, Any] = {
+            "schema_version": REPLAY_GUARD_SCHEMA_VERSION,
+            "kind": "engineering-harness.phase-replay-guard",
+            "task_id": task.id,
+            "milestone_id": task.milestone_id,
+            "phase": phase,
+            "status": "not_reused",
+            "action": "run",
+            "reason": "missing_passed_phase",
+            "command_count": len(commands),
+            "command_group_fingerprint": fingerprint,
+            "checked_at": utc_now(),
+        }
+        if not commands:
+            payload["reason"] = "empty_command_group"
+            return payload
+        if not self._replay_guard_is_enabled_for_task_state(task_state):
+            payload["reason"] = "task_status_requires_fresh_execution"
+            payload["task_status"] = task_state.get("status")
+            return payload
+
+        latest_for_phase: dict[str, Any] | None = None
+        latest_same_fingerprint: dict[str, Any] | None = None
+        history = task_state.get("phase_history", [])
+        if not isinstance(history, list):
+            history = []
+        phase_states = task_state.get("phase_states")
+        phase_state = (
+            phase_states.get(phase)
+            if isinstance(phase_states, dict) and isinstance(phase_states.get(phase), dict)
+            else None
+        )
+        if phase_state is not None:
+            phase_state_sequence = phase_state.get("sequence")
+            has_phase_state = any(
+                isinstance(item, dict)
+                and item.get("phase") == phase
+                and item.get("sequence") == phase_state_sequence
+                for item in history
+            )
+            if not has_phase_state:
+                history = [*history, phase_state]
+        for item in reversed(history):
+            if not isinstance(item, dict) or item.get("phase") != phase:
+                continue
+            latest_for_phase = latest_for_phase or item
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            item_fingerprint = str(metadata.get("command_group_fingerprint") or "")
+            if item_fingerprint == fingerprint:
+                latest_same_fingerprint = item
+                if item.get("status") == "passed" and item.get("event") in {"after", "reused"}:
+                    payload.update(
+                        {
+                            "status": "reused",
+                            "action": "reuse",
+                            "reason": "passed_phase_for_current_definition",
+                            "source_sequence": item.get("sequence"),
+                            "source_event": item.get("event"),
+                            "source_status": item.get("status"),
+                            "source_recorded_at": item.get("recorded_at"),
+                            "source_task_attempt": item.get("task_attempt"),
+                        }
+                    )
+                    replay_metadata = (
+                        metadata.get("replay_guard")
+                        if isinstance(metadata.get("replay_guard"), dict)
+                        else None
+                    )
+                    if replay_metadata is not None:
+                        payload["source_replay_guard"] = deepcopy(replay_metadata)
+                    return payload
+        if latest_same_fingerprint is not None:
+            payload.update(
+                {
+                    "reason": "latest_matching_phase_not_passed",
+                    "latest_matching_sequence": latest_same_fingerprint.get("sequence"),
+                    "latest_matching_event": latest_same_fingerprint.get("event"),
+                    "latest_matching_status": latest_same_fingerprint.get("status"),
+                }
+            )
+            return payload
+        if latest_for_phase is not None:
+            latest_metadata = (
+                latest_for_phase.get("metadata")
+                if isinstance(latest_for_phase.get("metadata"), dict)
+                else {}
+            )
+            payload.update(
+                {
+                    "reason": "command_group_changed",
+                    "latest_sequence": latest_for_phase.get("sequence"),
+                    "latest_event": latest_for_phase.get("event"),
+                    "latest_status": latest_for_phase.get("status"),
+                    "latest_command_group_fingerprint": latest_metadata.get("command_group_fingerprint"),
+                }
+            )
+        return payload
+
+    def _record_replay_guard_decision(
+        self,
+        state: dict[str, Any],
+        task: HarnessTask,
+        decision: dict[str, Any],
+    ) -> None:
+        task_state = state.setdefault("tasks", {}).setdefault(task.id, {})
+        history = task_state.setdefault("replay_guard_history", [])
+        if not isinstance(history, list):
+            history = []
+            task_state["replay_guard_history"] = history
+        history.append(deepcopy(decision))
+        task_state["replay_guard_history"] = history[-REPLAY_GUARD_SUMMARY_LIMIT:]
+        task_state["last_replay_guard"] = deepcopy(decision)
+
+    def _reuse_command_group_from_replay_guard(
+        self,
+        state: dict[str, Any],
+        task: HarnessTask,
+        *,
+        phase: str,
+        commands: tuple[AcceptanceCommand, ...],
+        runs: list[CommandRun],
+        decision: dict[str, Any],
+        persist_state: bool,
+    ) -> tuple[str, str]:
+        started_at = utc_now()
+        phase_runs = [
+            CommandRun(
+                phase,
+                command.name,
+                self._display_command(command, task),
+                "reused",
+                0,
+                started_at,
+                started_at,
+                "",
+                "",
+                executor=command.executor,
+                executor_metadata=self.executor_registry.metadata_for(command.executor),
+                result_metadata={"replay_guard": deepcopy(decision)},
+            )
+            for command in commands
+        ]
+        runs.extend(phase_runs)
+        message = f"Reused passed {phase} phase from durable replay guard evidence."
+        if persist_state:
+            metadata = self._command_group_state_metadata(commands)
+            metadata["replay_guard"] = deepcopy(decision)
+            self._record_phase_state(
+                state,
+                task,
+                phase=phase,
+                event="reused",
+                status="passed",
+                message=message,
+                persist=True,
+                metadata=metadata,
+                runs=phase_runs,
+            )
+            self._record_replay_guard_decision(state, task, decision)
+            self.save_state(state)
+        return "passed", message
+
+    def _new_replay_guard_summary(self, task: HarnessTask) -> dict[str, Any]:
+        return {
+            "schema_version": REPLAY_GUARD_SCHEMA_VERSION,
+            "kind": "engineering-harness.task-replay-guard",
+            "task_id": task.id,
+            "milestone_id": task.milestone_id,
+            "status": "not_used",
+            "checked_at": utc_now(),
+            "decisions": [],
+            "reused_phases": [],
+        }
+
+    def _append_replay_guard_decision(
+        self,
+        summary: dict[str, Any],
+        decision: dict[str, Any],
+    ) -> None:
+        decisions = summary.setdefault("decisions", [])
+        if isinstance(decisions, list):
+            decisions.append(deepcopy(decision))
+        if decision.get("status") == "reused":
+            reused = summary.setdefault("reused_phases", [])
+            if isinstance(reused, list):
+                reused.append(deepcopy(decision))
+            summary["status"] = "reused"
+
+    def _finalize_replay_guard_summary(self, summary: dict[str, Any]) -> dict[str, Any] | None:
+        decisions = summary.get("decisions")
+        reused = summary.get("reused_phases")
+        if not isinstance(decisions, list) or not decisions:
+            return None
+        if not isinstance(reused, list):
+            reused = []
+            summary["reused_phases"] = reused
+        summary["decision_count"] = len(decisions)
+        summary["reused_phase_count"] = len(reused)
+        if not reused and summary.get("status") != "reused":
+            summary["status"] = "evaluated"
+        return summary
+
+    def replay_guard_summary(self) -> dict[str, Any]:
+        state = self.load_state()
+        tasks_payload: dict[str, Any] = {}
+        reused_phases: list[dict[str, Any]] = []
+        for task_id, task_state in sorted(state.get("tasks", {}).items()):
+            if not isinstance(task_state, dict):
+                continue
+            history = task_state.get("replay_guard_history", [])
+            if not isinstance(history, list):
+                history = []
+            task_reused = [
+                deepcopy(item)
+                for item in history
+                if isinstance(item, dict) and item.get("status") == "reused"
+            ]
+            last_replay_guard = (
+                deepcopy(task_state.get("last_replay_guard"))
+                if isinstance(task_state.get("last_replay_guard"), dict)
+                else None
+            )
+            if not task_reused and last_replay_guard is None:
+                continue
+            task_payload: dict[str, Any] = {
+                "reused_phase_count": len(task_reused),
+                "reused_phases": task_reused[-REPLAY_GUARD_SUMMARY_LIMIT:],
+            }
+            if last_replay_guard is not None:
+                task_payload["last_replay_guard"] = last_replay_guard
+            tasks_payload[str(task_id)] = task_payload
+            reused_phases.extend(task_reused)
+        reused_phases.sort(
+            key=lambda item: (
+                str(item.get("checked_at") or ""),
+                str(item.get("task_id") or ""),
+                str(item.get("phase") or ""),
+            ),
+            reverse=True,
+        )
+        return {
+            "schema_version": REPLAY_GUARD_SCHEMA_VERSION,
+            "kind": "engineering-harness.replay-guard-summary",
+            "status": "reused" if reused_phases else "none",
+            "reused_phase_count": len(reused_phases),
+            "reused_phases": reused_phases[:REPLAY_GUARD_SUMMARY_LIMIT],
+            "tasks": tasks_payload,
+        }
+
     def _command_group_state_metadata(self, commands: tuple[AcceptanceCommand, ...]) -> dict[str, Any]:
+        command_fingerprints = self._command_group_command_fingerprints(commands)
         return {
             "command_count": len(commands),
+            "command_group_fingerprint": self._command_group_fingerprint(commands),
+            "fingerprint_algorithm": "sha256",
+            "fingerprint_fields": [
+                "name",
+                "command",
+                "prompt",
+                "executor",
+                "required",
+                "timeout_seconds",
+                "no_progress_timeout_seconds",
+                "model",
+                "sandbox",
+                "requested_capabilities",
+            ],
             "commands": [
                 {
                     "name": command.name,
@@ -2356,12 +2920,61 @@ class Harness:
                     "no_progress_timeout_seconds": command.no_progress_timeout_seconds,
                     "has_command": command.command is not None,
                     "has_prompt": command.prompt is not None,
+                    "command_sha256": command_fingerprints[index]["command_sha256"],
+                    "prompt_sha256": command_fingerprints[index]["prompt_sha256"],
                     "model": command.model,
                     "sandbox": command.sandbox,
+                    "requested_capabilities": list(command.requested_capabilities),
                 }
-                for command in commands
+                for index, command in enumerate(commands)
             ],
         }
+
+    def _command_group_definition(self, commands: tuple[AcceptanceCommand, ...]) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": command.name,
+                "command": command.command,
+                "prompt": command.prompt,
+                "executor": command.executor,
+                "required": command.required,
+                "timeout_seconds": command.timeout_seconds,
+                "no_progress_timeout_seconds": command.no_progress_timeout_seconds,
+                "model": command.model,
+                "sandbox": command.sandbox,
+                "requested_capabilities": list(command.requested_capabilities),
+            }
+            for command in commands
+        ]
+
+    def _command_group_fingerprint(self, commands: tuple[AcceptanceCommand, ...]) -> str:
+        encoded = json.dumps(
+            self._command_group_definition(commands),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _command_group_command_fingerprints(
+        self,
+        commands: tuple[AcceptanceCommand, ...],
+    ) -> list[dict[str, str | None]]:
+        fingerprints: list[dict[str, str | None]] = []
+        for command in commands:
+            command_text = command.command
+            prompt_text = command.prompt
+            fingerprints.append(
+                {
+                    "command_sha256": hashlib.sha256(command_text.encode("utf-8")).hexdigest()
+                    if command_text is not None
+                    else None,
+                    "prompt_sha256": hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
+                    if prompt_text is not None
+                    else None,
+                }
+            )
+        return fingerprints
 
     def save_roadmap(self) -> None:
         write_mapping(self.roadmap_path, self.roadmap)
@@ -2391,12 +3004,235 @@ class Harness:
         planner = config.get("planner") or {}
         if not isinstance(planner, dict):
             planner = {}
-        return {
+        summary = {
             "enabled": bool(config.get("enabled", False)),
             "objective": config.get("objective"),
             "planner_executor": str(planner.get("executor", "shell")) if planner else None,
             "max_stages_per_iteration": int(config.get("max_stages_per_iteration", 1)),
         }
+        latest_assessment = self._latest_self_iteration_assessment()
+        if latest_assessment is not None:
+            summary["latest_assessment"] = latest_assessment
+        return summary
+
+    def _compact_checkpoint_readiness(self, readiness: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(readiness, dict):
+            return {}
+        keys = (
+            "schema_version",
+            "kind",
+            "is_repository",
+            "ready",
+            "blocking",
+            "reason",
+            "dirty_paths",
+            "blocking_paths",
+            "safe_to_checkpoint_paths",
+            "recommended_action",
+            "materialization_paths",
+            "classifications",
+        )
+        compact = {key: deepcopy(readiness.get(key)) for key in keys if key in readiness}
+        compact["dirty_path_count"] = len(readiness.get("dirty_paths", []))
+        compact["blocking_path_count"] = len(readiness.get("blocking_paths", []))
+        compact["safe_to_checkpoint_path_count"] = len(readiness.get("safe_to_checkpoint_paths", []))
+        return compact
+
+    def _self_iteration_checkpoint_gate(
+        self,
+        readiness: dict[str, Any],
+        *,
+        phase: str,
+    ) -> dict[str, Any]:
+        compact = self._compact_checkpoint_readiness(readiness)
+        blocking = bool(compact.get("blocking"))
+        reason = str(compact.get("reason") or "unknown")
+        if blocking:
+            action = str(compact.get("recommended_action") or "Resolve checkpoint readiness blockers.")
+            message = (
+                "self-iteration checkpoint readiness blocked "
+                f"{phase}: {reason}. {action}"
+            )
+            status = "blocked"
+        else:
+            message = f"self-iteration checkpoint readiness passed {phase}: {reason}"
+            status = "passed"
+        return {
+            "schema_version": SELF_ITERATION_ASSESSMENT_SCHEMA_VERSION,
+            "kind": "engineering-harness.self-iteration-checkpoint-gate",
+            "phase": phase,
+            "status": status,
+            "blocking": blocking,
+            "reason": reason,
+            "message": message,
+            "checkpoint_readiness": compact,
+            "dirty_paths": deepcopy(compact.get("dirty_paths", [])),
+            "blocking_paths": deepcopy(compact.get("blocking_paths", [])),
+            "recommended_action": compact.get("recommended_action"),
+        }
+
+    def _self_iteration_allowed_harness_paths(self, *paths: Path) -> list[str]:
+        candidates = [self.state_path, self.decision_log_path, *paths]
+        allowed: list[str] = []
+        for candidate in candidates:
+            try:
+                relative = self._project_relative_path(candidate)
+            except ValueError:
+                continue
+            if relative and not Path(relative).is_absolute():
+                allowed.append(self._normalize_repo_path(relative))
+        return sorted(dict.fromkeys(allowed))
+
+    def _self_iteration_checkpoint_readiness(
+        self,
+        *,
+        readiness: dict[str, Any] | None = None,
+        allowed_harness_paths: list[str] | None = None,
+    ) -> dict[str, Any]:
+        payload = deepcopy(readiness) if isinstance(readiness, dict) else self.checkpoint_readiness()
+        allowed = sorted(
+            dict.fromkeys(
+                self._normalize_repo_path(path)
+                for path in (allowed_harness_paths or [])
+                if str(path).strip()
+            )
+        )
+        if not allowed or not isinstance(payload, dict):
+            return payload
+        dirty_paths = [
+            self._normalize_repo_path(str(path))
+            for path in payload.get("dirty_paths", [])
+            if str(path).strip()
+        ]
+        blocking_paths = [
+            self._normalize_repo_path(str(path))
+            for path in payload.get("blocking_paths", [])
+            if str(path).strip()
+        ]
+        allowed_dirty = sorted(path for path in dirty_paths if path in allowed)
+        if not allowed_dirty:
+            payload["self_iteration_allowed_harness_paths"] = []
+            return payload
+        remaining_blocking = sorted(path for path in blocking_paths if path not in allowed_dirty)
+        payload["self_iteration_allowed_harness_paths"] = allowed_dirty
+        payload.setdefault("classifications", {})
+        if isinstance(payload["classifications"], dict):
+            payload["classifications"]["harness_self_iteration"] = allowed_dirty
+        payload["blocking_paths"] = remaining_blocking
+        safe_paths = [
+            self._normalize_repo_path(str(path))
+            for path in payload.get("safe_to_checkpoint_paths", [])
+            if str(path).strip()
+        ]
+        payload["safe_to_checkpoint_paths"] = sorted(dict.fromkeys([*safe_paths, *allowed_dirty]))
+        if not remaining_blocking:
+            payload["ready"] = True
+            payload["blocking"] = False
+            original_reason = str(payload.get("reason") or "")
+            if original_reason in {"clean", "harness_materialization_dirty"} and not allowed_dirty:
+                reason = original_reason
+            elif any(path in self._roadmap_materialization_paths() for path in dirty_paths):
+                reason = "self_iteration_checkpointable_dirty_paths"
+            else:
+                reason = "self_iteration_harness_dirty"
+            payload["reason"] = reason
+            payload["recommended_action"] = (
+                "Run self-iteration normally; only harness-owned self-iteration assessment/state "
+                "paths and roadmap materialization paths are dirty."
+            )
+            return payload
+        payload["ready"] = False
+        payload["blocking"] = True
+        payload["reason"] = (
+            "mixed_unrelated_user_dirty"
+            if payload.get("safe_to_checkpoint_paths")
+            else "unrelated_user_dirty"
+        )
+        payload["recommended_action"] = (
+            "Review, commit, stash, or move the blocking user paths yourself, then rerun "
+            "self-iteration. The harness will not commit or clean them."
+        )
+        return payload
+
+    def _self_iteration_assessment_json_path(self, report_path: Path) -> Path:
+        return report_path.with_suffix(".json")
+
+    def _write_self_iteration_assessment(self, report_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+        json_path = self._self_iteration_assessment_json_path(report_path)
+        assessment = {
+            "schema_version": SELF_ITERATION_ASSESSMENT_SCHEMA_VERSION,
+            "kind": "engineering-harness.self-iteration-assessment",
+            **deepcopy(payload),
+            "report_json": str(json_path.relative_to(self.project_root)),
+        }
+        write_json(json_path, self._redact_context_value(assessment))
+        return assessment
+
+    def _latest_self_iteration_assessment(self) -> dict[str, Any] | None:
+        assessment_dir = self.report_dir / "assessments"
+        if not assessment_dir.exists():
+            return None
+        paths = sorted(
+            [path for path in assessment_dir.glob("*-self-iteration.json") if path.is_file()],
+            key=self._project_relative_path,
+        )
+        for path in reversed(paths):
+            try:
+                payload = load_mapping(path)
+            except Exception:
+                continue
+            compact = self._compact_self_iteration_assessment(payload)
+            if compact:
+                return compact
+        return None
+
+    def _compact_self_iteration_assessment(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+        checkpoint_gate = payload.get("checkpoint_gate") if isinstance(payload.get("checkpoint_gate"), dict) else None
+        checkpoint_readiness = (
+            payload.get("checkpoint_readiness")
+            if isinstance(payload.get("checkpoint_readiness"), dict)
+            else checkpoint_gate.get("checkpoint_readiness")
+            if checkpoint_gate
+            else None
+        )
+        compact: dict[str, Any] = {
+            "schema_version": payload.get("schema_version"),
+            "kind": payload.get("kind"),
+            "status": payload.get("status"),
+            "message": payload.get("message"),
+            "reason": payload.get("reason"),
+            "report": payload.get("report"),
+            "report_json": payload.get("report_json"),
+            "snapshot": payload.get("snapshot"),
+            "context_pack": deepcopy(payload.get("context_pack"))
+            if isinstance(payload.get("context_pack"), dict)
+            else payload.get("context_pack"),
+            "stage_count_before": payload.get("stage_count_before"),
+            "stage_count_after": payload.get("stage_count_after"),
+            "pending_stage_count_after": payload.get("pending_stage_count_after"),
+        }
+        if checkpoint_gate:
+            compact["checkpoint_gate"] = deepcopy(checkpoint_gate)
+        if isinstance(payload.get("checkpoint_gates"), dict):
+            compact["checkpoint_gates"] = deepcopy(payload.get("checkpoint_gates"))
+        if isinstance(checkpoint_readiness, dict):
+            compact["checkpoint_readiness"] = self._compact_checkpoint_readiness(checkpoint_readiness)
+            compact["dirty_paths"] = deepcopy(compact["checkpoint_readiness"].get("dirty_paths", []))
+            compact["blocking_paths"] = deepcopy(compact["checkpoint_readiness"].get("blocking_paths", []))
+            compact["recommended_action"] = compact["checkpoint_readiness"].get("recommended_action")
+        if isinstance(payload.get("goal_gap_scorecard"), dict):
+            compact["goal_gap_scorecard"] = deepcopy(payload.get("goal_gap_scorecard"))
+        validation = payload.get("validation") if isinstance(payload.get("validation"), dict) else None
+        if validation:
+            compact["validation"] = {
+                "status": validation.get("status"),
+                "error_count": validation.get("error_count", 0),
+                "warning_count": validation.get("warning_count", 0),
+                "new_stage_ids": deepcopy(validation.get("new_stage_ids", [])),
+            }
+        return {key: value for key, value in compact.items() if value is not None}
 
     def advance_roadmap(self, *, max_new_milestones: int = 1, reason: str = "queue_empty") -> dict[str, Any]:
         self.drive_heartbeat(
@@ -2488,6 +3324,7 @@ class Harness:
         reason: str = "roadmap_exhausted",
         allow_agent: bool = False,
         allow_live: bool = False,
+        checkpoint_readiness: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self.drive_heartbeat(
             activity="self-iteration",
@@ -2543,16 +3380,128 @@ class Harness:
                 "report": None,
             }
 
-        before_roadmap = deepcopy(self.roadmap)
-        before_roadmap_text = self.roadmap_path.read_text(encoding="utf-8")
-        before = self.continuation_summary()
-        expected_new_stages = max(1, int(config.get("max_stages_per_iteration", 1)))
         assessment_dir = self.report_dir / "assessments"
         assessment_dir.mkdir(parents=True, exist_ok=True)
         assessment_slug = slug_now()
         snapshot_path = assessment_dir / f"{assessment_slug}-self-iteration-snapshot.json"
         context_path = assessment_dir / f"{assessment_slug}-self-iteration-context.json"
         report_path = assessment_dir / f"{assessment_slug}-self-iteration.md"
+        allowed_harness_paths = self._self_iteration_allowed_harness_paths(
+            snapshot_path,
+            context_path,
+            report_path,
+            self._self_iteration_assessment_json_path(report_path),
+        )
+        before_roadmap = deepcopy(self.roadmap)
+        before_roadmap_text = self.roadmap_path.read_text(encoding="utf-8")
+        before = self.continuation_summary()
+        expected_new_stages = max(1, int(config.get("max_stages_per_iteration", 1)))
+        preflight_readiness = self._self_iteration_checkpoint_readiness(readiness=checkpoint_readiness)
+        preflight_gate = self._self_iteration_checkpoint_gate(preflight_readiness, phase="preflight")
+        if preflight_gate["status"] == "blocked":
+            message = preflight_gate["message"]
+            goal_gap_scorecard = self.goal_gap_scorecard()
+            snapshot = {
+                "generated_at": utc_now(),
+                "reason": reason,
+                "status": "blocked",
+                "message": message,
+                "checkpoint_gate": preflight_gate,
+                "checkpoint_readiness": preflight_gate["checkpoint_readiness"],
+                "goal_gap_scorecard": goal_gap_scorecard,
+                "recent_git": self._git(["log", "--oneline", "-8"]),
+                "git_status": self._git(["status", "--short"]),
+            }
+            write_json(snapshot_path, snapshot)
+            run = CommandRun(
+                "self-iteration",
+                "checkpoint readiness preflight",
+                "checkpoint-readiness preflight",
+                "blocked",
+                None,
+                utc_now(),
+                utc_now(),
+                "",
+                message,
+                executor="checkpoint-readiness",
+                executor_metadata={"id": "checkpoint-readiness", "kind": "local-preflight"},
+            )
+            self._write_self_iteration_report(
+                report_path,
+                reason,
+                snapshot_path,
+                before,
+                before,
+                run,
+                status="blocked",
+                message=message,
+                checkpoint_gate=preflight_gate,
+                checkpoint_readiness=preflight_gate["checkpoint_readiness"],
+                goal_gap_scorecard=goal_gap_scorecard,
+            )
+            assessment = self._write_self_iteration_assessment(
+                report_path,
+                {
+                    "generated_at": utc_now(),
+                    "reason": reason,
+                    "status": "blocked",
+                    "message": message,
+                    "stage_count_before": before["stage_count"],
+                    "stage_count_after": before["stage_count"],
+                    "pending_stage_count_after": before["pending_stage_count"],
+                    "report": str(report_path.relative_to(self.project_root)),
+                    "snapshot": str(snapshot_path.relative_to(self.project_root)),
+                    "context_pack": None,
+                    "checkpoint_gate": preflight_gate,
+                    "checkpoint_gates": {"preflight": preflight_gate},
+                    "checkpoint_readiness": preflight_gate["checkpoint_readiness"],
+                    "goal_gap_scorecard": goal_gap_scorecard,
+                },
+            )
+            append_jsonl(
+                self.decision_log_path,
+                {
+                    "at": utc_now(),
+                    "event": "self_iteration",
+                    "reason": reason,
+                    "status": "blocked",
+                    "message": message,
+                    "stage_count_before": before["stage_count"],
+                    "stage_count_after": before["stage_count"],
+                    "pending_stage_count_after": before["pending_stage_count"],
+                    "report": str(report_path.relative_to(self.project_root)),
+                    "report_json": assessment["report_json"],
+                    "snapshot": str(snapshot_path.relative_to(self.project_root)),
+                    "context_pack": None,
+                    "checkpoint_gate": preflight_gate,
+                    "checkpoint_readiness": preflight_gate["checkpoint_readiness"],
+                    "goal_gap_scorecard": goal_gap_scorecard,
+                },
+            )
+            self.drive_heartbeat(
+                activity="self-iteration",
+                message=message,
+                clear_task=True,
+            )
+            return {
+                "status": "blocked",
+                "message": message,
+                "stage_count_before": before["stage_count"],
+                "stage_count_after": before["stage_count"],
+                "pending_stage_count_after": before["pending_stage_count"],
+                "report": str(report_path.relative_to(self.project_root)),
+                "report_json": assessment["report_json"],
+                "snapshot": str(snapshot_path.relative_to(self.project_root)),
+                "context_pack": None,
+                "checkpoint_gate": preflight_gate,
+                "checkpoint_gates": {"preflight": preflight_gate},
+                "checkpoint_readiness": preflight_gate["checkpoint_readiness"],
+                "goal_gap_scorecard": goal_gap_scorecard,
+                "dirty_paths": deepcopy(preflight_gate.get("dirty_paths", [])),
+                "blocking_paths": deepcopy(preflight_gate.get("blocking_paths", [])),
+                "reason": preflight_gate.get("reason"),
+                "recommended_action": preflight_gate.get("recommended_action"),
+            }
         context_pack = self._self_iteration_context_pack(
             reason=reason,
             snapshot_path=snapshot_path,
@@ -2562,6 +3511,7 @@ class Harness:
         context_info = {
             "path": str(context_path.relative_to(self.project_root)),
             "summary": context_pack["summary"],
+            "goal_gap_scorecard": deepcopy(context_pack.get("goal_gap_scorecard", {})),
         }
         snapshot = {
             "generated_at": utc_now(),
@@ -2570,6 +3520,8 @@ class Harness:
             "recent_git": self._git(["log", "--oneline", "-8"]),
             "git_status": self._git(["status", "--short"]),
             "context_pack": context_info,
+            "checkpoint_gate": preflight_gate,
+            "checkpoint_readiness": preflight_gate["checkpoint_readiness"],
         }
         write_json(snapshot_path, snapshot)
 
@@ -2597,6 +3549,10 @@ class Harness:
                 before,
                 run,
                 context_pack=context_info,
+                status="blocked",
+                message=f"unknown executor: {command.executor}",
+                checkpoint_gate=preflight_gate,
+                checkpoint_readiness=preflight_gate["checkpoint_readiness"],
             )
             self.drive_heartbeat(
                 activity="self-iteration",
@@ -2636,6 +3592,10 @@ class Harness:
                 before,
                 run,
                 context_pack=context_info,
+                status="blocked",
+                message=block_reason,
+                checkpoint_gate=preflight_gate,
+                checkpoint_readiness=preflight_gate["checkpoint_readiness"],
             )
             self.drive_heartbeat(
                 activity="self-iteration",
@@ -2676,6 +3636,10 @@ class Harness:
                     before,
                     run,
                     context_pack=context_info,
+                    status="blocked",
+                    message=block_reason,
+                    checkpoint_gate=preflight_gate,
+                    checkpoint_readiness=preflight_gate["checkpoint_readiness"],
                 )
                 self.drive_heartbeat(
                     activity="self-iteration",
@@ -2716,42 +3680,64 @@ class Harness:
 
         observed_after = before
         validation: dict[str, Any]
+        acceptance_gate: dict[str, Any] | None = None
         if run.returncode != 0:
             status = "failed"
             message = f"self-iteration planner failed: {command.name}"
         else:
-            try:
-                after_roadmap = load_mapping(self.roadmap_path)
-            except Exception as exc:
+            acceptance_readiness = self._self_iteration_checkpoint_readiness(
+                allowed_harness_paths=allowed_harness_paths
+            )
+            acceptance_gate = self._self_iteration_checkpoint_gate(acceptance_readiness, phase="acceptance")
+            if acceptance_gate["status"] == "blocked":
+                self.roadmap_path.write_text(before_roadmap_text, encoding="utf-8")
+                self.roadmap = deepcopy(before_roadmap)
                 validation = self._self_iteration_validation_result(
-                    status="failed",
-                    errors=[f"planner output is not a readable roadmap mapping: {exc}"],
-                    warnings=[],
+                    status="skipped",
+                    errors=[],
+                    warnings=[
+                        "planner output was restored and not accepted because checkpoint readiness "
+                        "blocked roadmap diff acceptance"
+                    ],
                     expected_new_stage_count=expected_new_stages,
                     actual_new_stage_count=0,
                     new_stage_ids=[],
                 )
-                self.roadmap_path.write_text(before_roadmap_text, encoding="utf-8")
-                self.roadmap = deepcopy(before_roadmap)
-                status = "rejected"
-                message = "self-iteration planner output failed validation"
+                status = "blocked"
+                message = acceptance_gate["message"]
             else:
-                self.roadmap = after_roadmap
-                observed_after = self.continuation_summary()
-                validation = self._validate_self_iteration_output(
-                    before_roadmap,
-                    after_roadmap,
-                    expected_new_stage_count=expected_new_stages,
-                )
-                if validation["status"] == "passed":
-                    status = "planned"
-                    count = len(validation.get("new_stage_ids", []))
-                    message = f"self-iteration planner added {count} validated continuation stage(s)"
-                else:
+                try:
+                    after_roadmap = load_mapping(self.roadmap_path)
+                except Exception as exc:
+                    validation = self._self_iteration_validation_result(
+                        status="failed",
+                        errors=[f"planner output is not a readable roadmap mapping: {exc}"],
+                        warnings=[],
+                        expected_new_stage_count=expected_new_stages,
+                        actual_new_stage_count=0,
+                        new_stage_ids=[],
+                    )
                     self.roadmap_path.write_text(before_roadmap_text, encoding="utf-8")
                     self.roadmap = deepcopy(before_roadmap)
                     status = "rejected"
                     message = "self-iteration planner output failed validation"
+                else:
+                    self.roadmap = after_roadmap
+                    observed_after = self.continuation_summary()
+                    validation = self._validate_self_iteration_output(
+                        before_roadmap,
+                        after_roadmap,
+                        expected_new_stage_count=expected_new_stages,
+                    )
+                    if validation["status"] == "passed":
+                        status = "planned"
+                        count = len(validation.get("new_stage_ids", []))
+                        message = f"self-iteration planner added {count} validated continuation stage(s)"
+                    else:
+                        self.roadmap_path.write_text(before_roadmap_text, encoding="utf-8")
+                        self.roadmap = deepcopy(before_roadmap)
+                        status = "rejected"
+                        message = "self-iteration planner output failed validation"
 
         if run.returncode != 0:
             self.roadmap_path.write_text(before_roadmap_text, encoding="utf-8")
@@ -2766,6 +3752,11 @@ class Harness:
             )
 
         final_after = self.continuation_summary()
+        checkpoint_gates = {"preflight": preflight_gate}
+        if acceptance_gate is not None:
+            checkpoint_gates["acceptance"] = acceptance_gate
+        final_checkpoint_gate = acceptance_gate or preflight_gate
+        final_checkpoint_readiness = final_checkpoint_gate["checkpoint_readiness"]
 
         failure_isolation = self._self_iteration_failure_isolation(
             run,
@@ -2786,6 +3777,40 @@ class Harness:
             validation=validation,
             context_pack=context_info,
             failure_isolation=failure_isolation,
+            status=status,
+            message=message,
+            checkpoint_gate=final_checkpoint_gate,
+            checkpoint_readiness=final_checkpoint_readiness,
+        )
+        assessment = self._write_self_iteration_assessment(
+            report_path,
+            {
+                "generated_at": utc_now(),
+                "reason": reason,
+                "status": status,
+                "message": message,
+                "stage_count_before": before["stage_count"],
+                "stage_count_after": final_after["stage_count"],
+                "pending_stage_count_after": final_after["pending_stage_count"],
+                "validation": validation,
+                "report": str(report_path.relative_to(self.project_root)),
+                "snapshot": str(snapshot_path.relative_to(self.project_root)),
+                "context_pack": context_info,
+                "checkpoint_gate": final_checkpoint_gate,
+                "checkpoint_gates": checkpoint_gates,
+                "checkpoint_readiness": final_checkpoint_readiness,
+                "goal_gap_scorecard": deepcopy(context_info.get("goal_gap_scorecard", {})),
+                "run": {
+                    "name": run.name,
+                    "command": run.command,
+                    "status": run.status,
+                    "returncode": run.returncode,
+                    "executor": run.executor,
+                    "executor_metadata": run.executor_metadata,
+                    "executor_result": self._executor_result_contract(run),
+                },
+                **({"failure_isolation": failure_isolation} if failure_isolation else {}),
+            },
         )
         append_jsonl(
             self.decision_log_path,
@@ -2800,8 +3825,12 @@ class Harness:
                 "pending_stage_count_after": final_after["pending_stage_count"],
                 "validation": validation,
                 "report": str(report_path.relative_to(self.project_root)),
+                "report_json": assessment["report_json"],
                 "snapshot": str(snapshot_path.relative_to(self.project_root)),
                 "context_pack": context_info,
+                "checkpoint_gate": final_checkpoint_gate,
+                "checkpoint_readiness": final_checkpoint_readiness,
+                "goal_gap_scorecard": deepcopy(context_info.get("goal_gap_scorecard", {})),
             },
         )
         self.drive_heartbeat(
@@ -2816,9 +3845,18 @@ class Harness:
             "stage_count_after": final_after["stage_count"],
             "pending_stage_count_after": final_after["pending_stage_count"],
             "report": str(report_path.relative_to(self.project_root)),
+            "report_json": assessment["report_json"],
             "snapshot": str(snapshot_path.relative_to(self.project_root)),
             "context_pack": context_info,
             "validation": validation,
+            "checkpoint_gate": final_checkpoint_gate,
+            "checkpoint_gates": checkpoint_gates,
+            "checkpoint_readiness": final_checkpoint_readiness,
+            "goal_gap_scorecard": deepcopy(context_info.get("goal_gap_scorecard", {})),
+            "dirty_paths": deepcopy(final_checkpoint_gate.get("dirty_paths", [])),
+            "blocking_paths": deepcopy(final_checkpoint_gate.get("blocking_paths", [])),
+            "reason": final_checkpoint_gate.get("reason"),
+            "recommended_action": final_checkpoint_gate.get("recommended_action"),
             "run": {
                 "name": run.name,
                 "command": run.command,
@@ -2846,6 +3884,8 @@ class Harness:
         source_inventory = self._self_iteration_source_inventory()
         git_context = self._self_iteration_git_context()
         duplicate_plan = self._self_iteration_duplicate_plan_summary()
+        status_for_scorecard = self.status_summary()
+        goal_gap_scorecard = deepcopy(status_for_scorecard.get("goal_gap_scorecard", {}))
         summary = {
             "project": roadmap_context.get("project"),
             "roadmap_path": roadmap_context.get("path"),
@@ -2863,6 +3903,11 @@ class Harness:
             "git_is_repository": git_context.get("is_repository", False),
             "git_status_line_count": len(git_context.get("status_lines", [])),
             "recent_commit_count": len(git_context.get("recent_commits", [])),
+            "goal_gap_scorecard_status": goal_gap_scorecard.get("summary", {}).get("overall_status"),
+            "goal_gap_scorecard_max_risk_score": goal_gap_scorecard.get("summary", {}).get("max_risk_score"),
+            "goal_gap_scorecard_blocked_count": goal_gap_scorecard.get("summary", {})
+            .get("status_counts", {})
+            .get("blocked", 0),
         }
         payload: dict[str, Any] = {
             "schema_version": SELF_ITERATION_CONTEXT_SCHEMA_VERSION,
@@ -2881,6 +3926,7 @@ class Harness:
             "test_inventory": test_inventory,
             "source_inventory": source_inventory,
             "git": git_context,
+            "goal_gap_scorecard": goal_gap_scorecard,
         }
         return self._redact_context_value(payload)
 
@@ -3161,9 +4207,13 @@ class Harness:
     def _self_iteration_report_context(self) -> dict[str, Any]:
         task_reports = self._self_iteration_recent_reports(self.report_dir.glob("*.md"))
         drive_reports = self._self_iteration_recent_reports((self.report_dir / "drives").glob("*.md"))
+        self_iteration_reports = self._self_iteration_recent_reports(
+            (self.report_dir / "assessments").glob("*-self-iteration.md")
+        )
         return {
             "task_reports": task_reports,
             "drive_reports": drive_reports,
+            "self_iteration_reports": self_iteration_reports,
         }
 
     def _self_iteration_recent_reports(self, paths: Any) -> dict[str, Any]:
@@ -3240,6 +4290,7 @@ class Harness:
             "project",
             "status",
             "message",
+            "scheduler_policy",
             "started_at",
             "finished_at",
             "drive_report",
@@ -3249,20 +4300,77 @@ class Harness:
         ):
             if sidecar.get(key) is not None:
                 compact[key] = sidecar.get(key)
+        checkpoint_readiness = sidecar.get("checkpoint_readiness")
+        if isinstance(checkpoint_readiness, dict):
+            compact["checkpoint_readiness"] = {
+                key: deepcopy(checkpoint_readiness.get(key))
+                for key in (
+                    "ready",
+                    "blocking",
+                    "reason",
+                    "dirty_paths",
+                    "blocking_paths",
+                    "safe_to_checkpoint_paths",
+                    "recommended_action",
+                )
+            }
         results = sidecar.get("results")
         if isinstance(results, list):
             compact["result_count"] = len(results)
         continuations = sidecar.get("continuations")
         if isinstance(continuations, list):
             compact["continuation_count"] = len(continuations)
+        self_iterations = sidecar.get("self_iterations")
+        if isinstance(self_iterations, list):
+            compact["self_iteration_count"] = len(self_iterations)
+            for iteration in reversed(self_iterations):
+                if not isinstance(iteration, dict):
+                    continue
+                latest_iteration = {
+                    "status": iteration.get("status"),
+                    "message": iteration.get("message"),
+                    "report": iteration.get("report"),
+                    "report_json": iteration.get("report_json"),
+                }
+                if isinstance(iteration.get("checkpoint_readiness"), dict):
+                    latest_iteration["checkpoint_readiness"] = self._compact_checkpoint_readiness(
+                        iteration.get("checkpoint_readiness")
+                    )
+                if isinstance(iteration.get("checkpoint_gate"), dict):
+                    latest_iteration["checkpoint_gate"] = deepcopy(iteration.get("checkpoint_gate"))
+                compact["latest_self_iteration"] = {
+                    key: value for key, value in latest_iteration.items() if value is not None
+                }
+                break
         queue = sidecar.get("queue")
         if isinstance(queue, list):
             compact["queue_count"] = len(queue)
+        recoveries = sidecar.get("stale_running_recoveries")
+        if isinstance(recoveries, list):
+            compact["stale_running_recovery_count"] = len(recoveries)
+        blocks = sidecar.get("stale_running_blocks")
+        if isinstance(blocks, list):
+            compact["stale_running_block_count"] = len(blocks)
         selected = sidecar.get("selected")
         if isinstance(selected, dict):
             compact["selected"] = {
                 key: selected.get(key)
-                for key in ("project", "root", "queue_index", "drive_status", "drive_report", "drive_report_json")
+                for key in (
+                    "project",
+                    "root",
+                    "queue_index",
+                    "scheduler_rank",
+                    "scheduler_policy",
+                    "score",
+                    "selected_reason",
+                    "backoff",
+                    "checkpoint_readiness",
+                    "stale_running_recovery",
+                    "stale_running_preflight",
+                    "drive_status",
+                    "drive_report",
+                    "drive_report_json",
+                )
                 if selected.get(key) is not None
             }
         retrospective = sidecar.get("goal_gap_retrospective")
@@ -3309,12 +4417,16 @@ class Harness:
                 "schema_version": WORKSPACE_DISPATCH_LEASE_SCHEMA_VERSION,
                 "status": "not_found",
                 "workspace_root": None,
+                "scheduler_policy": None,
                 "lease": {"status": "missing", "active": False, "path": None},
                 "latest_reports": {"total_count": 0, "included_count": 0, "files": []},
                 "latest_report": None,
                 "queue_count": 0,
                 "queue": [],
+                "selected": None,
                 "latest_report_lease": None,
+                "stale_running_recoveries": [],
+                "stale_running_blocks": [],
             }
 
         reports = self._runtime_workspace_dispatch_reports(workspace)
@@ -3337,12 +4449,24 @@ class Harness:
             "schema_version": WORKSPACE_DISPATCH_LEASE_SCHEMA_VERSION,
             "status": status,
             "workspace_root": str(workspace),
+            "scheduler_policy": (
+                latest_payload.get("scheduler_policy")
+                if isinstance(latest_payload, dict)
+                else None
+            ),
             "lease": lease,
             "latest_reports": reports,
             "latest_report": latest_report,
             "queue_count": len(queue),
             "queue": queue,
+            "selected": deepcopy(latest_payload.get("selected")) if isinstance(latest_payload, dict) else None,
             "latest_report_lease": latest_report_lease,
+            "stale_running_recoveries": deepcopy(latest_payload.get("stale_running_recoveries"))
+            if isinstance(latest_payload, dict) and isinstance(latest_payload.get("stale_running_recoveries"), list)
+            else [],
+            "stale_running_blocks": deepcopy(latest_payload.get("stale_running_blocks"))
+            if isinstance(latest_payload, dict) and isinstance(latest_payload.get("stale_running_blocks"), list)
+            else [],
         }
 
     def _runtime_workspace_dispatch_reports(self, workspace: Path) -> dict[str, Any]:
@@ -3385,14 +4509,63 @@ class Harness:
                 continue
             summary = item.get("summary") if isinstance(item.get("summary"), dict) else {}
             next_task = summary.get("next_task") if isinstance(summary.get("next_task"), dict) else None
+            checkpoint_readiness = (
+                item.get("checkpoint_readiness")
+                if isinstance(item.get("checkpoint_readiness"), dict)
+                else summary.get("checkpoint_readiness")
+                if isinstance(summary.get("checkpoint_readiness"), dict)
+                else {}
+            )
+            drive_control = summary.get("drive_control") if isinstance(summary.get("drive_control"), dict) else {}
+            stale_running_recovery = (
+                item.get("stale_running_recovery")
+                if isinstance(item.get("stale_running_recovery"), dict)
+                else drive_control.get("stale_running_recovery")
+                if isinstance(drive_control.get("stale_running_recovery"), dict)
+                else None
+            )
+            stale_running_preflight = (
+                item.get("stale_running_preflight")
+                if isinstance(item.get("stale_running_preflight"), dict)
+                else drive_control.get("stale_running_preflight")
+                if isinstance(drive_control.get("stale_running_preflight"), dict)
+                else None
+            )
+            stale_running_block = (
+                item.get("stale_running_block")
+                if isinstance(item.get("stale_running_block"), dict)
+                else drive_control.get("stale_running_block")
+                if isinstance(drive_control.get("stale_running_block"), dict)
+                else None
+            )
             compact.append(
                 {
                     "index": item.get("index"),
+                    "scheduler_rank": item.get("scheduler_rank"),
                     "project": item.get("project"),
                     "root": item.get("root"),
                     "eligible": bool(item.get("eligible", False)),
                     "selected": bool(item.get("selected", False)),
                     "dispatch_status": item.get("dispatch_status"),
+                    "scheduler_policy": item.get("scheduler_policy"),
+                    "score": item.get("score"),
+                    "score_components": deepcopy(item.get("score_components"))
+                    if isinstance(item.get("score_components"), dict)
+                    else {},
+                    "selected_reason": deepcopy(item.get("selected_reason"))
+                    if isinstance(item.get("selected_reason"), dict)
+                    else None,
+                    "backoff": deepcopy(item.get("backoff")) if isinstance(item.get("backoff"), dict) else None,
+                    "checkpoint_readiness": deepcopy(checkpoint_readiness),
+                    "stale_running_recovery": deepcopy(stale_running_recovery)
+                    if isinstance(stale_running_recovery, dict)
+                    else None,
+                    "stale_running_preflight": deepcopy(stale_running_preflight)
+                    if isinstance(stale_running_preflight, dict)
+                    else None,
+                    "stale_running_block": deepcopy(stale_running_block)
+                    if isinstance(stale_running_block, dict)
+                    else None,
                     "skip_codes": [
                         str(reason.get("code"))
                         for reason in item.get("skip_reasons", [])
@@ -4210,12 +5383,19 @@ continuation stage(s) were appended.
         validation: dict[str, Any] | None = None,
         context_pack: dict[str, Any] | None = None,
         failure_isolation: dict[str, Any] | None = None,
+        status: str | None = None,
+        message: str | None = None,
+        checkpoint_gate: dict[str, Any] | None = None,
+        checkpoint_readiness: dict[str, Any] | None = None,
+        goal_gap_scorecard: dict[str, Any] | None = None,
     ) -> None:
         report_path.parent.mkdir(parents=True, exist_ok=True)
         lines = [
             "# Self Iteration Report",
             "",
             f"- Reason: `{reason}`",
+            f"- Status: `{status or run.status}`",
+            f"- Message: {message or run.stderr or run.stdout or run.status}",
             f"- Snapshot: `{snapshot_path.relative_to(self.project_root)}`",
         ]
         if context_pack is not None:
@@ -4234,6 +5414,70 @@ continuation stage(s) were appended.
                     "",
                     "```json",
                     json.dumps(context_pack.get("summary", {}), indent=2, sort_keys=True),
+                    "```",
+                    "",
+                ]
+            )
+        scorecard_payload = (
+            deepcopy(goal_gap_scorecard)
+            if isinstance(goal_gap_scorecard, dict)
+            else deepcopy(context_pack.get("goal_gap_scorecard"))
+            if isinstance(context_pack, dict) and isinstance(context_pack.get("goal_gap_scorecard"), dict)
+            else None
+        )
+        if isinstance(scorecard_payload, dict):
+            lines.extend(
+                [
+                    "## Goal-Gap Scorecard",
+                    "",
+                    "```json",
+                    json.dumps(
+                        {
+                            "summary": scorecard_payload.get("summary", {}),
+                            "category_order": scorecard_payload.get("category_order", []),
+                            "categories": scorecard_payload.get("categories", []),
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    ),
+                    "```",
+                    "",
+                ]
+            )
+        readiness_payload = checkpoint_readiness
+        if not isinstance(readiness_payload, dict) and isinstance(checkpoint_gate, dict):
+            readiness_payload = checkpoint_gate.get("checkpoint_readiness")
+        if isinstance(readiness_payload, dict):
+            compact_readiness = self._compact_checkpoint_readiness(readiness_payload)
+            lines.extend(
+                [
+                    "## Checkpoint Readiness",
+                    "",
+                    f"- Gate phase: `{(checkpoint_gate or {}).get('phase', 'unknown')}`",
+                    f"- Gate status: `{(checkpoint_gate or {}).get('status', 'unknown')}`",
+                    f"- Ready: `{str(bool(compact_readiness.get('ready'))).lower()}`",
+                    f"- Blocking: `{str(bool(compact_readiness.get('blocking'))).lower()}`",
+                    f"- Reason: `{compact_readiness.get('reason')}`",
+                    f"- Dirty paths: `{len(compact_readiness.get('dirty_paths', []))}`",
+                    f"- Blocking paths: `{len(compact_readiness.get('blocking_paths', []))}`",
+                    f"- Recommended operator action: {compact_readiness.get('recommended_action')}",
+                    "",
+                ]
+            )
+            if compact_readiness.get("dirty_paths"):
+                lines.extend(["Dirty paths:", ""])
+                lines.extend(f"- `{path}`" for path in compact_readiness.get("dirty_paths", []))
+                lines.append("")
+            if compact_readiness.get("blocking_paths"):
+                lines.extend(["Blocking paths:", ""])
+                lines.extend(f"- `{path}`" for path in compact_readiness.get("blocking_paths", []))
+                lines.append("")
+            lines.extend(
+                [
+                    "Machine-readable checkpoint readiness:",
+                    "",
+                    "```json",
+                    json.dumps(compact_readiness, indent=2, sort_keys=True),
                     "```",
                     "",
                 ]
@@ -4433,6 +5677,12 @@ continuation stage(s) were appended.
             no_progress_timeout = self._coerce_optional_nonnegative_seconds(
                 item.get("no_progress_timeout_seconds", item.get("no_progress_seconds"))
             )
+            capability_field = self._requested_capability_field(item)
+            requested_capabilities = (
+                self._normalize_requested_capabilities(item.get(capability_field))
+                if capability_field is not None
+                else ()
+            )
             commands.append(
                 AcceptanceCommand(
                     name=str(name),
@@ -4444,6 +5694,7 @@ continuation stage(s) were appended.
                     model=str(item["model"]) if item.get("model") else None,
                     sandbox=str(item.get("sandbox", "workspace-write")),
                     no_progress_timeout_seconds=no_progress_timeout,
+                    requested_capabilities=requested_capabilities,
                 )
             )
         return commands
@@ -4477,10 +5728,27 @@ continuation stage(s) were appended.
         failure_isolation = (
             summary.get("failure_isolation") if isinstance(summary.get("failure_isolation"), dict) else {}
         )
+        replay_guard = (
+            summary.get("replay_guard") if isinstance(summary.get("replay_guard"), dict) else {}
+        )
+        capability_policy = (
+            summary.get("capability_policy") if isinstance(summary.get("capability_policy"), dict) else {}
+        )
+        checkpoint_readiness = (
+            summary.get("checkpoint_readiness") if isinstance(summary.get("checkpoint_readiness"), dict) else {}
+        )
         latest_reports = self._runtime_enriched_report_context()
         workspace_dispatch = self._runtime_workspace_dispatch_summary()
         latest_reports["workspace_dispatch_reports"] = deepcopy(workspace_dispatch.get("latest_reports", {}))
         current_task = self._runtime_current_task(summary, drive_control)
+        current_phase = (current_task or {}).get("phase")
+        if current_phase is None and bool(drive_control.get("active", False)):
+            current_phase = drive_control.get("current_activity")
+        goal_gap_scorecard = (
+            deepcopy(summary.get("goal_gap_scorecard"))
+            if isinstance(summary.get("goal_gap_scorecard"), dict)
+            else self.goal_gap_scorecard(status_summary=summary, latest_reports=latest_reports)
+        )
         return {
             "schema_version": RUNTIME_DASHBOARD_SCHEMA_VERSION,
             "kind": "engineering-harness.runtime-dashboard",
@@ -4491,20 +5759,40 @@ continuation stage(s) were appended.
             "drive_control": self._runtime_drive_control_payload(drive_control),
             "drive_watchdog": deepcopy(drive_control.get("watchdog") if isinstance(drive_control.get("watchdog"), dict) else {}),
             "current_task": current_task,
-            "current_phase": (current_task or {}).get("phase") or drive_control.get("current_activity"),
+            "current_phase": current_phase,
             "executor_no_progress": self._runtime_executor_no_progress_payload(
                 summary,
                 drive_control,
                 failure_isolation,
             ),
             "approval_leases": self._runtime_approval_leases_payload(approval_queue),
+            "capability_policy": deepcopy(capability_policy),
             "failure_isolation": deepcopy(failure_isolation),
+            "replay_guard": deepcopy(replay_guard),
+            "checkpoint_readiness": deepcopy(checkpoint_readiness),
+            "self_iteration": deepcopy(summary.get("self_iteration", {})),
             "workspace_dispatch": workspace_dispatch,
             "latest_reports": latest_reports,
+            "goal_gap_scorecard": goal_gap_scorecard,
             "goal_gap": self._runtime_goal_gap_payload(summary, latest_reports),
         }
 
     def _runtime_drive_control_payload(self, drive_control: dict[str, Any]) -> dict[str, Any]:
+        stale_running_recovery = (
+            deepcopy(drive_control.get("stale_running_recovery"))
+            if isinstance(drive_control.get("stale_running_recovery"), dict)
+            else None
+        )
+        stale_running_preflight = (
+            deepcopy(drive_control.get("stale_running_preflight"))
+            if isinstance(drive_control.get("stale_running_preflight"), dict)
+            else None
+        )
+        stale_running_block = (
+            deepcopy(drive_control.get("stale_running_block"))
+            if isinstance(drive_control.get("stale_running_block"), dict)
+            else None
+        )
         return {
             "schema_version": drive_control.get("schema_version"),
             "status": drive_control.get("status", "idle"),
@@ -4519,6 +5807,9 @@ continuation stage(s) were appended.
             "heartbeat_count": int(drive_control.get("heartbeat_count", 0) or 0),
             "current_activity": drive_control.get("current_activity"),
             "last_progress_message": drive_control.get("last_progress_message"),
+            "stale_running_recovery": stale_running_recovery,
+            "stale_running_preflight": stale_running_preflight,
+            "stale_running_block": stale_running_block,
         }
 
     def _runtime_current_task(
@@ -4751,6 +6042,680 @@ continuation stage(s) were appended.
             }
         ]
 
+    def _checkpoint_readiness_task(
+        self,
+        next_task: HarnessTask | None,
+        drive_control: dict[str, Any],
+    ) -> HarnessTask | None:
+        current = drive_control.get("current_task") if isinstance(drive_control.get("current_task"), dict) else {}
+        task_id = str(current.get("id") or "")
+        if task_id:
+            try:
+                return self.task_by_id(task_id)
+            except KeyError:
+                pass
+        return next_task
+
+    def goal_gap_scorecard(
+        self,
+        *,
+        status_summary: dict[str, Any] | None = None,
+        latest_reports: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        summary = deepcopy(status_summary) if isinstance(status_summary, dict) else self.status_summary()
+        evidence = self._goal_gap_evidence(summary)
+        task_counts = self._goal_gap_task_counts(summary)
+        duplicate_plan = self._self_iteration_duplicate_plan_summary()
+        manifest_context = self._self_iteration_manifest_context()
+        source_inventory = evidence.get("source") if isinstance(evidence.get("source"), dict) else {}
+        latest_retrospective = self._goal_gap_scorecard_latest_retrospective_summary(latest_reports=latest_reports)
+        workspace_dispatch = self._runtime_workspace_dispatch_summary()
+        categories = self._goal_gap_scorecard_categories(
+            summary=summary,
+            evidence=evidence,
+            task_counts=task_counts,
+            duplicate_plan=duplicate_plan,
+            manifest_context=manifest_context,
+            source_inventory=source_inventory,
+            latest_retrospective=latest_retrospective,
+            workspace_dispatch=workspace_dispatch,
+        )
+        status_counts = {status: 0 for status in GOAL_GAP_SCORECARD_STATUS_ORDER}
+        for category in categories:
+            status_counts[str(category.get("status", "missing"))] = (
+                status_counts.get(str(category.get("status", "missing")), 0) + 1
+            )
+        max_risk = max((int(category.get("risk_score", 0) or 0) for category in categories), default=0)
+        max_severity = max((int(category.get("severity", 0) or 0) for category in categories), default=0)
+        if status_counts.get("blocked", 0):
+            overall_status = "blocked"
+        elif status_counts.get("missing", 0) or status_counts.get("partial", 0):
+            overall_status = "partial"
+        else:
+            overall_status = "complete"
+        self_iteration = summary.get("self_iteration") if isinstance(summary.get("self_iteration"), dict) else {}
+        objective = str(self_iteration.get("objective") or UNATTENDED_RELIABILITY_GOAL)
+        payload = {
+            "schema_version": GOAL_GAP_SCORECARD_SCHEMA_VERSION,
+            "kind": "engineering-harness.goal-gap-scorecard",
+            "generated_at": utc_now(),
+            "goal": UNATTENDED_RELIABILITY_GOAL,
+            "objective": objective,
+            "objective_source": "self_iteration.objective" if self_iteration.get("objective") else "default",
+            "category_order": list(GOAL_GAP_SCORECARD_CATEGORY_ORDER),
+            "summary": {
+                "category_count": len(categories),
+                "overall_status": overall_status,
+                "status_counts": status_counts,
+                "max_risk_score": max_risk,
+                "highest_severity": max_severity,
+            },
+            "categories": categories,
+            "latest_drive_goal_gap_retrospective": latest_retrospective,
+            "recommended_next_stage_themes": self._goal_gap_scorecard_theme_summary(categories),
+            "limits": {
+                "category_count": len(GOAL_GAP_SCORECARD_CATEGORY_ORDER),
+                "evidence_paths_per_category": SELF_ITERATION_CONTEXT_LIMITS["goal_gap_scorecard_evidence_paths"],
+                "themes_per_category": SELF_ITERATION_CONTEXT_LIMITS["goal_gap_scorecard_themes"],
+                "recent_manifest_count": SELF_ITERATION_CONTEXT_LIMITS["recent_manifest_count"],
+            },
+            "evidence_sources": [
+                "latest_drive_goal_gap_retrospective",
+                "manifest_index",
+                "capability_policy",
+                "failure_isolation",
+                "approval_queue",
+                "drive_control",
+                "checkpoint_readiness",
+                "workspace_dispatch",
+                "test_inventory",
+                "source_inventory",
+                "git",
+            ],
+        }
+        return self._redact_context_value(payload)
+
+    def _goal_gap_scorecard_categories(
+        self,
+        *,
+        summary: dict[str, Any],
+        evidence: dict[str, Any],
+        task_counts: dict[str, int],
+        duplicate_plan: dict[str, Any],
+        manifest_context: dict[str, Any],
+        source_inventory: dict[str, Any],
+        latest_retrospective: dict[str, Any],
+        workspace_dispatch: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        drive_control = evidence.get("drive_control") if isinstance(evidence.get("drive_control"), dict) else {}
+        watchdog = drive_control.get("watchdog") if isinstance(drive_control.get("watchdog"), dict) else {}
+        executor_watchdog = summary.get("executor_watchdog") if isinstance(summary.get("executor_watchdog"), dict) else {}
+        failure_isolation = (
+            evidence.get("failure_isolation") if isinstance(evidence.get("failure_isolation"), dict) else {}
+        )
+        approval_queue = evidence.get("approval_queue") if isinstance(evidence.get("approval_queue"), dict) else {}
+        capability_policy = (
+            summary.get("capability_policy") if isinstance(summary.get("capability_policy"), dict) else {}
+        )
+        checkpoint_readiness = (
+            evidence.get("checkpoint_readiness") if isinstance(evidence.get("checkpoint_readiness"), dict) else {}
+        )
+        self_iteration = summary.get("self_iteration") if isinstance(summary.get("self_iteration"), dict) else {}
+        manifest_index = evidence.get("manifest_index") if isinstance(evidence.get("manifest_index"), dict) else {}
+        tests = evidence.get("tests") if isinstance(evidence.get("tests"), dict) else {}
+        git = evidence.get("git") if isinstance(evidence.get("git"), dict) else {}
+
+        current_executor_watchdog = (
+            drive_control.get("executor_watchdog")
+            if isinstance(drive_control.get("executor_watchdog"), dict)
+            else {}
+        )
+        unresolved_no_progress = any(
+            isinstance(item, dict)
+            and (
+                item.get("failure_kind") == "executor_no_progress"
+                or (
+                    isinstance(item.get("executor_watchdog"), dict)
+                    and item.get("executor_watchdog", {}).get("status") == "no_progress"
+                )
+            )
+            for item in failure_isolation.get("latest_isolated_failures", [])
+            if isinstance(item, dict)
+        )
+        if current_executor_watchdog.get("status") == "no_progress" or unresolved_no_progress:
+            stuck_status, stuck_risk = "blocked", 88
+            stuck_rationale = "Current no-progress watchdog evidence is unresolved."
+        elif executor_watchdog.get("enabled") and watchdog.get("schema_version"):
+            stuck_status, stuck_risk = "complete", 8
+            stuck_rationale = "Drive stale checks and executor no-progress thresholds are visible."
+        elif watchdog.get("schema_version") or executor_watchdog.get("schema_version"):
+            stuck_status, stuck_risk = "partial", 42
+            stuck_rationale = "Only part of the stuck-detection evidence is available or enabled."
+        else:
+            stuck_status, stuck_risk = "missing", 72
+            stuck_rationale = "No local watchdog evidence is available."
+
+        stale_preflight = (
+            drive_control.get("stale_running_preflight")
+            if isinstance(drive_control.get("stale_running_preflight"), dict)
+            else {}
+        )
+        stale_recovery = (
+            drive_control.get("stale_running_recovery")
+            if isinstance(drive_control.get("stale_running_recovery"), dict)
+            else {}
+        )
+        stale_block = (
+            drive_control.get("stale_running_block")
+            if isinstance(drive_control.get("stale_running_block"), dict)
+            else {}
+        )
+        stale_preflight_status = str(stale_preflight.get("status") or "")
+        stale_recommendations: list[str] = []
+        if stale_preflight_status == "recoverable":
+            stale_status, stale_risk = "blocked", 88
+            stale_rationale = "Stale-running recovery is required for a stale heartbeat with a dead or missing owner pid."
+            stale_recommendations = ["recover-stale-running-drive"]
+        elif stale_preflight_status in {"in_progress", "protected"} or (
+            stale_preflight_status == "blocked" and stale_preflight.get("reason") == "heartbeat_fresh"
+        ):
+            stale_status, stale_risk = "complete", 5
+            stale_rationale = "in_progress: running drive has a fresh heartbeat, so stale recovery is not needed."
+        elif stale_block.get("blocking"):
+            stale_status, stale_risk = "partial", 42
+            stale_rationale = str(
+                stale_block.get("message") or "Active drive state is protected from stale-running recovery."
+            )
+        elif stale_preflight.get("schema_version") or stale_recovery.get("schema_version"):
+            stale_status, stale_risk = "complete", 8
+            stale_rationale = "Stale-running preflight or recovery evidence is recorded locally."
+        else:
+            stale_status, stale_risk = "missing", 68
+            stale_rationale = "No stale-running recovery preflight is recorded."
+
+        dirty_paths = checkpoint_readiness.get("dirty_paths") if isinstance(checkpoint_readiness.get("dirty_paths"), list) else []
+        blocking_paths = (
+            checkpoint_readiness.get("blocking_paths")
+            if isinstance(checkpoint_readiness.get("blocking_paths"), list)
+            else []
+        )
+        safe_paths = (
+            checkpoint_readiness.get("safe_to_checkpoint_paths")
+            if isinstance(checkpoint_readiness.get("safe_to_checkpoint_paths"), list)
+            else []
+        )
+        drive_active = str(drive_control.get("status") or "") == "running" or bool(drive_control.get("active"))
+        checkpoint_recommendations = ["close-git-boundary"] if blocking_paths else []
+        if blocking_paths:
+            checkpoint_status, checkpoint_risk = "blocked", 92
+            checkpoint_rationale = str(
+                checkpoint_readiness.get("recommended_action") or "Checkpoint readiness is blocked."
+            )
+        elif checkpoint_readiness.get("blocking"):
+            checkpoint_status, checkpoint_risk = "blocked", 84
+            checkpoint_rationale = str(
+                checkpoint_readiness.get("recommended_action") or "Checkpoint readiness is blocked."
+            )
+        elif not checkpoint_readiness.get("is_repository"):
+            checkpoint_status, checkpoint_risk = "missing", 65
+            checkpoint_rationale = "No git repository is available for unattended checkpoint boundaries."
+        elif safe_paths:
+            checkpoint_status, checkpoint_risk = "partial", 24 if drive_active else 30
+            checkpoint_state = "in_progress" if drive_active else "checkpoint_pending"
+            checkpoint_rationale = (
+                f"{checkpoint_state}: {len(safe_paths)} safe-to-checkpoint path(s) are dirty and no "
+                f"blocking paths are present: {', '.join(str(path) for path in safe_paths[:4])}"
+            )
+        elif dirty_paths:
+            checkpoint_status, checkpoint_risk = "partial", 36
+            checkpoint_rationale = f"{len(dirty_paths)} local git path(s) are dirty but not blocking."
+        elif checkpoint_readiness.get("ready"):
+            checkpoint_status, checkpoint_risk = "complete", 4
+            checkpoint_rationale = "Checkpoint readiness is clean."
+        else:
+            checkpoint_status, checkpoint_risk = "partial", 45
+            checkpoint_rationale = "Checkpoint readiness is present but not cleanly ready."
+
+        unresolved_failures = int(failure_isolation.get("unresolved_count", 0) or 0)
+        if unresolved_failures > 0:
+            failure_status, failure_risk = "blocked", 92
+            failure_rationale = f"{unresolved_failures} unresolved isolated failure(s) need local recovery."
+        elif failure_isolation.get("schema_version"):
+            failure_status, failure_risk = "complete", 6
+            failure_rationale = "Failure isolation summary is available with no unresolved failures."
+        else:
+            failure_status, failure_risk = "missing", 68
+            failure_rationale = "Failure isolation summary is missing."
+
+        duplicate_groups = int(duplicate_plan.get("duplicate_group_count", 0) or 0)
+        if bool(self_iteration.get("enabled")) and duplicate_plan.get("algorithm"):
+            duplicate_status = "partial" if duplicate_groups else "complete"
+            duplicate_risk = 34 if duplicate_groups else 10
+            duplicate_rationale = (
+                f"{duplicate_groups} duplicate continuation plan group(s) are visible to the guard."
+                if duplicate_groups
+                else "Duplicate-plan fingerprints are available for self-iteration planning."
+            )
+        elif duplicate_plan.get("algorithm"):
+            duplicate_status, duplicate_risk = "partial", 44
+            duplicate_rationale = "Duplicate-plan fingerprints exist, but self-iteration is not enabled."
+        else:
+            duplicate_status, duplicate_risk = "missing", 70
+            duplicate_rationale = "No duplicate-plan fingerprint evidence is available."
+
+        retrospective_risks = latest_retrospective.get("remaining_risks")
+        if not isinstance(retrospective_risks, list):
+            retrospective_risks = []
+        blocking_risk_ids = {
+            "blocked_task",
+            "blocked_roadmap_tasks",
+            "checkpoint_blocking_paths",
+            "checkpoint_not_ready",
+            "failed_task",
+            "failed_roadmap_tasks",
+            "isolated_failure",
+            "pending_approvals",
+            "unresolved_isolated_failures",
+        }
+        has_blocking_retrospective_risk = any(
+            isinstance(item, dict)
+            and (
+                str(item.get("id")) in blocking_risk_ids
+                or str(item.get("severity", "")).lower() == "high"
+            )
+            for item in retrospective_risks
+        )
+        if not latest_retrospective.get("available"):
+            retrospective_status, retrospective_risk = "missing", 64
+            retrospective_rationale = "No latest drive goal-gap retrospective is available."
+        elif has_blocking_retrospective_risk:
+            retrospective_status, retrospective_risk = "blocked", 86
+            retrospective_rationale = "Latest drive retrospective contains unresolved high-risk blockers."
+        elif retrospective_risks:
+            retrospective_status, retrospective_risk = "partial", 46
+            retrospective_rationale = "Latest drive retrospective exists and still lists remaining risks."
+        else:
+            retrospective_status, retrospective_risk = "complete", 8
+            retrospective_rationale = "Latest drive retrospective has no remaining risks."
+
+        runtime_fields = (
+            drive_control.get("schema_version"),
+            approval_queue.get("schema_version"),
+            failure_isolation.get("schema_version"),
+            manifest_index.get("manifest_count") is not None,
+        )
+        if all(runtime_fields):
+            runtime_status, runtime_risk = "complete", 6
+            runtime_rationale = "Status, drive control, approval, failure, and manifest summaries are dashboard-ready."
+        elif any(runtime_fields):
+            runtime_status, runtime_risk = "partial", 38
+            runtime_rationale = "Runtime dashboard evidence is partially populated."
+        else:
+            runtime_status, runtime_risk = "missing", 70
+            runtime_rationale = "Runtime dashboard evidence is not available."
+
+        pending_approvals = int(approval_queue.get("pending_count", 0) or 0)
+        stale_approvals = int(approval_queue.get("stale_count", 0) or 0)
+        capability_blocking = int(capability_policy.get("blocking_count", 0) or 0)
+        capability_requires_approval = len(
+            capability_policy.get("requires_approval", [])
+            if isinstance(capability_policy.get("requires_approval"), list)
+            else []
+        )
+        if pending_approvals > 0 or capability_blocking > 0:
+            approval_status, approval_risk = "blocked", 94
+            approval_rationale = (
+                f"{pending_approvals} pending approval(s) and {capability_blocking} capability policy blocker(s)."
+            )
+        elif stale_approvals > 0 or capability_requires_approval > 0:
+            approval_status, approval_risk = "partial", 48
+            approval_rationale = (
+                f"{stale_approvals} stale approval(s) and "
+                f"{capability_requires_approval} capability decision(s) requiring approval."
+            )
+        elif approval_queue.get("schema_version") and capability_policy.get("schema_version"):
+            approval_status, approval_risk = "complete", 6
+            approval_rationale = "Approval queue and capability policy summaries have no open blockers."
+        else:
+            approval_status, approval_risk = "missing", 72
+            approval_rationale = "Approval queue or capability policy summary is missing."
+
+        workspace_status_value = str(workspace_dispatch.get("status") or "not_found")
+        workspace_lease = workspace_dispatch.get("lease") if isinstance(workspace_dispatch.get("lease"), dict) else {}
+        workspace_queue = workspace_dispatch.get("queue") if isinstance(workspace_dispatch.get("queue"), list) else []
+        if workspace_lease.get("stale"):
+            workspace_status, workspace_risk = "blocked", 78
+            workspace_rationale = "Workspace dispatch has a stale lease requiring operator attention."
+        elif workspace_status_value == "active_lease":
+            workspace_status, workspace_risk = "partial", 32
+            workspace_rationale = "Workspace dispatch has an active lease; fairness evidence is still being produced."
+        elif workspace_status_value == "not_found":
+            workspace_status, workspace_risk = "missing", 55
+            workspace_rationale = "No workspace dispatch reports or lease evidence were found."
+        elif workspace_queue:
+            workspace_status, workspace_risk = "complete", 12
+            workspace_rationale = f"Workspace dispatch queue evidence includes {len(workspace_queue)} project item(s)."
+        else:
+            workspace_status, workspace_risk = "partial", 36
+            workspace_rationale = f"Workspace dispatch status is {workspace_status_value} without a queue."
+
+        recent_manifests = (
+            manifest_context.get("recent_task_manifests")
+            if isinstance(manifest_context.get("recent_task_manifests"), list)
+            else []
+        )
+        e2e_runs: list[dict[str, Any]] = []
+        e2e_manifest_paths: list[str] = []
+        for manifest in recent_manifests:
+            if not isinstance(manifest, dict):
+                continue
+            manifest_path = str(manifest.get("manifest_path") or "")
+            for run in manifest.get("runs", []):
+                if not isinstance(run, dict) or str(run.get("phase")) != "e2e":
+                    continue
+                e2e_runs.append(run)
+                if manifest_path:
+                    e2e_manifest_paths.append(manifest_path)
+        passed_e2e = any(str(run.get("status")) == "passed" for run in e2e_runs)
+        roadmap_e2e_count = sum(1 for task in self.iter_tasks() if task.e2e)
+        test_count = int(tests.get("total_count", 0) or 0)
+        source_count = int(source_inventory.get("total_count", 0) or 0)
+        if passed_e2e:
+            e2e_status, e2e_risk = "complete", 8
+            e2e_rationale = "Recent manifests include a passing E2E run."
+        elif e2e_runs or roadmap_e2e_count > 0:
+            e2e_status, e2e_risk = "partial", 52
+            e2e_rationale = "E2E gates are defined or have run, but no recent passing E2E evidence was found."
+        elif test_count > 0 and source_count > 0:
+            e2e_status, e2e_risk = "partial", 58
+            e2e_rationale = "Local tests and source inventory exist, but no E2E journey evidence was found."
+        else:
+            e2e_status, e2e_risk = "missing", 78
+            e2e_rationale = "No local E2E evidence, tests, or source inventory were found."
+
+        category_by_id = {
+            "stuck_detection": self._goal_gap_scorecard_category(
+                "stuck_detection",
+                "Stuck detection",
+                stuck_status,
+                stuck_risk,
+                ["drive_control.watchdog", "executor_watchdog", "failure_isolation.executor_watchdog"],
+                stuck_rationale,
+                ["tighten-watchdog-thresholds"] if stuck_status != "complete" else [],
+            ),
+            "stale_running_recovery": self._goal_gap_scorecard_category(
+                "stale_running_recovery",
+                "Stale running recovery",
+                stale_status,
+                stale_risk,
+                [
+                    "drive_control.stale_running_preflight",
+                    "drive_control.stale_running_recovery",
+                    "drive_control.stale_running_block",
+                ],
+                stale_rationale,
+                stale_recommendations,
+            ),
+            "checkpoint_boundaries": self._goal_gap_scorecard_category(
+                "checkpoint_boundaries",
+                "Checkpoint boundaries",
+                checkpoint_status,
+                checkpoint_risk,
+                ["checkpoint_readiness", "git.status_lines"],
+                checkpoint_rationale,
+                checkpoint_recommendations,
+            ),
+            "failure_isolation": self._goal_gap_scorecard_category(
+                "failure_isolation",
+                "Failure isolation",
+                failure_status,
+                failure_risk,
+                ["failure_isolation.latest_isolated_failures", "manifest_index.failure_isolation"],
+                failure_rationale,
+                ["recover-isolated-failure"] if failure_status == "blocked" else [],
+            ),
+            "duplicate_plan_guard": self._goal_gap_scorecard_category(
+                "duplicate_plan_guard",
+                "Duplicate-plan guard",
+                duplicate_status,
+                duplicate_risk,
+                ["duplicate_plan", "roadmap.continuation.stages", "self_iteration.latest_assessment"],
+                duplicate_rationale,
+                ["refresh-duplicate-plan-context"] if duplicate_status != "complete" else [],
+            ),
+            "goal_gap_retrospective": self._goal_gap_scorecard_category(
+                "goal_gap_retrospective",
+                "Goal-gap retrospective",
+                retrospective_status,
+                retrospective_risk,
+                [
+                    path
+                    for path in (
+                        latest_retrospective.get("source_report_json"),
+                        latest_retrospective.get("source_report"),
+                        "runtime_dashboard.goal_gap",
+                    )
+                    if path
+                ],
+                retrospective_rationale,
+                [
+                    str(item.get("id"))
+                    for item in latest_retrospective.get("likely_next_stage_themes", [])
+                    if isinstance(item, dict) and item.get("id")
+                ]
+                or (["produce-goal-gap-retrospective"] if retrospective_status == "missing" else []),
+            ),
+            "runtime_dashboard": self._goal_gap_scorecard_category(
+                "runtime_dashboard",
+                "Runtime dashboard",
+                runtime_status,
+                runtime_risk,
+                ["runtime_dashboard", "latest_reports", "status_summary"],
+                runtime_rationale,
+                ["refresh-runtime-dashboard-evidence"] if runtime_status != "complete" else [],
+            ),
+            "approval_capability_policy_safety": self._goal_gap_scorecard_category(
+                "approval_capability_policy_safety",
+                "Approval and capability policy safety",
+                approval_status,
+                approval_risk,
+                ["approval_queue", "capability_policy", "manifest_index.policy_decision_summary"],
+                approval_rationale,
+                ["resolve-approval-policy-blockers"] if approval_status == "blocked" else [],
+            ),
+            "workspace_dispatch_fairness_backoff": self._goal_gap_scorecard_category(
+                "workspace_dispatch_fairness_backoff",
+                "Workspace dispatch fairness and backoff",
+                workspace_status,
+                workspace_risk,
+                ["runtime_dashboard.workspace_dispatch", "workspace_dispatch.latest_reports"],
+                workspace_rationale,
+                ["add-workspace-dispatch-evidence"] if workspace_status == "missing" else [],
+            ),
+            "real_e2e_evidence": self._goal_gap_scorecard_category(
+                "real_e2e_evidence",
+                "Real E2E evidence",
+                e2e_status,
+                e2e_risk,
+                [*e2e_manifest_paths, "test_inventory", "source_inventory", "roadmap.tasks.e2e"],
+                e2e_rationale,
+                ["add-real-e2e-evidence"] if e2e_status != "complete" else [],
+            ),
+        }
+        return [category_by_id[category_id] for category_id in GOAL_GAP_SCORECARD_CATEGORY_ORDER]
+
+    def _goal_gap_scorecard_category(
+        self,
+        category_id: str,
+        title: str,
+        status: str,
+        risk_score: int,
+        evidence_paths: list[Any],
+        rationale: str,
+        recommended_next_stage_themes: list[Any],
+    ) -> dict[str, Any]:
+        normalized_status = status if status in GOAL_GAP_SCORECARD_STATUS_ORDER else "missing"
+        bounded_evidence = [
+            str(path)
+            for path in dict.fromkeys(str(path) for path in evidence_paths if str(path).strip())
+        ][: SELF_ITERATION_CONTEXT_LIMITS["goal_gap_scorecard_evidence_paths"]]
+        bounded_themes = [
+            str(theme)
+            for theme in dict.fromkeys(str(theme) for theme in recommended_next_stage_themes if str(theme).strip())
+        ][: SELF_ITERATION_CONTEXT_LIMITS["goal_gap_scorecard_themes"]]
+        score = max(0, min(100, int(risk_score)))
+        return {
+            "id": category_id,
+            "title": title,
+            "status": normalized_status,
+            "risk_score": score,
+            "severity": self._goal_gap_scorecard_severity(score),
+            "evidence_paths": bounded_evidence,
+            "rationale": self._truncate_text(str(rationale), SELF_ITERATION_CONTEXT_LIMITS["message_chars"]),
+            "recommended_next_stage_themes": bounded_themes,
+        }
+
+    def _goal_gap_scorecard_severity(self, risk_score: int) -> int:
+        if risk_score >= 80:
+            return 4
+        if risk_score >= 60:
+            return 3
+        if risk_score >= 30:
+            return 2
+        if risk_score > 0:
+            return 1
+        return 0
+
+    def _goal_gap_scorecard_theme_summary(self, categories: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        themes: dict[str, dict[str, Any]] = {}
+        for category in categories:
+            category_id = str(category.get("id") or "")
+            for theme in category.get("recommended_next_stage_themes", []):
+                theme_id = str(theme)
+                item = themes.setdefault(theme_id, {"id": theme_id, "source_categories": []})
+                if category_id and category_id not in item["source_categories"]:
+                    item["source_categories"].append(category_id)
+        return [themes[key] for key in sorted(themes)[: SELF_ITERATION_CONTEXT_LIMITS["goal_gap_scorecard_themes"] * 3]]
+
+    def _goal_gap_scorecard_latest_retrospective_summary(
+        self,
+        *,
+        latest_reports: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        candidates: list[tuple[Path, str | None]] = []
+        reports = latest_reports if isinstance(latest_reports, dict) else None
+        drive_reports = reports.get("drive_reports") if isinstance(reports, dict) else {}
+        files = drive_reports.get("files") if isinstance(drive_reports, dict) else []
+        if isinstance(files, list):
+            for item in files:
+                if not isinstance(item, dict) or not item.get("json_path"):
+                    continue
+                json_path = self.project_root / str(item["json_path"])
+                candidates.append((json_path, str(item.get("path")) if item.get("path") else None))
+        if not candidates:
+            drive_dir = self.report_dir / "drives"
+            json_paths = sorted(
+                [path for path in drive_dir.glob("*.json") if path.is_file()] if drive_dir.exists() else [],
+                key=self._project_relative_path,
+            )
+            candidates = [(path, None) for path in reversed(json_paths)]
+
+        seen: set[str] = set()
+        for json_path, report_path in candidates:
+            key = str(json_path)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                payload = load_mapping(json_path)
+            except Exception:
+                continue
+            retrospective = payload.get("goal_gap_retrospective") if isinstance(payload, dict) else None
+            if not isinstance(retrospective, dict):
+                continue
+            trigger = retrospective.get("trigger") if isinstance(retrospective.get("trigger"), dict) else {}
+            request = (
+                retrospective.get("request_self_iteration")
+                if isinstance(retrospective.get("request_self_iteration"), dict)
+                else {}
+            )
+            risks = [
+                {
+                    "id": item.get("id"),
+                    "severity": item.get("severity"),
+                    "evidence": item.get("evidence"),
+                }
+                for item in retrospective.get("remaining_risks", [])
+                if isinstance(item, dict)
+            ]
+            themes = [
+                {
+                    "id": item.get("id"),
+                    "title": item.get("title"),
+                    "source_risks": deepcopy(item.get("source_risks", [])),
+                }
+                for item in retrospective.get("likely_next_stage_themes", [])
+                if isinstance(item, dict)
+            ]
+            source_report = report_path or payload.get("drive_report")
+            return {
+                "available": True,
+                "source": "latest_drive_report",
+                "source_report": str(source_report) if source_report else None,
+                "source_report_json": self._project_relative_path(json_path),
+                "stop_class": trigger.get("stop_class"),
+                "status": trigger.get("status"),
+                "remaining_risk_count": len(risks),
+                "remaining_risks": risks[: SELF_ITERATION_CONTEXT_LIMITS["goal_gap_scorecard_themes"] * 2],
+                "likely_next_stage_theme_count": len(themes),
+                "likely_next_stage_themes": themes[: SELF_ITERATION_CONTEXT_LIMITS["goal_gap_scorecard_themes"]],
+                "request_self_iteration": {
+                    "recommended": bool(request.get("recommended", False)),
+                    "reason": request.get("reason"),
+                    "blocked_by": deepcopy(request.get("blocked_by", []))
+                    if isinstance(request.get("blocked_by"), list)
+                    else [],
+                },
+            }
+        return {
+            "available": False,
+            "source": "current_status",
+            "source_report": None,
+            "source_report_json": None,
+            "remaining_risk_count": 0,
+            "remaining_risks": [],
+            "likely_next_stage_theme_count": 0,
+            "likely_next_stage_themes": [],
+            "request_self_iteration": {"recommended": False, "reason": "no latest drive retrospective is available"},
+        }
+
+    def capability_policy_summary(self, manifest_index: dict[str, Any] | None = None) -> dict[str, Any]:
+        index = manifest_index or self.manifest_index_summary()
+        policy_summary = index.get("policy_decision_summary") if isinstance(index, dict) else {}
+        if not isinstance(policy_summary, dict):
+            policy_summary = {}
+        blocking = [
+            deepcopy(decision)
+            for decision in policy_summary.get("blocking", [])
+            if isinstance(decision, dict) and decision.get("kind") == "capability_policy"
+        ]
+        requires_approval = [
+            deepcopy(decision)
+            for decision in policy_summary.get("requires_approval", [])
+            if isinstance(decision, dict) and decision.get("kind") == "capability_policy"
+        ]
+        return {
+            "schema_version": CAPABILITY_POLICY_SCHEMA_VERSION,
+            "known_capabilities": sorted(self._known_capability_names()),
+            "unsafe_capabilities": sorted(UNSAFE_EXECUTOR_CAPABILITIES),
+            "decision_count": int(policy_summary.get("by_kind", {}).get("capability_policy", 0))
+            if isinstance(policy_summary.get("by_kind"), dict)
+            else 0,
+            "blocking_count": len(blocking),
+            "blocking": blocking,
+            "requires_approval": requires_approval,
+        }
+
     def status_summary(self, *, refresh_approvals: bool = True) -> dict[str, Any]:
         state = self.load_state()
         state_tasks = state.get("tasks", {})
@@ -4787,7 +6752,11 @@ continuation stage(s) were appended.
             else self._approval_queue_summary_from_state(state, status_filter="pending")
         )
         manifest_index = self.manifest_index_summary()
+        capability_policy = self.capability_policy_summary(manifest_index)
         failure_isolation = self.latest_isolated_failures_summary()
+        replay_guard = self.replay_guard_summary()
+        next_task = self.next_task()
+        checkpoint_readiness = self.checkpoint_readiness(self._checkpoint_readiness_task(next_task, drive_control))
         summary = {
             "project": self.roadmap.get("project", self.project_root.name),
             "profile": self.roadmap.get("profile"),
@@ -4795,7 +6764,8 @@ continuation stage(s) were appended.
             "roadmap": str(self.roadmap_path),
             "state": str(self.state_path),
             "milestones": list(milestones.values()),
-            "next_task": self.task_payload(self.next_task()),
+            "next_task": self.task_payload(next_task),
+            "checkpoint_readiness": checkpoint_readiness,
             "experience": self.frontend_experience_plan(),
             "continuation": self.continuation_summary(),
             "self_iteration": self.self_iteration_summary(),
@@ -4803,8 +6773,11 @@ continuation stage(s) were appended.
             "executor_watchdog": executor_watchdog,
             "approval_queue": approval_queue,
             "manifest_index": manifest_index,
+            "capability_policy": capability_policy,
             "failure_isolation": failure_isolation,
+            "replay_guard": replay_guard,
         }
+        summary["goal_gap_scorecard"] = self.goal_gap_scorecard(status_summary=summary)
         summary["runtime_dashboard"] = self.runtime_dashboard_summary(summary)
         return summary
 
@@ -4858,8 +6831,10 @@ continuation stage(s) were appended.
                 "drive_control",
                 "approval_queue",
                 "failure_isolation",
+                "checkpoint_readiness",
                 "self_iteration_context_packs",
                 "tests",
+                "source",
                 "git",
             ],
         }
@@ -4879,6 +6854,7 @@ continuation stage(s) were appended.
                 "continuation": deepcopy(status_summary.get("continuation", {})),
                 "self_iteration": deepcopy(status_summary.get("self_iteration", {})),
                 "failure_isolation": deepcopy(status_summary.get("failure_isolation", {})),
+                "checkpoint_readiness": deepcopy(status_summary.get("checkpoint_readiness", {})),
             },
             "manifest_index": {
                 "path": manifest_index.get("manifest_index_path"),
@@ -4896,8 +6872,10 @@ continuation stage(s) were appended.
             "failure_isolation": deepcopy(
                 status_summary.get("failure_isolation") or self.latest_isolated_failures_summary()
             ),
+            "checkpoint_readiness": deepcopy(status_summary.get("checkpoint_readiness") or self.checkpoint_readiness()),
             "self_iteration_context_packs": self._goal_gap_self_iteration_context_pack_summaries(),
             "tests": self._self_iteration_test_inventory(),
+            "source": self._self_iteration_source_inventory(),
             "git": self._self_iteration_git_context(),
         }
 
@@ -5171,13 +7149,45 @@ continuation stage(s) were appended.
             add("missing_tests", "medium", "no local test files were discovered", "tests")
 
         git = evidence.get("git", {})
-        if git.get("is_repository") and git.get("status_lines"):
+        checkpoint_readiness = evidence.get("checkpoint_readiness", {})
+        blocking_paths = (
+            checkpoint_readiness.get("blocking_paths", [])
+            if isinstance(checkpoint_readiness, dict) and isinstance(checkpoint_readiness.get("blocking_paths"), list)
+            else []
+        )
+        safe_paths = (
+            checkpoint_readiness.get("safe_to_checkpoint_paths", [])
+            if isinstance(checkpoint_readiness, dict)
+            and isinstance(checkpoint_readiness.get("safe_to_checkpoint_paths"), list)
+            else []
+        )
+        dirty_paths = (
+            checkpoint_readiness.get("dirty_paths", [])
+            if isinstance(checkpoint_readiness, dict) and isinstance(checkpoint_readiness.get("dirty_paths"), list)
+            else []
+        )
+        if isinstance(checkpoint_readiness, dict) and checkpoint_readiness.get("blocking"):
             add(
-                "dirty_git_state",
-                "medium",
-                f"{len(git.get('status_lines', []))} git status line(s) remain dirty",
-                "git.status_lines",
+                "checkpoint_blocking_paths" if blocking_paths else "checkpoint_not_ready",
+                "high",
+                str(checkpoint_readiness.get("recommended_action", "git checkpoint readiness is blocked")),
+                "checkpoint_readiness",
             )
+        elif safe_paths and dirty_paths:
+            add(
+                "checkpoint_pending",
+                "low",
+                f"{len(safe_paths)} safe-to-checkpoint path(s) remain dirty without blocking paths",
+                "checkpoint_readiness.safe_to_checkpoint_paths",
+            )
+        if git.get("is_repository") and git.get("status_lines"):
+            if blocking_paths or not isinstance(checkpoint_readiness, dict):
+                add(
+                    "dirty_git_state",
+                    "medium",
+                    f"{len(git.get('status_lines', []))} git status line(s) remain dirty",
+                    "git.status_lines",
+                )
         elif not git.get("is_repository"):
             add("missing_git_state", "low", "project root is not inside a git repository", "git")
 
@@ -5250,8 +7260,14 @@ continuation stage(s) were appended.
             add("refresh-roadmap-plan", "Refresh continuation or self-iteration planning before the next drive", "queue_empty")
         if "missing_tests" in risk_ids:
             add("add-local-tests", "Add deterministic local tests before deeper unattended execution", "missing_tests")
-        if "dirty_git_state" in risk_ids:
+        if "checkpoint_blocking_paths" in risk_ids or "dirty_git_state" in risk_ids:
             add("close-git-boundary", "Review and checkpoint or clean local git changes", "dirty_git_state")
+        if "checkpoint_pending" in risk_ids:
+            add(
+                "checkpoint-pending",
+                "Carry the protected checkpoint window without treating it as an unrelated blocker",
+                "checkpoint_pending",
+            )
         if "missing_task_manifests" in risk_ids:
             add("produce-manifest-evidence", "Run a local harness task to produce manifest evidence", "missing_task_manifests")
         if not themes:
@@ -5997,6 +8013,12 @@ continuation stage(s) were appended.
                     "executor": str(run.get("executor") or ""),
                     "status": str(run.get("status") or "unknown"),
                     "returncode": run.get("returncode"),
+                    "requested_capabilities": run.get("requested_capabilities", [])
+                    if isinstance(run.get("requested_capabilities"), list)
+                    else [],
+                    "executor_capabilities": run.get("executor_capabilities", [])
+                    if isinstance(run.get("executor_capabilities"), list)
+                    else [],
                     "executor_metadata": run.get("executor_metadata") if isinstance(run.get("executor_metadata"), dict) else {},
                     "executor_result": run.get("executor_result") if isinstance(run.get("executor_result"), dict) else {},
                 }
@@ -6368,6 +8390,68 @@ continuation stage(s) were appended.
             items.append(text)
         return items
 
+    def _known_capability_names(self) -> set[str]:
+        names = set(LOCAL_CAPABILITY_VOCABULARY)
+        for executor_id in self.executor_registry.ids():
+            metadata = self.executor_registry.metadata_for(executor_id)
+            capabilities = metadata.get("capabilities", [])
+            if not isinstance(capabilities, list):
+                continue
+            names.update(str(capability) for capability in capabilities if str(capability).strip())
+        return names
+
+    def _requested_capability_field(self, item: dict[str, Any]) -> str | None:
+        for field_name in COMMAND_CAPABILITY_REQUEST_FIELDS:
+            if field_name in item:
+                return field_name
+        return None
+
+    def _normalize_requested_capabilities(self, value: Any) -> tuple[str, ...]:
+        if not isinstance(value, list):
+            return ()
+        capabilities: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            text = str(item).strip() if isinstance(item, str) else ""
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            capabilities.append(text)
+        return tuple(capabilities)
+
+    def _validate_requested_capabilities(
+        self,
+        item: dict[str, Any],
+        *,
+        location: str,
+        errors: list[str],
+    ) -> None:
+        field_name = self._requested_capability_field(item)
+        if field_name is None:
+            return
+        if all(field in item for field in COMMAND_CAPABILITY_REQUEST_FIELDS):
+            errors.append(f"{location} must use only one capability request field")
+        value = item.get(field_name)
+        if not isinstance(value, list):
+            errors.append(f"{location}.{field_name} must be a non-empty list")
+            return
+        if not value:
+            errors.append(f"{location}.{field_name} must be a non-empty list")
+            return
+        known = self._known_capability_names()
+        seen: set[str] = set()
+        for capability_index, capability in enumerate(value):
+            text = str(capability).strip() if isinstance(capability, str) else ""
+            if not text:
+                errors.append(f"{location}.{field_name}[{capability_index}] must be a non-empty string")
+                continue
+            if text in seen:
+                errors.append(f"{location}.{field_name} contains duplicate capability `{text}`")
+            seen.add(text)
+            if text not in known:
+                allowed = ", ".join(sorted(known))
+                errors.append(f"{location}.{field_name}[{capability_index}] has unknown capability `{text}`; expected one of: {allowed}")
+
     def _validate_task_payload(
         self,
         task: Any,
@@ -6425,6 +8509,7 @@ continuation stage(s) were appended.
         if not isinstance(item, dict):
             errors.append(f"{location} must be a mapping")
             return
+        self._validate_requested_capabilities(item, location=location, errors=errors)
         executor = str(item.get("executor", "shell"))
         executor_adapter = self.executor_registry.get(executor)
         if executor_adapter is None:
@@ -6472,6 +8557,8 @@ continuation stage(s) were appended.
                 payload["model"] = command.model
             if command.no_progress_timeout_seconds is not None:
                 payload["no_progress_timeout_seconds"] = command.no_progress_timeout_seconds
+            if command.requested_capabilities:
+                payload["requested_capabilities"] = list(command.requested_capabilities)
             return payload
 
         return {
@@ -6522,6 +8609,7 @@ continuation stage(s) were appended.
                 "model": command.model,
                 "sandbox": command.sandbox,
                 "executor": command.executor,
+                "requested_capabilities": list(command.requested_capabilities),
             }
         roadmap_path = (
             str(self.roadmap_path.relative_to(self.project_root))
@@ -6718,6 +8806,62 @@ continuation stage(s) were appended.
             policy_input=policy_input,
         )
 
+    def _capability_policy_decision(self, policy_input: PolicyInput) -> PolicyDecision | None:
+        command = policy_input.command or {}
+        requested = self._normalize_requested_capabilities(command.get("requested_capabilities"))
+        if not requested:
+            return None
+        executor = policy_input.executor or {}
+        executor_id = str(command.get("executor") or executor.get("id") or "")
+        executor_capabilities = [
+            str(capability)
+            for capability in executor.get("capabilities", [])
+            if str(capability).strip()
+        ]
+        executor_capability_set = set(executor_capabilities)
+        unsafe = [capability for capability in requested if capability in UNSAFE_EXECUTOR_CAPABILITIES]
+        unsupported = [capability for capability in requested if capability not in executor_capability_set]
+        metadata = {
+            "schema_version": CAPABILITY_POLICY_SCHEMA_VERSION,
+            "requested_capabilities": list(requested),
+            "executor_capabilities": executor_capabilities,
+            "unsupported_capabilities": unsupported,
+            "unsafe_capabilities": unsafe,
+            "known_capabilities": sorted(self._known_capability_names()),
+        }
+        if unsafe:
+            return PolicyDecision(
+                kind="capability_policy",
+                scope="command",
+                outcome="denied",
+                effect="deny",
+                severity="error",
+                reason=f"unsafe executor capabilities are not locally approvable: {', '.join(unsafe)}",
+                policy_input=policy_input,
+                metadata=metadata,
+            )
+        if unsupported:
+            return PolicyDecision(
+                kind="capability_policy",
+                scope="command",
+                outcome="denied",
+                effect="deny",
+                severity="error",
+                reason=f"executor `{executor_id}` does not support requested capabilities: {', '.join(unsupported)}",
+                policy_input=policy_input,
+                metadata=metadata,
+            )
+        return PolicyDecision(
+            kind="capability_policy",
+            scope="command",
+            outcome="allowed",
+            effect="allow",
+            severity="info",
+            reason="requested executor capabilities are supported",
+            policy_input=policy_input,
+            metadata=metadata,
+        )
+
     def _executor_approval_decision(self, policy_input: PolicyInput) -> PolicyDecision:
         command = policy_input.command or {}
         executor = policy_input.executor or {}
@@ -6911,23 +9055,185 @@ continuation stage(s) were appended.
             status=status,
         )
 
-    def _git_status_paths(self) -> list[str]:
+    def _git_status_entries(self) -> list[dict[str, Any]]:
         if not self._is_git_repo():
             return []
-        result = self._git(["status", "--porcelain"])
+        result = self._git(["status", "--porcelain", "--untracked-files=all"])
         if result["returncode"] != 0:
             return []
-        paths: list[str] = []
+        entries: list[dict[str, Any]] = []
         for line in result["stdout"].splitlines():
             if len(line) < 4:
                 continue
+            status = line[:2]
             path = line[3:].strip()
             if " -> " in path:
                 _, _, path = path.partition(" -> ")
             normalized = self._normalize_repo_path(path)
             if normalized:
-                paths.append(normalized)
-        return sorted(dict.fromkeys(paths))
+                index_status = status[0]
+                worktree_status = status[1]
+                is_untracked = status == "??"
+                is_staged = not is_untracked and index_status not in {" ", "?"}
+                is_deleted = index_status == "D" or worktree_status == "D"
+                is_modified = (
+                    index_status in {"M", "A", "R", "C", "T"}
+                    or worktree_status in {"M", "T"}
+                )
+                states = []
+                if is_staged:
+                    states.append("staged")
+                if is_modified:
+                    states.append("modified")
+                if is_deleted:
+                    states.append("deleted")
+                if is_untracked:
+                    states.append("untracked")
+                entries.append(
+                    {
+                        "path": normalized,
+                        "status": status,
+                        "states": states,
+                        "staged": is_staged,
+                        "modified": is_modified,
+                        "deleted": is_deleted,
+                        "untracked": is_untracked,
+                    }
+                )
+        entries.sort(key=lambda item: str(item["path"]))
+        return entries
+
+    def _git_status_paths(self) -> list[str]:
+        return sorted(dict.fromkeys(str(entry["path"]) for entry in self._git_status_entries()))
+
+    def checkpoint_readiness(self, task: HarnessTask | None = None) -> dict[str, Any]:
+        base = {
+            "schema_version": CHECKPOINT_READINESS_SCHEMA_VERSION,
+            "kind": "engineering-harness.checkpoint-readiness",
+            "is_repository": self._is_git_repo(),
+            "ready": False,
+            "blocking": False,
+            "reason": "not_git_repository",
+            "dirty_paths": [],
+            "blocking_paths": [],
+            "safe_to_checkpoint_paths": [],
+            "recommended_action": (
+                "Initialize a local git repository if unattended git checkpoints are required."
+            ),
+            "materialization_paths": self._roadmap_materialization_paths(),
+            "task": self.task_payload(task) if task is not None else None,
+            "dirty_path_states": [],
+            "classifications": {
+                "harness_materialization": [],
+                "task_scope": [],
+                "unrelated_user": [],
+            },
+        }
+        if not base["is_repository"]:
+            return base
+
+        status_result = self._git(["status", "--porcelain", "--untracked-files=all"])
+        if status_result["returncode"] != 0:
+            return {
+                **base,
+                "is_repository": True,
+                "blocking": True,
+                "reason": "git_status_failed",
+                "recommended_action": "Resolve the local git status error before unattended checkpointing.",
+                "stderr": status_result["stderr"],
+            }
+
+        entries = self._git_status_entries()
+        dirty_paths = [str(entry["path"]) for entry in entries]
+        materialization_paths = set(base["materialization_paths"])
+        task_scope = task.file_scope if task is not None else ()
+        classifications: dict[str, list[str]] = {
+            "harness_materialization": [],
+            "task_scope": [],
+            "unrelated_user": [],
+        }
+        path_states: list[dict[str, Any]] = []
+        for entry in entries:
+            path = str(entry["path"])
+            if path in materialization_paths:
+                classification = "harness_materialization"
+            elif task is not None and self._path_in_scope(path, task_scope):
+                classification = "task_scope"
+            else:
+                classification = "unrelated_user"
+            classifications[classification].append(path)
+            path_states.append({**entry, "classification": classification})
+
+        safe_paths = sorted(
+            dict.fromkeys(
+                [
+                    *classifications["harness_materialization"],
+                    *classifications["task_scope"],
+                ]
+            )
+        )
+        blocking_paths = sorted(dict.fromkeys(classifications["unrelated_user"]))
+        payload = {
+            **base,
+            "is_repository": True,
+            "dirty_paths": dirty_paths,
+            "blocking_paths": blocking_paths,
+            "safe_to_checkpoint_paths": safe_paths,
+            "dirty_path_states": path_states,
+            "classifications": {key: sorted(dict.fromkeys(value)) for key, value in classifications.items()},
+        }
+        if not dirty_paths:
+            payload.update(
+                {
+                    "ready": True,
+                    "blocking": False,
+                    "reason": "clean",
+                    "recommended_action": (
+                        "Run the unattended drive or workspace dispatch normally; no local git "
+                        "checkpoint blockers are present."
+                    ),
+                }
+            )
+            return payload
+        if blocking_paths:
+            reason = "mixed_unrelated_user_dirty" if safe_paths else "unrelated_user_dirty"
+            payload.update(
+                {
+                    "ready": False,
+                    "blocking": True,
+                    "reason": reason,
+                    "recommended_action": (
+                        "Review, commit, stash, or move the blocking user paths yourself, then rerun "
+                        "status or workspace dispatch. The harness will not commit or clean them."
+                    ),
+                }
+            )
+            return payload
+        if classifications["harness_materialization"] and not classifications["task_scope"]:
+            reason = "harness_materialization_dirty"
+            action = (
+                "Checkpoint the harness-owned roadmap/materialization paths locally or let the "
+                "rolling materialization checkpoint handle them before dispatching unrelated work."
+            )
+        elif classifications["task_scope"] and not classifications["harness_materialization"]:
+            reason = "task_scope_dirty"
+            task_id = task.id if task is not None else "the current task"
+            action = (
+                f"Review and checkpoint the in-scope task paths for `{task_id}` before starting "
+                "unrelated work."
+            )
+        else:
+            reason = "checkpointable_dirty_paths"
+            action = "Checkpoint the listed safe paths before dispatching unrelated work."
+        payload.update(
+            {
+                "ready": True,
+                "blocking": False,
+                "reason": reason,
+                "recommended_action": action,
+            }
+        )
+        return payload
 
     def _normalize_repo_path(self, path: str) -> str:
         normalized = path.replace("\\", "/").strip()
@@ -7070,6 +9376,7 @@ continuation stage(s) were appended.
             "is_repository": is_repository,
             "dirty_before_paths": dirty_before,
             "materialization_paths": self._roadmap_materialization_paths(),
+            "checkpoint_readiness": self.checkpoint_readiness(),
         }
         append_jsonl(
             self.decision_log_path,
@@ -7114,6 +9421,9 @@ continuation stage(s) were appended.
             "branch": branch,
             "materialization_paths": materialization_paths,
             "dirty_before_paths": dirty_before,
+            "checkpoint_readiness": deepcopy(intent.get("checkpoint_readiness"))
+            if isinstance(intent.get("checkpoint_readiness"), dict)
+            else self.checkpoint_readiness(),
             "continuation_status": continuation.get("status"),
             "milestones_added": continuation.get("milestones_added", []),
             "tasks_added": continuation.get("tasks_added", 0),
@@ -7405,55 +9715,105 @@ continuation stage(s) were appended.
             )
 
         runs: list[CommandRun] = []
-        implementation_status, message = self._run_command_group(
-            task.implementation,
-            phase="implementation",
-            runs=runs,
-            dry_run=dry_run,
-            allow_live=allow_live,
-            allow_manual=effective_allow_manual,
-            allow_agent=effective_allow_agent,
-            task=task,
-            state=state,
-            persist_state=not dry_run,
-        )
+        replay_guard = self._new_replay_guard_summary(task)
+        implementation_replay = None
+        if not dry_run:
+            implementation_replay = self._phase_replay_guard_decision(
+                state,
+                task,
+                phase="implementation",
+                commands=task.implementation,
+            )
+            self._append_replay_guard_decision(replay_guard, implementation_replay)
+        if implementation_replay is not None and implementation_replay.get("action") == "reuse":
+            implementation_status, message = self._reuse_command_group_from_replay_guard(
+                state,
+                task,
+                phase="implementation",
+                commands=task.implementation,
+                runs=runs,
+                decision=implementation_replay,
+                persist_state=not dry_run,
+            )
+        else:
+            implementation_status, message = self._run_command_group(
+                task.implementation,
+                phase="implementation",
+                runs=runs,
+                dry_run=dry_run,
+                allow_live=allow_live,
+                allow_manual=effective_allow_manual,
+                allow_agent=effective_allow_agent,
+                task=task,
+                state=state,
+                persist_state=not dry_run,
+            )
         overall_status = implementation_status
 
         if overall_status == "passed":
-            for iteration in range(task.max_task_iterations):
-                acceptance_status, message = self._run_command_group(
-                    task.acceptance,
-                    phase=f"acceptance-{iteration + 1}",
-                    runs=runs,
-                    dry_run=dry_run,
-                    allow_live=allow_live,
-                    allow_manual=effective_allow_manual,
-                    allow_agent=effective_allow_agent,
-                    task=task,
-                    state=state,
-                    persist_state=not dry_run,
-                )
-                overall_status = acceptance_status
-                if acceptance_status == "passed":
-                    message = "All required acceptance commands passed."
-                    break
-                if acceptance_status == "blocked" or iteration + 1 >= task.max_task_iterations or not task.repair:
-                    break
-                repair_status, message = self._run_command_group(
-                    task.repair,
-                    phase=f"repair-{iteration + 1}",
-                    runs=runs,
-                    dry_run=dry_run,
-                    allow_live=allow_live,
-                    allow_manual=effective_allow_manual,
-                    allow_agent=effective_allow_agent,
-                    task=task,
-                    state=state,
-                    persist_state=not dry_run,
-                )
-                overall_status = repair_status
-                if repair_status != "passed":
-                    break
+            acceptance_reused = False
+            if not dry_run:
+                for iteration in range(task.max_task_iterations, 0, -1):
+                    acceptance_phase = f"acceptance-{iteration}"
+                    acceptance_replay = self._phase_replay_guard_decision(
+                        state,
+                        task,
+                        phase=acceptance_phase,
+                        commands=task.acceptance,
+                    )
+                    if acceptance_replay.get("action") == "reuse":
+                        self._append_replay_guard_decision(replay_guard, acceptance_replay)
+                        acceptance_status, message = self._reuse_command_group_from_replay_guard(
+                            state,
+                            task,
+                            phase=acceptance_phase,
+                            commands=task.acceptance,
+                            runs=runs,
+                            decision=acceptance_replay,
+                            persist_state=True,
+                        )
+                        overall_status = acceptance_status
+                        if acceptance_status == "passed":
+                            message = "All required acceptance commands passed by replay guard."
+                        acceptance_reused = True
+                        break
+                    if iteration == 1:
+                        self._append_replay_guard_decision(replay_guard, acceptance_replay)
+            if not acceptance_reused:
+                for iteration in range(task.max_task_iterations):
+                    acceptance_status, message = self._run_command_group(
+                        task.acceptance,
+                        phase=f"acceptance-{iteration + 1}",
+                        runs=runs,
+                        dry_run=dry_run,
+                        allow_live=allow_live,
+                        allow_manual=effective_allow_manual,
+                        allow_agent=effective_allow_agent,
+                        task=task,
+                        state=state,
+                        persist_state=not dry_run,
+                    )
+                    overall_status = acceptance_status
+                    if acceptance_status == "passed":
+                        message = "All required acceptance commands passed."
+                        break
+                    if acceptance_status == "blocked" or iteration + 1 >= task.max_task_iterations or not task.repair:
+                        break
+                    repair_status, message = self._run_command_group(
+                        task.repair,
+                        phase=f"repair-{iteration + 1}",
+                        runs=runs,
+                        dry_run=dry_run,
+                        allow_live=allow_live,
+                        allow_manual=effective_allow_manual,
+                        allow_agent=effective_allow_agent,
+                        task=task,
+                        state=state,
+                        persist_state=not dry_run,
+                    )
+                    overall_status = repair_status
+                    if repair_status != "passed":
+                        break
 
         if overall_status == "passed" and task.e2e:
             e2e_status, message = self._run_command_group(
@@ -7539,6 +9899,7 @@ continuation stage(s) were appended.
             allow_live=allow_live,
             allow_manual=effective_allow_manual,
             allow_agent=effective_allow_agent,
+            replay_guard=self._finalize_replay_guard_summary(replay_guard),
         )
 
     def _run_command_group(
@@ -7578,6 +9939,7 @@ continuation stage(s) were appended.
                 message=message,
                 persist=persist_state,
                 metadata={
+                    **self._command_group_state_metadata(commands),
                     "command_count": len(commands),
                     "run_count": len(phase_runs),
                     "required_failures": [
@@ -7653,6 +10015,24 @@ continuation stage(s) were appended.
                     )
                 )
                 return finish("blocked", executor_decision.reason)
+            capability_decision = self._capability_policy_decision(policy_input)
+            if capability_decision is not None and capability_decision.blocks_execution():
+                runs.append(
+                    CommandRun(
+                        phase,
+                        command.name,
+                        self._display_command(command, task),
+                        "blocked",
+                        None,
+                        utc_now(),
+                        utc_now(),
+                        "",
+                        capability_decision.reason,
+                        executor=command.executor,
+                        executor_metadata=executor_metadata,
+                    )
+                )
+                return finish("blocked", capability_decision.reason)
             executor_approval_decision = self._executor_approval_decision(policy_input)
             if executor_approval_decision.blocks_execution():
                 runs.append(
@@ -8064,6 +10444,7 @@ continuation stage(s) were appended.
         allow_live: bool = False,
         allow_manual: bool = False,
         allow_agent: bool = False,
+        replay_guard: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         finished_at = utc_now()
         manifest_path = report_path.with_suffix(".json")
@@ -8138,6 +10519,7 @@ continuation stage(s) were appended.
             policy_decision_summary=policy_decision_summary,
             failure_isolation=failure_isolation,
             approval_queue=approval_queue_summary,
+            replay_guard=replay_guard,
         )
         self._write_task_manifest(
             manifest_path,
@@ -8160,6 +10542,7 @@ continuation stage(s) were appended.
             policy_decision_summary=policy_decision_summary,
             failure_isolation=failure_isolation,
             approval_queue=approval_queue_summary,
+            replay_guard=replay_guard,
         )
         self._record_phase_state(
             state,
@@ -8243,20 +10626,12 @@ continuation stage(s) were appended.
             "report": str(report_path.relative_to(self.project_root)),
             "manifest": str(manifest_path.relative_to(self.project_root)),
             "runs": [
-                {
-                    "phase": run.phase,
-                    "name": run.name,
-                    "command": run.command,
-                    "status": run.status,
-                    "returncode": run.returncode,
-                    "executor": run.executor,
-                    "executor_metadata": run.executor_metadata or self.executor_registry.metadata_for(run.executor),
-                    "executor_result": self._executor_result_contract(run),
-                }
+                self._command_run_result_payload(task, run)
                 for run in runs
             ],
             "safety": safety or {},
             "approval_queue": approval_queue_summary,
+            **({"replay_guard": replay_guard} if replay_guard is not None else {}),
             **({"failure_isolation": failure_isolation} if failure_isolation else {}),
         }
 
@@ -8283,6 +10658,7 @@ continuation stage(s) were appended.
         policy_decision_summary: dict[str, Any] | None = None,
         failure_isolation: dict[str, Any] | None = None,
         approval_queue: dict[str, Any] | None = None,
+        replay_guard: dict[str, Any] | None = None,
     ) -> None:
         manifest_relative = str(manifest_path.relative_to(self.project_root))
         report_relative = str(report_path.relative_to(self.project_root))
@@ -8344,6 +10720,8 @@ continuation stage(s) were appended.
         }
         if approval_queue is not None:
             payload["approval_queue"] = approval_queue
+        if replay_guard is not None:
+            payload["replay_guard"] = replay_guard
         if failure_isolation is not None:
             payload["failure_isolation"] = failure_isolation
         write_json(manifest_path, payload)
@@ -8352,6 +10730,11 @@ continuation stage(s) were appended.
         metadata = self._configured_command_metadata(task, run)
         stdout_summary = self._stream_summary(run.stdout)
         stderr_summary = self._stream_summary(run.stderr)
+        executor_metadata = (
+            run.executor_metadata
+            or metadata.get("executor_metadata")
+            or self.executor_registry.metadata_for(metadata["executor"])
+        )
         return {
             "phase": run.phase,
             "name": run.name,
@@ -8366,16 +10749,31 @@ continuation stage(s) were appended.
             "no_progress_timeout_seconds": self._command_run_no_progress_timeout_seconds(task, run, metadata),
             "model": metadata.get("model"),
             "sandbox": metadata.get("sandbox"),
+            "requested_capabilities": metadata.get("requested_capabilities", []),
+            "executor_capabilities": executor_metadata.get("capabilities", []) if isinstance(executor_metadata, dict) else [],
             "stdout": stdout_summary,
             "stderr": stderr_summary,
-            "executor_metadata": run.executor_metadata
-            or metadata.get("executor_metadata")
-            or self.executor_registry.metadata_for(metadata["executor"]),
+            "executor_metadata": executor_metadata,
             "executor_result": self._executor_result_contract(
                 run,
                 stdout_summary=stdout_summary,
                 stderr_summary=stderr_summary,
             ),
+        }
+
+    def _command_run_result_payload(self, task: HarnessTask, run: CommandRun) -> dict[str, Any]:
+        manifest_payload = self._command_run_manifest(task, run)
+        return {
+            "phase": manifest_payload["phase"],
+            "name": manifest_payload["name"],
+            "command": manifest_payload["command"],
+            "status": manifest_payload["status"],
+            "returncode": manifest_payload["returncode"],
+            "executor": manifest_payload["executor"],
+            "requested_capabilities": manifest_payload.get("requested_capabilities", []),
+            "executor_capabilities": manifest_payload.get("executor_capabilities", []),
+            "executor_metadata": manifest_payload.get("executor_metadata", {}),
+            "executor_result": manifest_payload.get("executor_result", {}),
         }
 
     def _executor_result_contract(
@@ -8425,6 +10823,7 @@ continuation stage(s) were appended.
                     "no_progress_timeout_seconds": command.no_progress_timeout_seconds,
                     "model": command.model,
                     "sandbox": command.sandbox,
+                    "requested_capabilities": list(command.requested_capabilities),
                     "executor_metadata": self.executor_registry.metadata_for(command.executor),
                 }
         return {
@@ -8434,6 +10833,7 @@ continuation stage(s) were appended.
             "no_progress_timeout_seconds": None,
             "model": None,
             "sandbox": None,
+            "requested_capabilities": [],
             "executor_metadata": run.executor_metadata
             or self.executor_registry.metadata_for(
                 run.executor or ("codex" if run.command.startswith("codex exec ") else "shell")
@@ -8526,8 +10926,14 @@ continuation stage(s) were appended.
                 )
                 executor_decision = self._executor_policy_decision(command_input)
                 decisions.append(executor_decision)
-                if not executor_decision.blocks_execution():
-                    decisions.append(self._executor_approval_decision(command_input))
+                if executor_decision.blocks_execution():
+                    continue
+                capability_decision = self._capability_policy_decision(command_input)
+                if capability_decision is not None:
+                    decisions.append(capability_decision)
+                    if capability_decision.blocks_execution():
+                        continue
+                decisions.append(self._executor_approval_decision(command_input))
                 executor = self.executor_registry.get(command.executor)
                 if executor is not None and executor.metadata.uses_command_policy:
                     decisions.append(self._command_policy_decision(command_input))
@@ -8921,6 +11327,7 @@ continuation stage(s) were appended.
         policy_decision_summary: dict[str, Any] | None = None,
         failure_isolation: dict[str, Any] | None = None,
         approval_queue: dict[str, Any] | None = None,
+        replay_guard: dict[str, Any] | None = None,
     ) -> None:
         report_path.parent.mkdir(parents=True, exist_ok=True)
         lines = [
@@ -8940,12 +11347,23 @@ continuation stage(s) were appended.
         if not runs:
             lines.append("No task commands were executed.")
         for run in runs:
+            run_metadata = self._configured_command_metadata(task, run)
+            executor_metadata = (
+                run.executor_metadata
+                or run_metadata.get("executor_metadata")
+                or self.executor_registry.metadata_for(run_metadata["executor"])
+            )
+            requested_capabilities = run_metadata.get("requested_capabilities", [])
+            executor_capabilities = executor_metadata.get("capabilities", []) if isinstance(executor_metadata, dict) else []
             lines.extend(
                 [
                     f"### {run.phase}: {run.name}",
                     "",
                     f"- Status: `{run.status}`",
                     f"- Return code: `{run.returncode}`",
+                    f"- Executor: `{run_metadata.get('executor')}`",
+                    f"- Requested capabilities: `{json.dumps(requested_capabilities)}`",
+                    f"- Executor capabilities: `{json.dumps(executor_capabilities)}`",
                     "",
                     "```bash",
                     run.command,
@@ -9000,6 +11418,21 @@ continuation stage(s) were appended.
                 [
                     "```json",
                     json.dumps(approval_queue, indent=2, sort_keys=True),
+                    "```",
+                    "",
+                ]
+            )
+        if replay_guard is not None:
+            reused_phases = replay_guard.get("reused_phases", [])
+            lines.extend(
+                [
+                    "## Phase Replay Guard",
+                    "",
+                    f"- Status: `{replay_guard.get('status')}`",
+                    f"- Reused phases: `{len(reused_phases) if isinstance(reused_phases, list) else 0}`",
+                    "",
+                    "```json",
+                    json.dumps(replay_guard, indent=2, sort_keys=True),
                     "```",
                     "",
                 ]

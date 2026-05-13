@@ -129,6 +129,135 @@ def init_workspace_project(workspace: Path, dirname: str, *, name: str | None = 
     return project
 
 
+def workspace_backoff_stage(stage_id: str, task_id: str) -> dict:
+    return {
+        "id": stage_id,
+        "title": f"{stage_id} Stage",
+        "objective": "Create a local workspace backoff marker task.",
+        "tasks": [
+            {
+                "id": task_id,
+                "title": f"{task_id} Task",
+                "file_scope": ["**"],
+                "acceptance": [
+                    {
+                        "name": "local marker",
+                        "command": f"python3 -c \"from pathlib import Path; Path('{task_id}.txt').write_text('ok')\"",
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def workspace_backoff_planner_source(stage: dict) -> str:
+    return (
+        "import json\n"
+        "from pathlib import Path\n\n"
+        "roadmap_path = Path('.engineering/roadmap.yaml')\n"
+        "roadmap = json.loads(roadmap_path.read_text(encoding='utf-8'))\n"
+        "continuation = roadmap.setdefault('continuation', {'enabled': True, 'stages': []})\n"
+        "continuation['enabled'] = True\n"
+        f"continuation.setdefault('stages', []).append({json.dumps(stage)})\n"
+        "roadmap_path.write_text(json.dumps(roadmap, indent=2), encoding='utf-8')\n"
+    )
+
+
+def configure_workspace_self_iteration_project(project: Path, planner_source: str) -> None:
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"] = []
+    roadmap["continuation"] = {"enabled": True, "goal": "Continue autonomously.", "stages": []}
+    roadmap["self_iteration"] = {
+        "enabled": True,
+        "objective": "Add the next local workspace backoff stage.",
+        "max_stages_per_iteration": 1,
+        "planner": {"name": "workspace backoff planner", "command": "python3 planner.py"},
+    }
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    (project / "planner.py").write_text(planner_source, encoding="utf-8")
+
+
+def configure_workspace_continuation_project(project: Path, stages: list[dict]) -> None:
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"] = []
+    roadmap["continuation"] = {
+        "enabled": True,
+        "goal": "Materialize local workspace backoff stages.",
+        "stages": stages,
+    }
+    roadmap.pop("self_iteration", None)
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+
+def seed_local_full_lifecycle_smoke_task(project: Path) -> None:
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task_id = "local-full-lifecycle-artifact"
+    artifact_path = "artifacts/local-full-lifecycle/implementation.txt"
+    e2e_path = "artifacts/local-full-lifecycle/e2e-evidence.json"
+    roadmap["milestones"] = [
+        {
+            "id": "local-full-lifecycle-smoke",
+            "title": "Local Full Lifecycle Smoke",
+            "status": "active",
+            "objective": "Complete one safe unattended local task and capture deterministic evidence.",
+            "tasks": [
+                {
+                    "id": task_id,
+                    "title": "Write local lifecycle artifact",
+                    "status": "pending",
+                    "max_attempts": 1,
+                    "agent_approval_required": False,
+                    "file_scope": ["artifacts/**"],
+                    "implementation": [
+                        {
+                            "name": "write local artifact",
+                            "command": (
+                                "python3 -c \"from pathlib import Path; "
+                                f"p=Path('{artifact_path}'); "
+                                "p.parent.mkdir(parents=True, exist_ok=True); "
+                                "p.write_text('implemented\\n', encoding='utf-8'); "
+                                "print('implemented')\""
+                            ),
+                            "timeout_seconds": 30,
+                        }
+                    ],
+                    "acceptance": [
+                        {
+                            "name": "artifact is readable",
+                            "command": (
+                                "python3 -c \"from pathlib import Path; "
+                                f"assert Path('{artifact_path}').read_text(encoding='utf-8') == 'implemented\\n'; "
+                                "print('accepted')\""
+                            ),
+                            "timeout_seconds": 30,
+                        }
+                    ],
+                    "e2e": [
+                        {
+                            "name": "local lifecycle e2e evidence",
+                            "command": (
+                                "python3 -c \"from pathlib import Path; import json; "
+                                f"artifact=Path('{artifact_path}'); "
+                                "assert artifact.read_text(encoding='utf-8') == 'implemented\\n'; "
+                                f"evidence=Path('{e2e_path}'); "
+                                "evidence.write_text("
+                                "json.dumps({'status':'passed','artifact':str(artifact)}, sort_keys=True) + '\\n', "
+                                "encoding='utf-8'); "
+                                "print('e2e passed')\""
+                            ),
+                            "timeout_seconds": 30,
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+    roadmap_path.write_text(json.dumps(roadmap, indent=2, sort_keys=True), encoding="utf-8")
+
+
 def workspace_dispatch_lease_dir(workspace: Path) -> Path:
     return workspace / ".engineering/state/workspace-dispatch-lease"
 
@@ -205,6 +334,10 @@ def drive_report_goal_gap_retrospective(project: Path, report_path: str) -> dict
     section = report.split("## Goal-Gap Retrospective", 1)[1]
     block = section.split("```json", 1)[1].split("```", 1)[0]
     return json.loads(block)
+
+
+def scorecard_category_map(scorecard: dict) -> dict[str, dict]:
+    return {category["id"]: category for category in scorecard["categories"]}
 
 
 def policy_decision(manifest: dict, kind: str, **matches) -> dict:
@@ -1178,6 +1311,160 @@ def test_policy_decision_schema_records_live_command_approval_gate(tmp_path):
     assert report_evidence["policy_decisions"] == manifest["policy_decisions"]
 
 
+def test_capability_policy_allows_requested_shell_executor_capabilities(tmp_path):
+    project = tmp_path / "capability-allowed-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="capability-allowed-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    command = roadmap["milestones"][0]["tasks"][0]["acceptance"][0]
+    command["command"] = "python3 -c \"print('capability ok')\""
+    command["requested_capabilities"] = ["local_process", "workspace_write", "stdout", "stderr", "exit_code"]
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    assert harness.validate_roadmap()["status"] == "passed"
+    result = harness.run_task(harness.next_task())
+
+    assert result["status"] == "passed"
+    assert result["runs"][0]["requested_capabilities"] == command["requested_capabilities"]
+    assert set(command["requested_capabilities"]).issubset(set(result["runs"][0]["executor_capabilities"]))
+    manifest = task_manifest(project, result)
+    run = manifest["runs"][0]
+    assert run["requested_capabilities"] == command["requested_capabilities"]
+    assert set(command["requested_capabilities"]).issubset(set(run["executor_metadata"]["capabilities"]))
+    decision = policy_decision(manifest, "capability_policy", outcome="allowed")
+    assert decision["effect"] == "allow"
+    assert decision["reason"] == "requested executor capabilities are supported"
+    assert decision["metadata"]["requested_capabilities"] == command["requested_capabilities"]
+
+
+def test_capability_policy_denies_unsupported_executor_capability(tmp_path):
+    project = tmp_path / "capability-unsupported-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="capability-unsupported-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    command = roadmap["milestones"][0]["tasks"][0]["acceptance"][0]
+    command["command"] = "python3 -c \"from pathlib import Path; Path('should-not-run').write_text('x')\""
+    command["requested_capabilities"] = ["agent"]
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    assert harness.validate_roadmap()["status"] == "passed"
+    result = harness.run_task(harness.next_task())
+
+    assert result["status"] == "blocked"
+    assert "does not support requested capabilities" in result["message"]
+    assert not (project / "should-not-run").exists()
+    manifest = task_manifest(project, result)
+    decision = policy_decision(manifest, "capability_policy", outcome="denied")
+    assert decision["effect"] == "deny"
+    assert decision["metadata"]["requested_capabilities"] == ["agent"]
+    assert decision["metadata"]["unsupported_capabilities"] == ["agent"]
+    assert manifest["policy_decision_summary"]["blocking"][0]["kind"] == "capability_policy"
+
+
+@pytest.mark.parametrize("unsafe_capability", ["network", "secret_access", "browser_automation", "deployment", "live_operations"])
+def test_capability_policy_denies_unsafe_executor_capability_requests(tmp_path, unsafe_capability):
+    project = tmp_path / f"capability-unsafe-{unsafe_capability}"
+    project.mkdir()
+    init_project(project, "python-agent", name=f"capability-unsafe-{unsafe_capability}")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    command = roadmap["milestones"][0]["tasks"][0]["acceptance"][0]
+    command["command"] = "python3 -c \"print('unsafe capability should not run')\""
+    command["requested_capabilities"] = [unsafe_capability]
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    result = Harness(project).run_task(Harness(project).next_task())
+
+    assert result["status"] == "blocked"
+    manifest = task_manifest(project, result)
+    decision = policy_decision(manifest, "capability_policy", outcome="denied")
+    assert decision["effect"] == "deny"
+    assert decision["metadata"]["unsafe_capabilities"] == [unsafe_capability]
+    assert "not locally approvable" in decision["reason"]
+    assert manifest["policy_decision_summary"]["requires_approval"] == []
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ([], "non-empty list"),
+        ("local_process", "non-empty list"),
+        ([""], "non-empty string"),
+        (["unknown_capability"], "unknown capability `unknown_capability`"),
+    ],
+)
+def test_requested_capability_validation_errors(tmp_path, value, expected):
+    project = tmp_path / "capability-validation-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="capability-validation-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    command = roadmap["milestones"][0]["tasks"][0]["acceptance"][0]
+    command["command"] = "python3 -c \"print('validation')\""
+    command["requested_capabilities"] = value
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    result = Harness(project).validate_roadmap()
+
+    assert result["status"] == "failed"
+    assert any(expected in error for error in result["errors"])
+
+
+def test_capability_policy_manifest_report_and_status_evidence(tmp_path):
+    project = tmp_path / "capability-policy-manifest-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="capability-policy-manifest-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    command = roadmap["milestones"][0]["tasks"][0]["acceptance"][0]
+    command["command"] = "python3 -c \"print('blocked')\""
+    command["requested_capabilities"] = ["agent"]
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    result = Harness(project).run_task(Harness(project).next_task())
+
+    assert result["status"] == "blocked"
+    manifest = task_manifest(project, result)
+    run = manifest["runs"][0]
+    assert run["requested_capabilities"] == ["agent"]
+    assert "local_process" in run["executor_capabilities"]
+    decision = policy_decision(manifest, "capability_policy", outcome="denied")
+    assert decision["metadata"]["executor_capabilities"] == run["executor_capabilities"]
+    report_evidence = report_policy_evidence(project, result)
+    assert report_evidence["policy_decisions"] == manifest["policy_decisions"]
+    report_text = (project / result["report"]).read_text(encoding="utf-8")
+    assert "Requested capabilities" in report_text
+    assert "capability_policy" in report_text
+
+    status = Harness(project).status_summary()
+    assert status["capability_policy"]["blocking_count"] == 1
+    assert status["capability_policy"]["blocking"][0]["kind"] == "capability_policy"
+    assert status["runtime_dashboard"]["capability_policy"]["blocking_count"] == 1
+    assert status["manifest_index"]["policy_decision_summary"]["blocking"][0]["kind"] == "capability_policy"
+
+
+def test_capability_policy_existing_tasks_unchanged_without_requests(tmp_path):
+    project = tmp_path / "capability-backcompat-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="capability-backcompat-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0]["command"] = "python3 -c \"print('ok')\""
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    result = Harness(project).run_task(Harness(project).next_task())
+
+    assert result["status"] == "passed"
+    manifest = task_manifest(project, result)
+    assert all(decision["kind"] != "capability_policy" for decision in manifest["policy_decisions"])
+    assert manifest["runs"][0]["requested_capabilities"] == []
+    assert manifest["policy_decision_summary"]["total"] == 8
+
+
 def test_policy_decision_schema_records_manual_approval_gate(tmp_path):
     project = tmp_path / "agent-project"
     project.mkdir()
@@ -1672,6 +1959,220 @@ def test_phase_level_state_is_durable_and_ordered_for_repairing_e2e_task(tmp_pat
     assert task_state["phase_states"]["acceptance-1"]["status"] == "failed"
 
 
+def test_interrupted_drive_resume_replay_guard_skips_passed_phases_after_stale_recovery(tmp_path, capsys):
+    project = tmp_path / "interrupted-replay-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="interrupted-replay-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["drive_watchdog"] = {"stale_after_seconds": 1}
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["agent_approval_required"] = False
+    task["implementation"] = [
+        {
+            "name": "write implementation marker",
+            "command": (
+                "python3 -c \"from pathlib import Path; "
+                "Path('implementation.log').open('a', encoding='utf-8').write('implementation\\n')\""
+            ),
+        }
+    ]
+    task["acceptance"][0] = {
+        "name": "write acceptance marker",
+        "command": (
+            "python3 -c \"from pathlib import Path; "
+            "Path('acceptance.log').open('a', encoding='utf-8').write('acceptance\\n')\""
+        ),
+    }
+    task["e2e"] = [
+        {
+            "name": "write e2e marker",
+            "command": (
+                "python3 -c \"from pathlib import Path; "
+                "assert Path('implementation.log').read_text(encoding='utf-8').splitlines() == ['implementation']; "
+                "assert Path('acceptance.log').read_text(encoding='utf-8').splitlines() == ['acceptance']; "
+                "Path('e2e.log').open('a', encoding='utf-8').write('e2e\\n')\""
+            ),
+        }
+    ]
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    task_obj = harness.next_task()
+    assert task_obj is not None
+    assert harness.start_drive()["started"] is True
+    state = harness.load_state()
+    state.setdefault("tasks", {}).setdefault(task_obj.id, {})["attempts"] = 1
+    harness.save_state(state)
+    state = harness.load_state()
+    interrupted_runs = []
+    implementation_status, _ = harness._run_command_group(
+        task_obj.implementation,
+        phase="implementation",
+        runs=interrupted_runs,
+        dry_run=False,
+        allow_live=False,
+        allow_manual=False,
+        allow_agent=False,
+        task=task_obj,
+        state=state,
+        persist_state=True,
+    )
+    acceptance_status, _ = harness._run_command_group(
+        task_obj.acceptance,
+        phase="acceptance-1",
+        runs=interrupted_runs,
+        dry_run=False,
+        allow_live=False,
+        allow_manual=False,
+        allow_agent=False,
+        task=task_obj,
+        state=state,
+        persist_state=True,
+    )
+    assert implementation_status == "passed"
+    assert acceptance_status == "passed"
+
+    state = harness_state(project)
+    previous_pid = unused_pid()
+    state["drive_control"]["pid"] = previous_pid
+    state["drive_control"]["last_heartbeat_at"] = "2000-01-01T00:00:00Z"
+    write_harness_state(project, state)
+
+    capsys.readouterr()
+    assert cli_main(["drive", "--project-root", str(project), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["status"] == "completed"
+    assert payload["stale_running_recovery"]["previous_pid"] == previous_pid
+    result = payload["results"][0]
+    assert result["status"] == "passed"
+    assert [(run["phase"], run["status"]) for run in result["runs"]] == [
+        ("implementation", "reused"),
+        ("acceptance-1", "reused"),
+        ("e2e", "passed"),
+    ]
+    assert (project / "implementation.log").read_text(encoding="utf-8").splitlines() == ["implementation"]
+    assert (project / "acceptance.log").read_text(encoding="utf-8").splitlines() == ["acceptance"]
+    assert (project / "e2e.log").read_text(encoding="utf-8").splitlines() == ["e2e"]
+
+    state = harness_state(project)
+    task_state = state["tasks"]["tests"]
+    assert task_state["current_phase"] is None
+    reused_events = [event for event in task_state["phase_history"] if event["event"] == "reused"]
+    assert [event["phase"] for event in reused_events] == ["implementation", "acceptance-1"]
+    assert all(event["metadata"]["replay_guard"]["reason"] == "passed_phase_for_current_definition" for event in reused_events)
+
+    manifest = task_manifest(project, result)
+    assert manifest["replay_guard"]["reused_phase_count"] == 2
+    assert [phase["phase"] for phase in manifest["replay_guard"]["reused_phases"]] == [
+        "implementation",
+        "acceptance-1",
+    ]
+    drive_json = json.loads((project / payload["drive_report_json"]).read_text(encoding="utf-8"))
+    assert drive_json["replay_guard"]["reused_phase_count"] == 2
+    assert "Phase Replay Guard" in (project / payload["drive_report"]).read_text(encoding="utf-8")
+
+    capsys.readouterr()
+    assert cli_main(["status", "--project-root", str(project), "--json"]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    assert status_payload["replay_guard"]["reused_phase_count"] == 2
+    assert status_payload["runtime_dashboard"]["replay_guard"]["reused_phase_count"] == 2
+    assert status_payload["runtime_dashboard"]["current_phase"] is None
+    assert status_payload["failure_isolation"]["unresolved_count"] == 0
+    assert Harness(project).validate_roadmap()["status"] == "passed"
+
+
+def test_interrupted_phase_replay_guard_reruns_when_task_command_group_changes(tmp_path, capsys):
+    project = tmp_path / "interrupted-replay-command-change-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="interrupted-replay-command-change-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["agent_approval_required"] = False
+    task["implementation"] = [
+        {
+            "name": "write implementation marker",
+            "command": (
+                "python3 -c \"from pathlib import Path; "
+                "Path('implementation.log').open('a', encoding='utf-8').write('old\\n')\""
+            ),
+        }
+    ]
+    task["acceptance"][0] = {
+        "name": "accept changed implementation",
+        "command": (
+            "python3 -c \"from pathlib import Path; "
+            "assert Path('implementation.log').read_text(encoding='utf-8').splitlines() == ['old', 'new']; "
+            "Path('accepted.log').write_text('ok', encoding='utf-8')\""
+        ),
+    }
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    task_obj = harness.next_task()
+    assert task_obj is not None
+    assert harness.start_drive()["started"] is True
+    state = harness.load_state()
+    state.setdefault("tasks", {}).setdefault(task_obj.id, {})["attempts"] = 1
+    harness.save_state(state)
+    state = harness.load_state()
+    interrupted_runs = []
+    implementation_status, _ = harness._run_command_group(
+        task_obj.implementation,
+        phase="implementation",
+        runs=interrupted_runs,
+        dry_run=False,
+        allow_live=False,
+        allow_manual=False,
+        allow_agent=False,
+        task=task_obj,
+        state=state,
+        persist_state=True,
+    )
+    assert implementation_status == "passed"
+
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"][0]["implementation"][0]["command"] = (
+        "python3 -c \"from pathlib import Path; "
+        "Path('implementation.log').open('a', encoding='utf-8').write('new\\n')\""
+    )
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    state = harness_state(project)
+    state["drive_control"].update(
+        {
+            "status": "idle",
+            "active": False,
+            "pid": None,
+            "current_task": None,
+            "current_activity": "manual-interruption-clear",
+        }
+    )
+    write_harness_state(project, state)
+
+    capsys.readouterr()
+    assert cli_main(["drive", "--project-root", str(project), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    result = payload["results"][0]
+
+    assert result["status"] == "passed"
+    assert [(run["phase"], run["status"]) for run in result["runs"]] == [
+        ("implementation", "passed"),
+        ("acceptance-1", "passed"),
+    ]
+    assert (project / "implementation.log").read_text(encoding="utf-8").splitlines() == ["old", "new"]
+    implementation_decision = next(
+        decision
+        for decision in result["replay_guard"]["decisions"]
+        if decision["phase"] == "implementation"
+    )
+    assert implementation_decision["status"] == "not_reused"
+    assert implementation_decision["reason"] == "command_group_changed"
+    assert result["replay_guard"]["reused_phase_count"] == 0
+    assert Harness(project).validate_roadmap()["status"] == "passed"
+
+
 def test_harness_fails_task_when_e2e_fails(tmp_path):
     project = tmp_path / "agent-project"
     project.mkdir()
@@ -1831,6 +2332,113 @@ def test_git_checkpoint_refuses_dirty_worktree_that_predates_task(tmp_path):
     assert result["safety"]["git_preflight"]["dirty_before_paths"] == ["preexisting.txt"]
     assert checkpoint["status"] == "skipped"
     assert "dirty worktree existed before the task" in checkpoint["message"]
+
+
+def test_checkpoint_readiness_clean_worktree(tmp_path):
+    project = tmp_path / "checkpoint-clean-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="checkpoint-clean-project")
+    init_git_repo(project)
+
+    readiness = Harness(project).status_summary()["checkpoint_readiness"]
+
+    assert readiness["is_repository"] is True
+    assert readiness["ready"] is True
+    assert readiness["blocking"] is False
+    assert readiness["reason"] == "clean"
+    assert readiness["dirty_paths"] == []
+    assert readiness["blocking_paths"] == []
+    assert readiness["safe_to_checkpoint_paths"] == []
+
+
+def test_status_json_exposes_checkpoint_readiness(tmp_path, capsys):
+    project = tmp_path / "checkpoint-status-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="checkpoint-status-project")
+    init_git_repo(project)
+
+    assert cli_main(["status", "--project-root", str(project), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    readiness = payload["checkpoint_readiness"]
+    assert readiness["kind"] == "engineering-harness.checkpoint-readiness"
+    assert readiness["ready"] is True
+    assert readiness["reason"] == "clean"
+    assert payload["runtime_dashboard"]["checkpoint_readiness"] == readiness
+
+
+def test_checkpoint_readiness_roadmap_only_materialization_dirtiness(tmp_path):
+    project = tmp_path / "checkpoint-roadmap-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="checkpoint-roadmap-project")
+    init_git_repo(project)
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["checkpoint_readiness_note"] = "roadmap materialization"
+    roadmap_path.write_text(json.dumps(roadmap, indent=2), encoding="utf-8")
+
+    readiness = Harness(project).status_summary()["checkpoint_readiness"]
+
+    assert readiness["ready"] is True
+    assert readiness["blocking"] is False
+    assert readiness["reason"] == "harness_materialization_dirty"
+    assert readiness["dirty_paths"] == [".engineering/roadmap.yaml"]
+    assert readiness["safe_to_checkpoint_paths"] == [".engineering/roadmap.yaml"]
+    assert readiness["blocking_paths"] == []
+    assert readiness["classifications"]["harness_materialization"] == [".engineering/roadmap.yaml"]
+
+
+def test_checkpoint_readiness_blocks_user_dirty_worktree(tmp_path):
+    project = tmp_path / "checkpoint-mixed-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="checkpoint-mixed-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["file_scope"] = ["src/**"]
+    task["acceptance"][0]["command"] = "python3 -c \"print('checkpoint readiness')\""
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    (project / "user-modified.txt").write_text("base", encoding="utf-8")
+    (project / "user-staged.txt").write_text("base", encoding="utf-8")
+    (project / "user-deleted.txt").write_text("base", encoding="utf-8")
+    init_git_repo(project)
+
+    roadmap["checkpoint_readiness_note"] = "safe roadmap materialization"
+    roadmap_path.write_text(json.dumps(roadmap, indent=2), encoding="utf-8")
+    (project / "src").mkdir()
+    (project / "src/in-scope.txt").write_text("task dirty", encoding="utf-8")
+    (project / "user-modified.txt").write_text("modified", encoding="utf-8")
+    (project / "user-staged.txt").write_text("staged", encoding="utf-8")
+    subprocess.run(["git", "add", "user-staged.txt"], cwd=project, check=True)
+    (project / "user-deleted.txt").unlink()
+    (project / "user-untracked.txt").write_text("untracked", encoding="utf-8")
+
+    readiness = Harness(project).status_summary()["checkpoint_readiness"]
+
+    assert readiness["ready"] is False
+    assert readiness["blocking"] is True
+    assert readiness["reason"] == "mixed_unrelated_user_dirty"
+    assert set(readiness["dirty_paths"]) == {
+        ".engineering/roadmap.yaml",
+        "src/in-scope.txt",
+        "user-deleted.txt",
+        "user-modified.txt",
+        "user-staged.txt",
+        "user-untracked.txt",
+    }
+    assert readiness["safe_to_checkpoint_paths"] == [".engineering/roadmap.yaml", "src/in-scope.txt"]
+    assert readiness["blocking_paths"] == [
+        "user-deleted.txt",
+        "user-modified.txt",
+        "user-staged.txt",
+        "user-untracked.txt",
+    ]
+    states = {item["path"]: set(item["states"]) for item in readiness["dirty_path_states"]}
+    assert "modified" in states["user-modified.txt"]
+    assert "staged" in states["user-staged.txt"]
+    assert "deleted" in states["user-deleted.txt"]
+    assert "untracked" in states["user-untracked.txt"]
+    assert "will not commit or clean" in readiness["recommended_action"]
 
 
 def test_policy_decision_schema_records_dirty_worktree_warning(tmp_path):
@@ -2270,12 +2878,14 @@ def test_workspace_dispatch_runs_one_project_in_deterministic_order(tmp_path, ca
     zeta = init_workspace_project(workspace, "zeta-project", marker="zeta-marker.txt")
     alpha = init_workspace_project(workspace, "alpha-project", marker="alpha-marker.txt")
 
-    assert cli_main(["workspace-drive", "--workspace", str(workspace), "--json"]) == 0
+    assert cli_main(["workspace-drive", "--workspace", str(workspace), "--scheduler-policy", "path-order", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "dispatched"
+    assert payload["scheduler_policy"] == "path-order"
     assert [item["project"] for item in payload["queue"]] == ["alpha-project", "zeta-project"]
     assert payload["selected"]["project"] == "alpha-project"
+    assert payload["selected"]["selected_reason"]["code"] == "path_order_first_eligible"
     assert payload["eligible_count"] == 2
     assert (alpha / "alpha-marker.txt").read_text(encoding="utf-8") == "ok"
     assert not (zeta / "zeta-marker.txt").exists()
@@ -2293,6 +2903,593 @@ def test_workspace_dispatch_runs_one_project_in_deterministic_order(tmp_path, ca
     assert "Workspace Drive Dispatch Report" in report_text
     assert "one_project_per_invocation" in report_text
     assert json.loads(sidecar.read_text(encoding="utf-8"))["status"] == "dispatched"
+
+
+def test_local_full_lifecycle_unattended_smoke(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    project = workspace / "local-full-lifecycle-smoke-project"
+    project.mkdir(parents=True)
+
+    assert cli_main(
+        [
+            "plan-goal",
+            "--project-root",
+            str(project),
+            "--name",
+            "Local Full Lifecycle Smoke",
+            "--profile",
+            "python-agent",
+            "--goal",
+            "Build a deterministic local artifact and expose unattended run evidence.",
+            "--experience-kind",
+            "cli",
+            "--stage-count",
+            "1",
+            "--materialize",
+            "--json",
+        ]
+    ) == 0
+    planned = json.loads(capsys.readouterr().out)
+    assert planned["status"] == "materialized"
+    assert planned["goal_intake"]["safety"]["allow_live_services"] is False
+    assert Harness(project).validate_roadmap()["status"] == "passed"
+
+    seed_local_full_lifecycle_smoke_task(project)
+    validation = Harness(project).validate_roadmap()
+    assert validation["status"] == "passed"
+
+    assert cli_main(
+        [
+            "workspace-drive",
+            "--workspace",
+            str(workspace),
+            "--scheduler-policy",
+            "path-order",
+            "--max-tasks",
+            "2",
+            "--time-budget-seconds",
+            "60",
+            "--json",
+        ]
+    ) == 0
+    dispatch = json.loads(capsys.readouterr().out)
+    drive = dispatch["drive"]
+    result = drive["results"][0]
+
+    assert dispatch["status"] == "dispatched"
+    assert dispatch["selected"]["project"] == "Local Full Lifecycle Smoke"
+    assert dispatch["selected"]["drive_status"] == "completed"
+    assert dispatch["lease"]["status"] == "released"
+    assert drive["status"] == "completed"
+    assert drive["message"] == "Roadmap queue is empty."
+    assert drive["checkpoint_readiness"]["blocking"] is False
+    assert drive["failure_isolation"]["unresolved_count"] == 0
+    assert result["status"] == "passed"
+    assert result["task"]["id"] == "local-full-lifecycle-artifact"
+    assert [run["phase"] for run in result["runs"]] == ["implementation", "acceptance-1", "e2e"]
+    assert all(run["status"] == "passed" and run["executor"] == "shell" for run in result["runs"])
+
+    artifact_path = project / "artifacts/local-full-lifecycle/implementation.txt"
+    e2e_path = project / "artifacts/local-full-lifecycle/e2e-evidence.json"
+    assert artifact_path.read_text(encoding="utf-8") == "implemented\n"
+    assert json.loads(e2e_path.read_text(encoding="utf-8")) == {
+        "artifact": "artifacts/local-full-lifecycle/implementation.txt",
+        "status": "passed",
+    }
+
+    manifest = task_manifest(project, result)
+    assert manifest["status"] == "passed"
+    assert manifest["task_id"] == "local-full-lifecycle-artifact"
+    assert [run["phase"] for run in manifest["runs"]] == ["implementation", "acceptance-1", "e2e"]
+    assert next(run for run in manifest["runs"] if run["phase"] == "e2e")["status"] == "passed"
+    assert manifest["safety"]["git_preflight"]["status"] == "skipped"
+    assert manifest["safety"]["file_scope_guard"]["status"] == "skipped"
+    policy_summary = manifest["policy_decision_summary"]
+    assert policy_summary["blocking"] == []
+    assert policy_summary["requires_approval"] == []
+    assert policy_summary["by_outcome"].get("denied", 0) == 0
+    assert policy_summary["by_outcome"].get("requires_approval", 0) == 0
+    assert {"agent_approval", "command_policy", "executor_policy", "git_preflight", "file_scope_guard"}.issubset(
+        set(policy_summary["by_kind"])
+    )
+    assert "failure_isolation" not in manifest
+
+    report = (project / result["report"]).read_text(encoding="utf-8")
+    assert "# Task Report: local-full-lifecycle-artifact" in report
+    assert "### implementation: write local artifact" in report
+    assert "### e2e: local lifecycle e2e evidence" in report
+    assert "## Policy Decisions" in report
+
+    index = Harness(project).manifest_index()
+    assert index["manifest_count"] == 1
+    assert index["status_counts"] == {"passed": 1}
+    assert index["latest_by_task"] == {"local-full-lifecycle-artifact": result["manifest"]}
+    assert index["failure_isolation"]["isolated_count"] == 0
+    assert index["policy_decision_summary"]["blocking"] == []
+
+    assert cli_main(["status", "--project-root", str(project), "--json"]) == 0
+    status = json.loads(capsys.readouterr().out)
+    dashboard = status["runtime_dashboard"]
+    scorecard = status["goal_gap_scorecard"]
+    scorecard_by_id = scorecard_category_map(scorecard)
+
+    assert status["next_task"] is None
+    assert status["manifest_index"]["manifest_count"] == 1
+    assert status["failure_isolation"]["unresolved_count"] == 0
+    assert status["checkpoint_readiness"]["kind"] == "engineering-harness.checkpoint-readiness"
+    assert status["checkpoint_readiness"]["blocking"] is False
+    assert dashboard["checkpoint_readiness"] == status["checkpoint_readiness"]
+    assert dashboard["failure_isolation"]["unresolved_count"] == 0
+    assert dashboard["workspace_dispatch"]["selected"]["project"] == "Local Full Lifecycle Smoke"
+    assert dashboard["workspace_dispatch"]["latest_report"]["json_path"] == dispatch["dispatch_report_json"]
+    assert dashboard["latest_reports"]["task_reports"]["files"][0]["json_path"] == result["manifest"]
+    assert dashboard["latest_reports"]["drive_reports"]["files"][0]["json_path"] == dispatch["selected"]["drive_report_json"]
+    assert dashboard["goal_gap_scorecard"] == scorecard
+    assert scorecard_by_id["real_e2e_evidence"]["status"] == "complete"
+    assert scorecard_by_id["failure_isolation"]["status"] == "complete"
+    assert scorecard_by_id["runtime_dashboard"]["status"] == "complete"
+    assert scorecard_by_id["workspace_dispatch_fairness_backoff"]["status"] == "complete"
+
+
+def test_workspace_dispatch_checkpoint_readiness_visibility(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    dirty = init_workspace_project(workspace, "aa-checkpoint-dirty", marker="dirty-should-not-run.txt")
+    clean = init_workspace_project(workspace, "bb-checkpoint-clean", marker="clean-marker.txt")
+    dirty_roadmap_path = dirty / ".engineering/roadmap.yaml"
+    dirty_roadmap = json.loads(dirty_roadmap_path.read_text(encoding="utf-8"))
+    dirty_roadmap["milestones"][0]["tasks"][0]["file_scope"] = ["src/**"]
+    dirty_roadmap_path.write_text(json.dumps(dirty_roadmap), encoding="utf-8")
+    init_git_repo(dirty)
+    (dirty / "user-notes.txt").write_text("operator draft", encoding="utf-8")
+
+    assert cli_main(["workspace-drive", "--workspace", str(workspace), "--max-tasks", "1", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["selected"]["project"] == "bb-checkpoint-clean"
+    by_project = {item["project"]: item for item in payload["queue"]}
+    dirty_item = by_project["aa-checkpoint-dirty"]
+    assert dirty_item["eligible"] is False
+    assert dirty_item["checkpoint_readiness"]["blocking"] is True
+    assert dirty_item["checkpoint_readiness"]["blocking_paths"] == ["user-notes.txt"]
+    assert "checkpoint_not_ready" in {reason["code"] for reason in dirty_item["skip_reasons"]}
+    assert not (dirty / "dirty-should-not-run.txt").exists()
+    assert (clean / "clean-marker.txt").read_text(encoding="utf-8") == "ok"
+
+    sidecar = json.loads((workspace / payload["dispatch_report_json"]).read_text(encoding="utf-8"))
+    sidecar_dirty = next(item for item in sidecar["queue"] if item["project"] == "aa-checkpoint-dirty")
+    assert sidecar_dirty["checkpoint_readiness"]["recommended_action"] == dirty_item["checkpoint_readiness"][
+        "recommended_action"
+    ]
+    assert "Checkpoint readiness" in (workspace / payload["dispatch_report"]).read_text(encoding="utf-8")
+
+    assert cli_main(["status", "--project-root", str(clean), "--json"]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    dashboard_dirty = next(
+        item
+        for item in status_payload["runtime_dashboard"]["workspace_dispatch"]["queue"]
+        if item["project"] == "aa-checkpoint-dirty"
+    )
+    assert dashboard_dirty["checkpoint_readiness"]["blocking"] is True
+    assert "checkpoint_not_ready" in dashboard_dirty["skip_codes"]
+
+
+def test_workspace_dispatch_priority_score_uses_path_tie_breaker(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    init_workspace_project(workspace, "zeta-priority-project", marker="zeta-priority-marker.txt")
+    alpha = init_workspace_project(workspace, "alpha-priority-project", marker="alpha-priority-marker.txt")
+
+    assert cli_main(["workspace-drive", "--workspace", str(workspace), "--max-tasks", "1", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["scheduler_policy"] == "fair"
+    assert payload["selected"]["project"] == "alpha-priority-project"
+    queue = payload["queue"]
+    assert [item["project"] for item in queue[:2]] == ["alpha-priority-project", "zeta-priority-project"]
+    assert queue[0]["score"] == queue[1]["score"]
+    assert queue[0]["selected_reason"]["code"] == "highest_fair_score"
+    assert queue[0]["score_components"]["workspace_history"]["never_selected_bonus"] == 80
+    assert (alpha / "alpha-priority-marker.txt").read_text(encoding="utf-8") == "ok"
+
+
+def test_workspace_dispatch_priority_score_missing_history_fallback(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    project = init_workspace_project(workspace, "missing-history-score-project", marker="missing-history-marker.txt")
+
+    assert cli_main(["workspace-drive", "--workspace", str(workspace), "--max-tasks", "1", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    selected = payload["selected"]
+    assert selected["project"] == "missing-history-score-project"
+    components = selected["score_components"]
+    assert selected["score"] == components["total"]
+    assert components["workspace_history"]["has_workspace_history"] is False
+    assert components["workspace_history"]["selected_count"] == 0
+    assert components["workspace_history"]["never_selected_bonus"] == 80
+    assert components["pending_tasks"]["count"] == 1
+    sidecar = json.loads((workspace / payload["dispatch_report_json"]).read_text(encoding="utf-8"))
+    assert sidecar["selected"]["score_components"]["workspace_history"]["has_workspace_history"] is False
+    assert "Score components" in (workspace / payload["dispatch_report"]).read_text(encoding="utf-8")
+    assert (project / "missing-history-marker.txt").read_text(encoding="utf-8") == "ok"
+
+
+def test_workspace_dispatch_priority_score_uses_goal_gap_retrospective(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    plain = init_workspace_project(workspace, "aa-plain-score-project", marker="plain-score-marker.txt")
+    gap = init_workspace_project(workspace, "zz-goal-gap-score-project")
+
+    gap_roadmap_path = gap / ".engineering/roadmap.yaml"
+    gap_roadmap = json.loads(gap_roadmap_path.read_text(encoding="utf-8"))
+    gap_roadmap["milestones"][0]["tasks"] = [
+        {
+            "id": "gap-first-task",
+            "title": "Gap first task",
+            "status": "pending",
+            "file_scope": ["**"],
+            "acceptance": [{"name": "gap first marker", "command": "python3 -c \"from pathlib import Path; Path('gap-first-marker.txt').write_text('ok')\""}],
+        },
+        {
+            "id": "gap-second-task",
+            "title": "Gap second task",
+            "status": "pending",
+            "file_scope": ["**"],
+            "acceptance": [{"name": "gap second marker", "command": "python3 -c \"from pathlib import Path; Path('gap-second-marker.txt').write_text('ok')\""}],
+        },
+    ]
+    gap_roadmap_path.write_text(json.dumps(gap_roadmap), encoding="utf-8")
+
+    assert cli_main(["drive", "--project-root", str(gap), "--max-tasks", "1", "--json"]) == 0
+    drive_payload = json.loads(capsys.readouterr().out)
+    assert drive_payload["goal_gap_retrospective"]["remaining_risks"]
+
+    assert cli_main(["workspace-drive", "--workspace", str(workspace), "--max-tasks", "1", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["selected"]["project"] == "zz-goal-gap-score-project"
+    gap_item = next(item for item in payload["queue"] if item["project"] == "zz-goal-gap-score-project")
+    plain_item = next(item for item in payload["queue"] if item["project"] == "aa-plain-score-project")
+    goal_gap = gap_item["score_components"]["goal_gap"]
+    assert goal_gap["source"] == drive_payload["drive_report_json"]
+    assert goal_gap["points"] > 0
+    assert gap_item["score"] > plain_item["score"]
+    assert not (plain / "plain-score-marker.txt").exists()
+    assert (gap / "gap-second-marker.txt").read_text(encoding="utf-8") == "ok"
+
+
+def test_workspace_dispatch_fair_scheduler_prioritizes_starved_project(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    first = init_workspace_project(workspace, "aa-fair-cooldown-project")
+    second = init_workspace_project(workspace, "bb-starved-project", marker="second-starved-marker.txt")
+
+    first_roadmap_path = first / ".engineering/roadmap.yaml"
+    first_roadmap = json.loads(first_roadmap_path.read_text(encoding="utf-8"))
+    first_roadmap["milestones"][0]["tasks"] = [
+        {
+            "id": "first-task",
+            "title": "First task",
+            "status": "pending",
+            "file_scope": ["**"],
+            "acceptance": [{"name": "first marker", "command": "python3 -c \"from pathlib import Path; Path('first-marker.txt').write_text('ok')\""}],
+        },
+        {
+            "id": "second-task",
+            "title": "Second task",
+            "status": "pending",
+            "file_scope": ["**"],
+            "acceptance": [{"name": "second marker", "command": "python3 -c \"from pathlib import Path; Path('second-marker.txt').write_text('ok')\""}],
+        },
+    ]
+    first_roadmap_path.write_text(json.dumps(first_roadmap), encoding="utf-8")
+
+    tick1_exit, tick1 = run_workspace_drive_json(capsys, workspace, "--max-tasks", "1")
+    tick2_exit, tick2 = run_workspace_drive_json(capsys, workspace, "--max-tasks", "1")
+
+    assert [tick1_exit, tick2_exit] == [0, 0]
+    assert tick1["selected"]["project"] == "aa-fair-cooldown-project"
+    assert tick2["selected"]["project"] == "bb-starved-project"
+    first_tick2 = next(item for item in tick2["queue"] if item["project"] == "aa-fair-cooldown-project")
+    second_tick2 = next(item for item in tick2["queue"] if item["project"] == "bb-starved-project")
+    assert first_tick2["eligible"] is True
+    assert second_tick2["eligible"] is True
+    assert first_tick2["score_components"]["cooldown"]["active"] is True
+    assert first_tick2["score_components"]["cooldown"]["points"] < 0
+    assert second_tick2["score_components"]["workspace_history"]["selected_count"] == 0
+    assert second_tick2["score"] > first_tick2["score"]
+    assert (first / "first-marker.txt").read_text(encoding="utf-8") == "ok"
+    assert not (first / "second-marker.txt").exists()
+    assert (second / "second-starved-marker.txt").read_text(encoding="utf-8") == "ok"
+
+
+def test_workspace_dispatch_backoff_selects_alternate_project(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    failed = init_workspace_project(workspace, "aa-nonproductive-failed-project")
+    alternate = init_workspace_project(workspace, "bb-alternate-after-failure")
+    configure_workspace_self_iteration_project(failed, "raise SystemExit(7)\n")
+    configure_workspace_self_iteration_project(
+        alternate,
+        workspace_backoff_planner_source(workspace_backoff_stage("alternate-stage", "alternate-task")),
+    )
+
+    first_exit, first = run_workspace_drive_json(capsys, workspace, "--self-iterate", "--max-self-iterations", "1")
+    failed_after_first = project_text_snapshot(failed)
+    second_exit, second = run_workspace_drive_json(capsys, workspace, "--self-iterate", "--max-self-iterations", "1")
+
+    assert first_exit == 1
+    assert first["selected"]["project"] == "aa-nonproductive-failed-project"
+    assert second_exit == 0
+    assert second["selected"]["project"] == "bb-alternate-after-failure"
+    assert project_text_snapshot(failed) == failed_after_first
+    failed_item = next(item for item in second["queue"] if item["project"] == "aa-nonproductive-failed-project")
+    assert failed_item["eligible"] is True
+    assert failed_item["dispatch_status"] == "skipped"
+    backoff = failed_item["backoff"]
+    assert backoff["decision"] == "active_penalty"
+    assert backoff["active"] is True
+    assert backoff["reason"] == "drive_failed"
+    assert backoff["source_report"] == first["dispatch_report_json"]
+    assert backoff["source_drive_report_json"] == first["selected"]["drive_report_json"]
+    assert backoff["age_seconds"] >= 0
+    assert backoff["threshold_seconds"] == 3600
+    assert backoff["expires_at"]
+    assert failed_item["score_components"]["nonproductive_backoff"] == backoff
+    assert failed_item["score"] < next(
+        item for item in second["queue"] if item["project"] == "bb-alternate-after-failure"
+    )["score"]
+
+    sidecar = json.loads((workspace / second["dispatch_report_json"]).read_text(encoding="utf-8"))
+    sidecar_failed = next(item for item in sidecar["queue"] if item["project"] == "aa-nonproductive-failed-project")
+    assert sidecar_failed["backoff"]["reason"] == "drive_failed"
+    report_text = (workspace / second["dispatch_report"]).read_text(encoding="utf-8")
+    assert "Nonproductive backoff" in report_text
+    assert "drive_failed" in report_text
+
+    assert cli_main(["status", "--project-root", str(failed), "--json"]) == 0
+    dashboard = json.loads(capsys.readouterr().out)["runtime_dashboard"]["workspace_dispatch"]
+    dashboard_failed = next(item for item in dashboard["queue"] if item["project"] == "aa-nonproductive-failed-project")
+    assert dashboard_failed["backoff"]["active"] is True
+    assert dashboard_failed["backoff"]["source_report"] == first["dispatch_report_json"]
+
+
+def test_workspace_dispatch_planner_validation_backoff_selects_alternate_project(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    rejected = init_workspace_project(workspace, "aa-planner-validation-project")
+    alternate = init_workspace_project(workspace, "bb-planner-validation-alternate")
+    invalid_stage = {"id": "invalid-planner-stage", "title": "Invalid Planner Stage", "tasks": []}
+    configure_workspace_self_iteration_project(
+        rejected,
+        workspace_backoff_planner_source(invalid_stage),
+    )
+    configure_workspace_self_iteration_project(
+        alternate,
+        workspace_backoff_planner_source(workspace_backoff_stage("valid-planner-stage", "valid-planner-task")),
+    )
+
+    first_exit, first = run_workspace_drive_json(capsys, workspace, "--self-iterate", "--max-self-iterations", "1")
+    second_exit, second = run_workspace_drive_json(capsys, workspace, "--self-iterate", "--max-self-iterations", "1")
+
+    assert first_exit == 1
+    assert first["selected"]["project"] == "aa-planner-validation-project"
+    assert first["drive"]["self_iterations"][0]["status"] == "rejected"
+    assert first["drive"]["self_iterations"][0]["validation"]["status"] == "failed"
+    assert second_exit == 0
+    assert second["selected"]["project"] == "bb-planner-validation-alternate"
+    rejected_item = next(item for item in second["queue"] if item["project"] == "aa-planner-validation-project")
+    assert rejected_item["backoff"]["active"] is True
+    assert rejected_item["backoff"]["reason"] == "planner_validation_failed"
+    assert rejected_item["backoff"]["outcome"]["progress"]["planned_self_iteration_count"] == 0
+
+
+def test_workspace_dispatch_nonproductive_budget_without_progress_backoff(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    exhausted = init_workspace_project(workspace, "aa-budget-without-progress-project")
+    alternate = init_workspace_project(workspace, "bb-budget-alternate-project")
+    configure_workspace_continuation_project(
+        exhausted,
+        [
+            workspace_backoff_stage("budget-stage-a", "budget-task-a"),
+            workspace_backoff_stage("budget-stage-b", "budget-task-b"),
+        ],
+    )
+    configure_workspace_continuation_project(
+        alternate,
+        [workspace_backoff_stage("alternate-budget-stage", "alternate-budget-task")],
+    )
+
+    first_exit, first = run_workspace_drive_json(
+        capsys,
+        workspace,
+        "--rolling",
+        "--max-continuations",
+        "0",
+    )
+    second_exit, second = run_workspace_drive_json(
+        capsys,
+        workspace,
+        "--rolling",
+        "--max-continuations",
+        "1",
+    )
+
+    assert first_exit == 0
+    assert first["selected"]["project"] == "aa-budget-without-progress-project"
+    assert first["drive"]["status"] == "budget_exhausted"
+    assert first["drive"]["results"] == []
+    assert first["drive"]["continuations"] == []
+    assert second_exit == 0
+    assert second["selected"]["project"] == "bb-budget-alternate-project"
+    exhausted_item = next(item for item in second["queue"] if item["project"] == "aa-budget-without-progress-project")
+    assert exhausted_item["backoff"]["active"] is True
+    assert exhausted_item["backoff"]["reason"] == "budget_without_progress"
+    assert exhausted_item["backoff"]["outcome"]["progress"]["useful_progress"] is False
+
+
+def test_workspace_dispatch_nonproductive_backoff_ignores_productive_budget_exhaustion(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    productive = init_workspace_project(workspace, "aa-productive-budget-project")
+    alternate = init_workspace_project(workspace, "bb-productive-budget-alternate", marker="productive-alternate.txt")
+    roadmap_path = productive / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"] = [
+        {
+            "id": "productive-first",
+            "title": "Productive First",
+            "status": "pending",
+            "file_scope": ["**"],
+            "acceptance": [
+                {
+                    "name": "first marker",
+                    "command": "python3 -c \"from pathlib import Path; Path('productive-first.txt').write_text('ok')\"",
+                }
+            ],
+        },
+        {
+            "id": "productive-second",
+            "title": "Productive Second",
+            "status": "pending",
+            "file_scope": ["**"],
+            "acceptance": [
+                {
+                    "name": "second marker",
+                    "command": "python3 -c \"from pathlib import Path; Path('productive-second.txt').write_text('ok')\"",
+                }
+            ],
+        },
+    ]
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    first_exit, first = run_workspace_drive_json(capsys, workspace, "--max-tasks", "1")
+    second_exit, second = run_workspace_drive_json(capsys, workspace, "--max-tasks", "1")
+
+    assert first_exit == 0
+    assert first["drive"]["status"] == "budget_exhausted"
+    assert first["drive"]["results"][0]["status"] == "passed"
+    productive_item = next(item for item in second["queue"] if item["project"] == "aa-productive-budget-project")
+    assert second_exit == 0
+    assert productive_item["backoff"]["active"] is False
+    assert productive_item["backoff"]["decision"] == "productive"
+    assert productive_item["backoff"]["points"] == 0
+    assert productive_item["backoff"]["outcome"]["productive"] is True
+    assert productive_item["backoff"]["outcome"]["progress"]["completed_result_count"] == 1
+    assert (productive / "productive-first.txt").read_text(encoding="utf-8") == "ok"
+
+
+def test_workspace_dispatch_backoff_expiry_restores_fair_order(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    exhausted = init_workspace_project(workspace, "aa-expired-backoff-project")
+    alternate = init_workspace_project(workspace, "bb-expired-backoff-alternate")
+    configure_workspace_continuation_project(
+        exhausted,
+        [workspace_backoff_stage(f"expired-stage-{index}", f"expired-task-{index}") for index in range(5)],
+    )
+    configure_workspace_continuation_project(
+        alternate,
+        [workspace_backoff_stage("expired-alternate-stage", "expired-alternate-task")],
+    )
+
+    first_exit, first = run_workspace_drive_json(
+        capsys,
+        workspace,
+        "--rolling",
+        "--max-continuations",
+        "0",
+        "--nonproductive-backoff-seconds",
+        "1",
+    )
+    sidecar_path = workspace / first["dispatch_report_json"]
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    sidecar["started_at"] = "2000-01-01T00:00:00Z"
+    sidecar["finished_at"] = "2000-01-01T00:00:00Z"
+    sidecar_path.write_text(json.dumps(sidecar, indent=2, sort_keys=True), encoding="utf-8")
+
+    second_exit, second = run_workspace_drive_json(
+        capsys,
+        workspace,
+        "--rolling",
+        "--max-continuations",
+        "0",
+        "--nonproductive-backoff-seconds",
+        "1",
+    )
+
+    assert first_exit == 0
+    assert second_exit == 0
+    assert second["selected"]["project"] == "aa-expired-backoff-project"
+    exhausted_item = next(item for item in second["queue"] if item["project"] == "aa-expired-backoff-project")
+    assert exhausted_item["backoff"]["decision"] == "expired"
+    assert exhausted_item["backoff"]["active"] is False
+    assert exhausted_item["backoff"]["reason"] == "budget_without_progress"
+    assert exhausted_item["backoff"]["points"] == 0
+    assert exhausted_item["score"] > next(
+        item for item in second["queue"] if item["project"] == "bb-expired-backoff-alternate"
+    )["score"]
+
+
+def test_workspace_dispatch_priority_score_keeps_approval_and_failure_skips_blocking(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    approval = init_workspace_project(workspace, "aa-approval-score-blocked", marker="approval-score-marker.txt")
+    isolated = init_workspace_project(workspace, "bb-isolated-score-blocked")
+    eligible = init_workspace_project(workspace, "cc-score-eligible", marker="eligible-score-marker.txt")
+
+    approval_roadmap_path = approval / ".engineering/roadmap.yaml"
+    approval_roadmap = json.loads(approval_roadmap_path.read_text(encoding="utf-8"))
+    approval_roadmap["milestones"][0]["tasks"][0]["manual_approval_required"] = True
+    approval_roadmap_path.write_text(json.dumps(approval_roadmap), encoding="utf-8")
+    assert cli_main(["drive", "--project-root", str(approval), "--json"]) == 1
+    capsys.readouterr()
+
+    isolated_roadmap_path = isolated / ".engineering/roadmap.yaml"
+    isolated_roadmap = json.loads(isolated_roadmap_path.read_text(encoding="utf-8"))
+    isolated_task = isolated_roadmap["milestones"][0]["tasks"][0]
+    isolated_task["max_attempts"] = 1
+    isolated_task["acceptance"][0]["command"] = "python3 -c \"raise SystemExit(9)\""
+    isolated_roadmap_path.write_text(json.dumps(isolated_roadmap), encoding="utf-8")
+    result = Harness(isolated).run_task(Harness(isolated).next_task(), allow_agent=True)
+    assert result["status"] == "failed"
+
+    assert cli_main(["workspace-drive", "--workspace", str(workspace), "--max-tasks", "1", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    by_project = {item["project"]: item for item in payload["queue"]}
+    assert payload["selected"]["project"] == "cc-score-eligible"
+    assert by_project["aa-approval-score-blocked"]["score"] is None
+    assert by_project["aa-approval-score-blocked"]["score_components"]["blocked"] is True
+    assert "waiting_on_approvals" in by_project["aa-approval-score-blocked"]["score_components"]["skip_codes"]
+    assert by_project["bb-isolated-score-blocked"]["score"] is None
+    assert by_project["bb-isolated-score-blocked"]["score_components"]["blocked"] is True
+    assert "unresolved_isolated_failures" in by_project["bb-isolated-score-blocked"]["score_components"]["skip_codes"]
+    assert not (approval / "approval-score-marker.txt").exists()
+    assert not (isolated / "bb-isolated-score-blocked-marker.txt").exists()
+    assert (eligible / "eligible-score-marker.txt").read_text(encoding="utf-8") == "ok"
+
+
+def test_runtime_dashboard_workspace_dispatch_priority_score_visibility(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    alpha = init_workspace_project(workspace, "alpha-score-dashboard", marker="alpha-score-dashboard-marker.txt")
+    init_workspace_project(workspace, "zeta-score-dashboard", marker="zeta-score-dashboard-marker.txt")
+
+    assert cli_main(["workspace-drive", "--workspace", str(workspace), "--max-tasks", "1", "--json"]) == 0
+    dispatch_payload = json.loads(capsys.readouterr().out)
+
+    assert cli_main(["status", "--project-root", str(alpha), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    dispatch = payload["runtime_dashboard"]["workspace_dispatch"]
+    assert dispatch["scheduler_policy"] == "fair"
+    assert dispatch["selected"]["project"] == dispatch_payload["selected"]["project"]
+    selected = next(item for item in dispatch["queue"] if item["selected"])
+    assert selected["score"] == dispatch_payload["selected"]["score"]
+    assert selected["score_components"]["policy"] == "fair"
+    assert selected["selected_reason"]["code"] == "highest_fair_score"
 
 
 def test_runtime_dashboard_dispatch_queue_and_lease_status(tmp_path, capsys):
@@ -2394,6 +3591,74 @@ def test_workspace_dispatch_recovers_stale_heartbeat_lease(tmp_path, capsys):
     assert not workspace_dispatch_lease_dir(workspace).exists()
 
 
+def test_workspace_dispatch_stale_running_recovery_evidence(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    stale_project = init_workspace_project(
+        workspace,
+        "aa-stale-running-project",
+        marker="stale-running-workspace-marker.txt",
+    )
+    alternate = init_workspace_project(workspace, "bb-alternate-project", marker="alternate-should-not-run.txt")
+    roadmap_path = stale_project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["drive_watchdog"] = {"stale_after_seconds": 1}
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(stale_project)
+    assert harness.start_drive()["started"] is True
+    previous_pid = unused_pid()
+    state = harness_state(stale_project)
+    state["drive_control"]["pid"] = previous_pid
+    state["drive_control"]["last_heartbeat_at"] = "2000-01-01T00:00:00Z"
+    write_harness_state(stale_project, state)
+
+    assert cli_main(
+        [
+            "workspace-drive",
+            "--workspace",
+            str(workspace),
+            "--scheduler-policy",
+            "path-order",
+            "--json",
+        ]
+    ) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "dispatched"
+    assert payload["selected"]["project"] == "aa-stale-running-project"
+    recovery = payload["selected"]["stale_running_recovery"]
+    assert recovery["status"] == "recovered"
+    assert recovery["reason"] == "dead_pid_and_stale_heartbeat"
+    assert recovery["previous_pid"] == previous_pid
+    assert payload["stale_running_recoveries"][0]["previous_pid"] == previous_pid
+
+    stale_item = next(item for item in payload["queue"] if item["project"] == "aa-stale-running-project")
+    assert stale_item["eligible"] is True
+    assert stale_item["stale_running_recovery"]["previous_pid"] == previous_pid
+    assert stale_item["summary"]["drive_control"]["stale_running_recovery"]["previous_pid"] == previous_pid
+    alternate_item = next(item for item in payload["queue"] if item["project"] == "bb-alternate-project")
+    assert "one_project_per_invocation" in {reason["code"] for reason in alternate_item["skip_reasons"]}
+    assert (stale_project / "stale-running-workspace-marker.txt").read_text(encoding="utf-8") == "ok"
+    assert not (alternate / "alternate-should-not-run.txt").exists()
+
+    sidecar = json.loads((workspace / payload["dispatch_report_json"]).read_text(encoding="utf-8"))
+    assert sidecar["stale_running_recoveries"][0]["previous_pid"] == previous_pid
+    assert sidecar["selected"]["stale_running_recovery"]["previous_pid"] == previous_pid
+    report_text = (workspace / payload["dispatch_report"]).read_text(encoding="utf-8")
+    assert "Project Stale Running Recovery" in report_text
+    assert "dead_pid_and_stale_heartbeat" in report_text
+
+    assert cli_main(["status", "--project-root", str(stale_project), "--json"]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    dashboard_drive = status_payload["runtime_dashboard"]["drive_control"]
+    assert dashboard_drive["stale_running_recovery"]["previous_pid"] == previous_pid
+    dispatch = status_payload["runtime_dashboard"]["workspace_dispatch"]
+    assert dispatch["stale_running_recoveries"][0]["previous_pid"] == previous_pid
+    dashboard_item = next(item for item in dispatch["queue"] if item["project"] == "aa-stale-running-project")
+    assert dashboard_item["stale_running_recovery"]["previous_pid"] == previous_pid
+
+
 def test_workspace_dispatch_releases_lease_on_completion_with_json_report_evidence(tmp_path, capsys):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -2458,7 +3723,8 @@ def test_workspace_dispatch_queue_explains_safety_skips(tmp_path, capsys):
     stale_harness = Harness(stale)
     assert stale_harness.start_drive()["started"] is True
     stale_state = harness_state(stale)
-    stale_state["drive_control"]["pid"] = unused_pid()
+    stale_state["drive_control"]["pid"] = os.getpid()
+    stale_state["drive_control"]["last_heartbeat_at"] = "2000-01-01T00:00:00Z"
     write_harness_state(stale, stale_state)
 
     approval_roadmap_path = approval / ".engineering/roadmap.yaml"
@@ -2735,49 +4001,69 @@ def test_drive_watchdog_heartbeat_records_running_owner_and_task(tmp_path):
     Harness(project).finish_drive(status="completed", message="test complete")
 
 
-def test_drive_watchdog_detects_stale_pid_and_resume_recovers(tmp_path):
-    project = tmp_path / "watchdog-stale-pid-project"
+def test_stale_running_recovery_allows_next_drive(tmp_path, capsys):
+    project = tmp_path / "stale-running-recovery-project"
     project.mkdir()
-    init_project(project, "python-agent", name="watchdog-stale-pid-project")
+    init_project(project, "python-agent", name="stale-running-recovery-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["drive_watchdog"] = {"stale_after_seconds": 1}
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0]["command"] = (
+        "python3 -c \"from pathlib import Path; Path('recovered-marker.txt').write_text('ok')\""
+    )
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
 
     harness = Harness(project)
     assert harness.start_drive()["started"] is True
+    previous_pid = unused_pid()
     state = harness_state(project)
-    state["drive_control"]["pid"] = unused_pid()
-    state["drive_control"]["last_heartbeat_at"] = utc_now()
+    state["drive_control"]["pid"] = previous_pid
+    state["drive_control"]["last_heartbeat_at"] = "2000-01-01T00:00:00Z"
     write_harness_state(project, state)
 
-    summary = Harness(project).status_summary()["drive_control"]
-    assert summary["status"] == "stale"
-    assert summary["active"] is False
-    assert summary["watchdog"]["stale"] is True
-    assert summary["watchdog"]["reason"] == "pid_gone"
+    assert cli_main(["drive", "--project-root", str(project), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
 
-    start = Harness(project).start_drive()
-    assert start["started"] is False
-    assert start["status"] == "stale"
+    assert payload["status"] == "completed"
+    assert payload["results"][0]["status"] == "passed"
+    recovery = payload["stale_running_recovery"]
+    assert recovery["status"] == "recovered"
+    assert recovery["reason"] == "dead_pid_and_stale_heartbeat"
+    assert recovery["previous_pid"] == previous_pid
+    assert recovery["heartbeat_age_seconds"] > 1
+    assert recovery["threshold_seconds"] == 1
+    assert recovery["recovered_at"]
+    assert recovery["recommended_follow_up"]
+    assert (project / "recovered-marker.txt").read_text(encoding="utf-8") == "ok"
+
     state = harness_state(project)
-    assert state["drive_control"]["status"] == "stale"
-    assert state["drive_control"]["stale_reason"] == "pid_gone"
+    assert state["drive_control"]["status"] == "idle"
+    assert state["drive_control"]["stale_running_recovery"]["previous_pid"] == previous_pid
+    assert any(event["command"] == "stale-running-recovery" for event in state["drive_control"]["history"])
 
-    resumed = Harness(project).set_drive_control("resume", reason="recover stale pid")
-    assert resumed["status"] == "idle"
-    assert resumed["drive_control"]["active"] is False
-    assert resumed["drive_control"]["pid"] is None
-    assert resumed["drive_control"]["stale_reason"] is None
+    report_json = json.loads((project / payload["drive_report_json"]).read_text(encoding="utf-8"))
+    assert report_json["stale_running_recovery"]["previous_pid"] == previous_pid
+    report_text = (project / payload["drive_report"]).read_text(encoding="utf-8")
+    assert "Stale Running Recovery" in report_text
+    assert "dead_pid_and_stale_heartbeat" in report_text
 
-    restarted = Harness(project).start_drive()
-    assert restarted["started"] is True
-    Harness(project).finish_drive(status="completed", message="recovered")
+    assert cli_main(["status", "--project-root", str(project), "--json"]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    status_recovery = status_payload["drive_control"]["stale_running_recovery"]
+    assert status_recovery["previous_pid"] == previous_pid
+    assert status_payload["runtime_dashboard"]["drive_control"]["stale_running_recovery"]["previous_pid"] == previous_pid
 
 
-def test_drive_watchdog_detects_stale_heartbeat_and_resume_recovers(tmp_path):
-    project = tmp_path / "watchdog-stale-heartbeat-project"
+def test_stale_running_recovery_blocks_live_pid_without_mutating_state(tmp_path, capsys):
+    project = tmp_path / "stale-running-live-pid-project"
     project.mkdir()
-    init_project(project, "python-agent", name="watchdog-stale-heartbeat-project")
+    init_project(project, "python-agent", name="stale-running-live-pid-project")
     roadmap_path = project / ".engineering/roadmap.yaml"
     roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
-    roadmap["drive_watchdog"] = {"stale_after_seconds": 5}
+    roadmap["drive_watchdog"] = {"stale_after_seconds": 1}
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0]["command"] = (
+        "python3 -c \"from pathlib import Path; Path('live-pid-marker.txt').write_text('no')\""
+    )
     roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
 
     harness = Harness(project)
@@ -2786,25 +4072,62 @@ def test_drive_watchdog_detects_stale_heartbeat_and_resume_recovers(tmp_path):
     state["drive_control"]["pid"] = os.getpid()
     state["drive_control"]["last_heartbeat_at"] = "2000-01-01T00:00:00Z"
     write_harness_state(project, state)
+    state_before = harness_state(project)
 
-    summary = Harness(project).status_summary()["drive_control"]
-    assert summary["status"] == "stale"
-    assert summary["watchdog"]["stale"] is True
-    assert summary["watchdog"]["reason"] == "heartbeat_stale"
-    assert summary["watchdog"]["threshold_seconds"] == 5
-    assert summary["watchdog"]["heartbeat_age_seconds"] > 5
+    assert cli_main(["drive", "--project-root", str(project), "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
 
-    start = Harness(project).start_drive()
-    assert start["started"] is False
-    assert start["status"] == "stale"
+    assert payload["status"] == "stale"
+    preflight = payload["stale_running_preflight"]
+    assert preflight["status"] == "blocked"
+    assert preflight["reason"] == "pid_alive"
+    assert preflight["pid_alive"] is True
+    assert preflight["heartbeat_age_seconds"] > 1
+    assert not (project / "live-pid-marker.txt").exists()
+    assert harness_state(project) == state_before
 
-    resumed = Harness(project).set_drive_control("resume", reason="recover stale heartbeat")
-    assert resumed["status"] == "idle"
-    assert resumed["drive_control"]["stale_reason"] is None
+    assert cli_main(["status", "--project-root", str(project), "--json"]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    assert status_payload["drive_control"]["stale_running_block"]["reason"] == "pid_alive"
+    assert status_payload["runtime_dashboard"]["drive_control"]["stale_running_block"]["reason"] == "pid_alive"
 
-    restarted = Harness(project).start_drive()
-    assert restarted["started"] is True
-    Harness(project).finish_drive(status="completed", message="recovered")
+
+def test_stale_running_recovery_protects_fresh_heartbeat_without_mutating_state(tmp_path, capsys):
+    project = tmp_path / "stale-running-fresh-heartbeat-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="stale-running-fresh-heartbeat-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["drive_watchdog"] = {"stale_after_seconds": 3600}
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0]["command"] = (
+        "python3 -c \"from pathlib import Path; Path('fresh-heartbeat-marker.txt').write_text('no')\""
+    )
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    assert harness.start_drive()["started"] is True
+    previous_pid = unused_pid()
+    state = harness_state(project)
+    state["drive_control"]["pid"] = previous_pid
+    state["drive_control"]["last_heartbeat_at"] = utc_now()
+    write_harness_state(project, state)
+    state_before = harness_state(project)
+
+    assert cli_main(["drive", "--project-root", str(project), "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["status"] == "running"
+    preflight = payload["stale_running_preflight"]
+    assert preflight["status"] == "in_progress"
+    assert preflight["reason"] == "heartbeat_fresh"
+    assert preflight["blocking"] is False
+    assert preflight["previous_pid"] == previous_pid
+    assert preflight["pid_alive"] is False
+    assert preflight["heartbeat_age_seconds"] <= 3600
+    assert payload["drive_control"]["watchdog"]["status"] == "running"
+    assert payload["drive_control"]["stale_running_block"] is None
+    assert not (project / "fresh-heartbeat-marker.txt").exists()
+    assert harness_state(project) == state_before
 
 
 def test_drive_watchdog_status_output_includes_heartbeat_metadata(tmp_path, capsys):
@@ -3410,6 +4733,248 @@ def test_drive_report_goal_gap_retrospective_queue_empty_requests_self_iteration
     assert sidecar["goal_gap_retrospective"] == retrospective
 
 
+def test_goal_gap_scorecard_empty_project_fallback_and_stable_ordering(tmp_path):
+    project = tmp_path / "goal-gap-scorecard-empty-project"
+    project.mkdir()
+    engineering_dir = project / ".engineering"
+    engineering_dir.mkdir()
+    roadmap = {
+        "project": "goal-gap-scorecard-empty-project",
+        "profile": "python-agent",
+        "milestones": [],
+        "self_iteration": {
+            "enabled": True,
+            "objective": "Score unattended reliability categories from local evidence.",
+            "planner": {"name": "local planner", "command": "python3 -c \"print('planner')\""},
+        },
+    }
+    (engineering_dir / "roadmap.yaml").write_text(json.dumps(roadmap), encoding="utf-8")
+
+    scorecard = Harness(project).status_summary()["goal_gap_scorecard"]
+
+    expected_order = [
+        "stuck_detection",
+        "stale_running_recovery",
+        "checkpoint_boundaries",
+        "failure_isolation",
+        "duplicate_plan_guard",
+        "goal_gap_retrospective",
+        "runtime_dashboard",
+        "approval_capability_policy_safety",
+        "workspace_dispatch_fairness_backoff",
+        "real_e2e_evidence",
+    ]
+    assert scorecard["category_order"] == expected_order
+    assert [category["id"] for category in scorecard["categories"]] == expected_order
+    assert scorecard["summary"]["category_count"] == len(expected_order)
+    by_id = scorecard_category_map(scorecard)
+    assert by_id["goal_gap_retrospective"]["status"] == "missing"
+    assert by_id["real_e2e_evidence"]["status"] == "missing"
+    assert by_id["checkpoint_boundaries"]["status"] == "missing"
+    assert all(isinstance(category["risk_score"], int) for category in scorecard["categories"])
+    assert all(isinstance(category["severity"], int) for category in scorecard["categories"])
+
+
+def test_goal_gap_scorecard_completed_capability_detection_from_recent_manifests_status(tmp_path):
+    project = tmp_path / "goal-gap-scorecard-complete-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="goal-gap-scorecard-complete-project")
+    (project / "src").mkdir()
+    (project / "src/app.py").write_text("def marker():\n    return 'ok'\n", encoding="utf-8")
+    (project / "tests").mkdir()
+    (project / "tests/test_app.py").write_text("def test_marker():\n    assert True\n", encoding="utf-8")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["acceptance"][0]["command"] = "python3 -c \"from pathlib import Path; Path('accepted.txt').write_text('ok')\""
+    task["e2e"] = [
+        {
+            "name": "local journey",
+            "command": (
+                "python3 -c \"from pathlib import Path; "
+                "assert Path('accepted.txt').read_text() == 'ok'; "
+                "Path('e2e.txt').write_text('ok')\""
+            ),
+        }
+    ]
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    result = harness.run_task(harness.next_task())
+    status = Harness(project).status_summary()
+    by_id = scorecard_category_map(status["goal_gap_scorecard"])
+
+    assert result["status"] == "passed"
+    assert status["manifest_index"]["manifest_count"] == 1
+    assert by_id["real_e2e_evidence"]["status"] == "complete"
+    assert by_id["runtime_dashboard"]["status"] == "complete"
+    assert by_id["failure_isolation"]["status"] == "complete"
+    assert by_id["real_e2e_evidence"]["risk_score"] < 20
+
+
+def test_goal_gap_scorecard_unresolved_failure_or_approval_blockers_raise_severity(tmp_path, capsys):
+    project = tmp_path / "goal-gap-scorecard-blocker-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="goal-gap-scorecard-blocker-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["manual_approval_required"] = True
+    task["acceptance"][0]["command"] = (
+        "python3 -c \"from pathlib import Path; Path('approval-scorecard.txt').write_text('ok')\""
+    )
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    assert cli_main(["drive", "--project-root", str(project), "--json"]) == 1
+    capsys.readouterr()
+    assert cli_main(["status", "--project-root", str(project), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    scorecard = payload["goal_gap_scorecard"]
+    by_id = scorecard_category_map(scorecard)
+
+    assert scorecard["summary"]["overall_status"] == "blocked"
+    assert scorecard["summary"]["status_counts"]["blocked"] >= 2
+    assert by_id["approval_capability_policy_safety"]["status"] == "blocked"
+    assert by_id["approval_capability_policy_safety"]["severity"] == 4
+    assert by_id["failure_isolation"]["status"] == "blocked"
+    assert by_id["failure_isolation"]["risk_score"] >= 80
+
+
+def test_goal_gap_scorecard_status_and_dashboard_exposure(tmp_path, capsys):
+    project = tmp_path / "goal-gap-scorecard-status-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="goal-gap-scorecard-status-project")
+
+    assert cli_main(["status", "--project-root", str(project), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["goal_gap_scorecard"]["kind"] == "engineering-harness.goal-gap-scorecard"
+    assert payload["runtime_dashboard"]["goal_gap_scorecard"] == payload["goal_gap_scorecard"]
+    assert payload["runtime_dashboard"]["goal_gap_scorecard"]["categories"]
+
+
+def test_goal_gap_scorecard_suppresses_active_drive_false_blockers(tmp_path, capsys):
+    project = tmp_path / "goal-gap-scorecard-active-drive-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="goal-gap-scorecard-active-drive-project")
+
+    harness = Harness(project)
+    assert harness.start_drive()["started"] is True
+    previous_pid = unused_pid()
+    state = harness_state(project)
+    state["drive_control"]["pid"] = previous_pid
+    state["drive_control"]["last_heartbeat_at"] = utc_now()
+    state["drive_control"]["current_activity"] = "acceptance-1:command"
+    write_harness_state(project, state)
+
+    assert cli_main(["status", "--project-root", str(project), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    drive_control = payload["drive_control"]
+    dashboard_drive = payload["runtime_dashboard"]["drive_control"]
+    by_id = scorecard_category_map(payload["goal_gap_scorecard"])
+    dashboard_by_id = scorecard_category_map(payload["runtime_dashboard"]["goal_gap_scorecard"])
+
+    assert drive_control["status"] == "running"
+    assert drive_control["active"] is True
+    assert drive_control["watchdog"]["status"] == "running"
+    assert drive_control["watchdog"]["stale"] is False
+    assert drive_control["watchdog"]["pid_alive"] is False
+    assert drive_control["stale_running_preflight"]["status"] == "in_progress"
+    assert drive_control["stale_running_preflight"]["reason"] == "heartbeat_fresh"
+    assert drive_control["stale_running_preflight"]["blocking"] is False
+    assert drive_control["stale_running_block"] is None
+    assert dashboard_drive["stale_running_preflight"]["status"] == "in_progress"
+    assert dashboard_drive["stale_running_block"] is None
+    assert by_id["stale_running_recovery"]["status"] == "complete"
+    assert "in_progress" in by_id["stale_running_recovery"]["rationale"]
+    assert "recover-stale-running-drive" not in by_id["stale_running_recovery"]["recommended_next_stage_themes"]
+    assert dashboard_by_id["stale_running_recovery"] == by_id["stale_running_recovery"]
+
+
+def test_goal_gap_scorecard_blocks_stale_running_dead_pid(tmp_path):
+    project = tmp_path / "goal-gap-scorecard-stale-running-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="goal-gap-scorecard-stale-running-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["drive_watchdog"] = {"stale_after_seconds": 1}
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    assert harness.start_drive()["started"] is True
+    previous_pid = unused_pid()
+    state = harness_state(project)
+    state["drive_control"]["pid"] = previous_pid
+    state["drive_control"]["last_heartbeat_at"] = "2000-01-01T00:00:00Z"
+    write_harness_state(project, state)
+
+    payload = Harness(project).status_summary()
+    preflight = payload["drive_control"]["stale_running_preflight"]
+    by_id = scorecard_category_map(payload["goal_gap_scorecard"])
+
+    assert payload["drive_control"]["status"] == "stale"
+    assert preflight["status"] == "recoverable"
+    assert preflight["reason"] == "dead_pid_and_stale_heartbeat"
+    assert by_id["stale_running_recovery"]["status"] == "blocked"
+    assert by_id["stale_running_recovery"]["severity"] == 4
+    assert by_id["stale_running_recovery"]["recommended_next_stage_themes"] == ["recover-stale-running-drive"]
+
+
+def test_goal_gap_scorecard_checkpoint_pending_roadmap_only_dirtiness(tmp_path):
+    project = tmp_path / "goal-gap-scorecard-checkpoint-pending-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="goal-gap-scorecard-checkpoint-pending-project")
+    init_git_repo(project)
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["checkpoint_readiness_note"] = "roadmap materialization"
+    roadmap_path.write_text(json.dumps(roadmap, indent=2), encoding="utf-8")
+
+    payload = Harness(project).status_summary()
+    readiness = payload["checkpoint_readiness"]
+    by_id = scorecard_category_map(payload["goal_gap_scorecard"])
+    theme_ids = {item["id"] for item in payload["goal_gap_scorecard"]["recommended_next_stage_themes"]}
+
+    assert readiness["ready"] is True
+    assert readiness["blocking"] is False
+    assert readiness["safe_to_checkpoint_paths"] == [".engineering/roadmap.yaml"]
+    assert readiness["blocking_paths"] == []
+    assert by_id["checkpoint_boundaries"]["status"] == "partial"
+    assert "checkpoint_pending" in by_id["checkpoint_boundaries"]["rationale"]
+    assert ".engineering/roadmap.yaml" in by_id["checkpoint_boundaries"]["rationale"]
+    assert "close-git-boundary" not in by_id["checkpoint_boundaries"]["recommended_next_stage_themes"]
+    assert "close-git-boundary" not in theme_ids
+
+
+def test_goal_gap_scorecard_checkpoint_pending_mixed_dirty_blockers(tmp_path):
+    project = tmp_path / "goal-gap-scorecard-checkpoint-mixed-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="goal-gap-scorecard-checkpoint-mixed-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["file_scope"] = ["src/**"]
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    (project / "operator.txt").write_text("base", encoding="utf-8")
+    init_git_repo(project)
+
+    roadmap["checkpoint_readiness_note"] = "safe roadmap materialization"
+    roadmap_path.write_text(json.dumps(roadmap, indent=2), encoding="utf-8")
+    (project / "src").mkdir()
+    (project / "src/in-scope.txt").write_text("task dirty", encoding="utf-8")
+    (project / "operator.txt").write_text("operator dirty", encoding="utf-8")
+
+    payload = Harness(project).status_summary()
+    readiness = payload["checkpoint_readiness"]
+    by_id = scorecard_category_map(payload["goal_gap_scorecard"])
+
+    assert readiness["blocking"] is True
+    assert readiness["safe_to_checkpoint_paths"] == [".engineering/roadmap.yaml", "src/in-scope.txt"]
+    assert readiness["blocking_paths"] == ["operator.txt"]
+    assert by_id["checkpoint_boundaries"]["status"] == "blocked"
+    assert by_id["checkpoint_boundaries"]["recommended_next_stage_themes"] == ["close-git-boundary"]
+
+
 def test_drive_rolling_commit_after_task_checkpoints_materialization_before_generated_task(tmp_path, capsys):
     project = tmp_path / "rolling-checkpoint-project"
     project.mkdir()
@@ -3762,6 +5327,16 @@ def self_iteration_context_pack_project(tmp_path: Path) -> tuple[Path, Path]:
     subprocess.run(["git", "commit", "-m", "initial context"], cwd=project, check=True, capture_output=True, text=True)
 
     assert cli_main(["drive", "--project-root", str(project), "--max-tasks", "1", "--json"]) == 0
+    status = subprocess.run(["git", "status", "--short"], cwd=project, check=True, capture_output=True, text=True)
+    if status.stdout.strip():
+        subprocess.run(["git", "add", "-A"], cwd=project, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "record initial drive evidence"],
+            cwd=project,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
     return project, roadmap_path
 
 
@@ -3854,6 +5429,58 @@ def test_self_iteration_context_pack_smoke(tmp_path):
     assert context["git"]["status"]["returncode"] == 0
     assert json.loads(roadmap_path.read_text(encoding="utf-8"))["continuation"]["stages"][0]["id"] == (
         "context-pack-stage"
+    )
+
+
+def test_self_iteration_goal_gap_scorecard_in_context_pack(tmp_path):
+    project, _roadmap_path = self_iteration_context_pack_project(tmp_path)
+    captured: dict = {}
+
+    result = Harness(project, executor_registry=context_pack_planner_registry(captured, "goal-gap-scorecard-stage")).run_self_iteration(
+        reason="goal-gap-scorecard-context"
+    )
+
+    context = captured["context"]
+    scorecard = context["goal_gap_scorecard"]
+    by_id = scorecard_category_map(scorecard)
+    assert result["context_pack"]["goal_gap_scorecard"] == scorecard
+    assert context["summary"]["goal_gap_scorecard_max_risk_score"] == scorecard["summary"]["max_risk_score"]
+    assert by_id["goal_gap_retrospective"]["status"] in {"complete", "partial"}
+    assert [category["id"] for category in scorecard["categories"]] == scorecard["category_order"]
+
+    report = (project / result["report"]).read_text(encoding="utf-8")
+    assessment = json.loads((project / result["report_json"]).read_text(encoding="utf-8"))
+    assert "## Goal-Gap Scorecard" in report
+    assert assessment["goal_gap_scorecard"] == scorecard
+
+    status_payload = Harness(project).status_summary()
+    latest = status_payload["self_iteration"]["latest_assessment"]
+    assert latest["goal_gap_scorecard"]["summary"]["category_count"] == scorecard["summary"]["category_count"]
+
+
+def test_goal_gap_scorecard_planner_context_checkpoint_pending_recommendations(tmp_path):
+    project, roadmap_path = self_iteration_context_pack_project(tmp_path)
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["checkpoint_readiness_note"] = "planner context checkpoint window"
+    roadmap_path.write_text(json.dumps(roadmap, indent=2), encoding="utf-8")
+    captured: dict = {}
+
+    result = Harness(
+        project,
+        executor_registry=context_pack_planner_registry(captured, "checkpoint-pending-context-stage"),
+    ).run_self_iteration(reason="checkpoint-pending-context")
+
+    scorecard = captured["context"]["goal_gap_scorecard"]
+    by_id = scorecard_category_map(scorecard)
+    theme_ids = {item["id"] for item in scorecard["recommended_next_stage_themes"]}
+
+    assert result["status"] == "planned"
+    assert by_id["checkpoint_boundaries"]["status"] == "partial"
+    assert "checkpoint_pending" in by_id["checkpoint_boundaries"]["rationale"]
+    assert "close-git-boundary" not in by_id["checkpoint_boundaries"]["recommended_next_stage_themes"]
+    assert "close-git-boundary" not in theme_ids
+    assert captured["context"]["summary"]["goal_gap_scorecard_blocked_count"] == (
+        scorecard["summary"]["status_counts"]["blocked"]
     )
 
 
@@ -4084,6 +5711,161 @@ def test_self_iteration_output_guard_rejects_milestone_mutation_and_restores(tmp
     assert result["status"] == "rejected"
     assert any("mutated existing milestones" in error for error in result["validation"]["errors"])
     assert json.loads(roadmap_path.read_text(encoding="utf-8")) == before
+
+
+def test_self_iteration_checkpoint_gate_clean_git_appends_stage(tmp_path):
+    project, roadmap_path = self_iteration_guard_project(tmp_path)
+    write_self_iteration_guard_planner(project, [valid_self_iteration_stage()])
+    init_git_repo(project)
+
+    result = Harness(project).run_self_iteration(reason="checkpoint-clean")
+
+    assert result["status"] == "planned"
+    assert result["validation"]["status"] == "passed"
+    assert result["checkpoint_gates"]["preflight"]["status"] == "passed"
+    assert result["checkpoint_gates"]["preflight"]["reason"] == "clean"
+    assert result["checkpoint_gates"]["acceptance"]["status"] == "passed"
+    updated = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    assert [stage["id"] for stage in updated["continuation"]["stages"]] == ["guard-stage"]
+
+
+def test_self_iteration_checkpoint_gate_blocks_dirty_git_without_mutation(tmp_path, capsys):
+    project, roadmap_path = self_iteration_guard_project(tmp_path)
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"] = []
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    write_self_iteration_guard_planner(
+        project,
+        [valid_self_iteration_stage()],
+        mutation="Path('planner-ran.txt').write_text('ran', encoding='utf-8')",
+    )
+    init_git_repo(project)
+    before_text = roadmap_path.read_text(encoding="utf-8")
+    (project / "operator-notes.txt").write_text("draft operator work", encoding="utf-8")
+
+    exit_code = cli_main(
+        [
+            "drive",
+            "--project-root",
+            str(project),
+            "--self-iterate",
+            "--max-self-iterations",
+            "1",
+            "--max-tasks",
+            "1",
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert roadmap_path.read_text(encoding="utf-8") == before_text
+    assert not (project / "planner-ran.txt").exists()
+    iteration = payload["self_iterations"][0]
+    assert iteration["status"] == "blocked"
+    assert iteration["checkpoint_gate"]["phase"] == "preflight"
+    assert iteration["checkpoint_readiness"]["blocking"] is True
+    assert iteration["blocking_paths"] == ["operator-notes.txt"]
+    assert iteration["dirty_paths"] == ["operator-notes.txt"]
+    assert "will not commit or clean" in iteration["recommended_action"]
+
+    report_text = (project / payload["drive_report"]).read_text(encoding="utf-8")
+    assert "Checkpoint readiness" in report_text
+    assert "operator-notes.txt" in report_text
+    assessment = json.loads((project / iteration["report_json"]).read_text(encoding="utf-8"))
+    assert assessment["status"] == "blocked"
+    assert assessment["checkpoint_readiness"]["blocking_paths"] == ["operator-notes.txt"]
+
+    assert cli_main(["status", "--project-root", str(project), "--json"]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    latest = status_payload["self_iteration"]["latest_assessment"]
+    assert latest["status"] == "blocked"
+    assert latest["blocking_paths"] == ["operator-notes.txt"]
+    dashboard_latest = status_payload["runtime_dashboard"]["self_iteration"]["latest_assessment"]
+    assert dashboard_latest["checkpoint_readiness"]["blocking_paths"] == ["operator-notes.txt"]
+
+
+def test_self_iteration_checkpoint_gate_allows_roadmap_materialization_dirtiness(tmp_path):
+    project, roadmap_path = self_iteration_guard_project(tmp_path)
+    write_self_iteration_guard_planner(project, [valid_self_iteration_stage()])
+    init_git_repo(project)
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["operator_checkpoint_note"] = "safe roadmap materialization draft"
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    result = Harness(project).run_self_iteration(reason="checkpoint-roadmap-dirty")
+
+    assert result["status"] == "planned"
+    assert result["checkpoint_gates"]["preflight"]["reason"] == "harness_materialization_dirty"
+    assert result["checkpoint_gates"]["preflight"]["blocking"] is False
+    updated = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    assert [stage["id"] for stage in updated["continuation"]["stages"]] == ["guard-stage"]
+    assert updated["operator_checkpoint_note"] == "safe roadmap materialization draft"
+
+
+def test_self_iteration_checkpoint_gate_blocks_planner_unrelated_dirty_before_accepting_diff(tmp_path):
+    project, roadmap_path = self_iteration_guard_project(tmp_path)
+    before = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    write_self_iteration_guard_planner(
+        project,
+        [valid_self_iteration_stage()],
+        mutation="Path('operator-after.txt').write_text('dirty', encoding='utf-8')",
+    )
+    init_git_repo(project)
+
+    result = Harness(project).run_self_iteration(reason="checkpoint-acceptance-dirty")
+
+    assert result["status"] == "blocked"
+    assert result["checkpoint_gate"]["phase"] == "acceptance"
+    assert "operator-after.txt" in result["blocking_paths"]
+    assert (project / "operator-after.txt").read_text(encoding="utf-8") == "dirty"
+    assert json.loads(roadmap_path.read_text(encoding="utf-8")) == before
+    report = (project / result["report"]).read_text(encoding="utf-8")
+    assert "roadmap diff acceptance" in report
+    assert "operator-after.txt" in report
+
+
+def test_workspace_dispatch_self_iteration_checkpoint_readiness_propagates_dirty_git(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    dirty = init_workspace_project(workspace, "aa-self-iteration-dirty")
+    clean = init_workspace_project(workspace, "bb-self-iteration-clean")
+    configure_workspace_self_iteration_project(
+        dirty,
+        workspace_backoff_planner_source(workspace_backoff_stage("dirty-stage", "dirty-task")),
+    )
+    configure_workspace_self_iteration_project(
+        clean,
+        workspace_backoff_planner_source(workspace_backoff_stage("clean-stage", "clean-task")),
+    )
+    init_git_repo(dirty)
+    dirty_before = (dirty / ".engineering/roadmap.yaml").read_text(encoding="utf-8")
+    (dirty / "operator-notes.txt").write_text("operator draft", encoding="utf-8")
+
+    assert cli_main(["workspace-drive", "--workspace", str(workspace), "--self-iterate", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["selected"]["project"] == "bb-self-iteration-clean"
+    dirty_item = next(item for item in payload["queue"] if item["project"] == "aa-self-iteration-dirty")
+    assert dirty_item["eligible"] is False
+    assert dirty_item["checkpoint_readiness"]["blocking"] is True
+    assert dirty_item["checkpoint_readiness"]["blocking_paths"] == ["operator-notes.txt"]
+    assert "checkpoint_not_ready" in {reason["code"] for reason in dirty_item["skip_reasons"]}
+    assert (dirty / ".engineering/roadmap.yaml").read_text(encoding="utf-8") == dirty_before
+
+    sidecar = json.loads((workspace / payload["dispatch_report_json"]).read_text(encoding="utf-8"))
+    sidecar_dirty = next(item for item in sidecar["queue"] if item["project"] == "aa-self-iteration-dirty")
+    assert sidecar_dirty["checkpoint_readiness"]["blocking_paths"] == ["operator-notes.txt"]
+
+    assert cli_main(["status", "--project-root", str(clean), "--json"]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    dashboard_dirty = next(
+        item
+        for item in status_payload["runtime_dashboard"]["workspace_dispatch"]["queue"]
+        if item["project"] == "aa-self-iteration-dirty"
+    )
+    assert dashboard_dirty["checkpoint_readiness"]["blocking_paths"] == ["operator-notes.txt"]
+    assert "checkpoint_not_ready" in dashboard_dirty["skip_codes"]
 
 
 def test_self_iteration_shell_planner_adds_continuation_stage(tmp_path):

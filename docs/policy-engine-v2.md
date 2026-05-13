@@ -5,7 +5,7 @@ contract and emits normalized `policy_decisions` from that input. Task manifests
 decisions and a deterministic `policy_decision_summary`; Markdown task reports embed the same
 summary and decisions in a JSON evidence block; manifest indexes aggregate the summaries across
 runs. The current Python evaluator preserves the existing command allowlist, executor approval,
-manual approval, live flag, git preflight, and file-scope behavior.
+executor capability, manual approval, live flag, git preflight, and file-scope behavior.
 
 ## Policy Input
 
@@ -16,8 +16,10 @@ The input captures:
 - `project`: project name, root, profile, and roadmap path.
 - `task`: task and milestone ids, title, status, approval requirements, and iteration limit.
 - `phase`: `task` for task-level checks or the command group name for command-level checks.
-- `command`: command name, command text or prompt, required flag, timeout, model, sandbox, and executor id.
-- `executor`: normalized executor metadata from the executor contract.
+- `command`: command name, command text or prompt, required flag, timeout, model, sandbox,
+  requested capabilities, and executor id.
+- `executor`: normalized executor metadata from the executor contract, including executor
+  capabilities.
 - `git`: repository flag, root, branch, head, short head, and refs.
 - `worktree`: git preflight status, file-scope guard status, dirty paths, changed paths, and violations.
 - `file_scope`: allowed patterns plus out-of-scope and violation paths.
@@ -39,11 +41,20 @@ Decision styles:
   `requires_approval: true` and an `approval_flag`.
 
 The evaluator currently emits decisions for manual approval, task agent approval, executor policy,
-executor approval, command policy, live approval, git preflight, and file-scope guard checks.
+capability policy, executor approval, command policy, live approval, git preflight, and file-scope
+guard checks.
 Approval queue records are leases bound to a deterministic fingerprint of the current local decision
 context. A later run treats an approved record as satisfied only when the current fingerprint matches
 and the lease TTL has not expired. Mismatched or expired records become `stale`, and fresh policy
 blocks queue new records instead of reusing the stale lease.
+
+`capability_policy` decisions are emitted only when a command declares `requested_capabilities`.
+Allowed decisions mean every requested low-risk capability is present in the selected executor
+metadata. Denied decisions are blocking and record `requested_capabilities`, `executor_capabilities`,
+`unsupported_capabilities`, `unsafe_capabilities`, and the known vocabulary in decision metadata.
+Unsafe requests are denied rather than approval-gated because the unattended safety contract has no
+current local approval mechanism for network access, secret access, browser automation, deployment,
+or live operations.
 
 The summary shape is intentionally compact:
 

@@ -69,8 +69,20 @@ commands remain local shell checks.
 
 ## Self-Iteration Safety Contract
 
-When `self_iteration` is enabled, planner output is treated as an untrusted roadmap diff. After the
-planner exits, the harness reloads `.engineering/roadmap.yaml` and accepts the output only when it:
+When `self_iteration` is enabled, planner output is treated as an untrusted roadmap diff. Before the
+planner runs, the harness evaluates local checkpoint readiness. If unrelated dirty git paths would
+block a clean roadmap materialization checkpoint, the planner is not invoked, `.engineering/roadmap.yaml`
+is left unchanged, and a blocked self-iteration assessment is written under
+`.engineering/reports/tasks/assessments/` with the checkpoint readiness, dirty paths, blocking paths,
+reason, and recommended operator action.
+
+After the planner exits, the harness checks checkpoint readiness again before accepting the roadmap
+diff. Harness-owned self-iteration artifacts from the current run, such as the snapshot, context pack,
+assessment sidecar, and active harness state file, are ignored for this acceptance check. Planner-made
+unrelated dirty paths still block acceptance; the previous roadmap text is restored and the report
+records the compact evidence.
+
+The harness then reloads `.engineering/roadmap.yaml` and accepts the output only when it:
 
 - appends exactly `self_iteration.max_stages_per_iteration` new unmaterialized
   `continuation.stages` entries;
@@ -87,7 +99,10 @@ planner exits, the harness reloads `.engineering/roadmap.yaml` and accepts the o
   real-fund movement, and live trading requirements.
 
 Accepted output is then checked with the normal roadmap validator. Invalid output is rejected, the
-previous roadmap text is restored, and the self-iteration report records the validation errors.
+previous roadmap text is restored, and the self-iteration report records the validation errors. To
+recover a checkpoint-gate block, resolve the listed `blocking_paths` locally with your own commit,
+stash, move, or cleanup, then rerun self-iteration; the harness will not clean or checkpoint those
+operator-owned paths.
 
 ## Self-Iteration Planner Input
 
@@ -113,9 +128,25 @@ excerpt size. Its top-level fields are:
 - `docs`: blueprint metadata and capped excerpts from relevant local docs.
 - `test_inventory` and `source_inventory`: capped local file inventories.
 - `git`: repository flag, branch/head, short status lines, and recent commits.
+- `goal_gap_scorecard`: deterministic local scorecard for unattended-reliability categories, including
+  bounded evidence paths, `complete`/`partial`/`missing`/`blocked` status, numeric risk/severity, and
+  recommended next-stage themes.
 
-The self-iteration snapshot and Markdown report both record the context-pack path and summary so an
-operator can audit exactly what the planner saw.
+The self-iteration snapshot, JSON assessment, and Markdown report record the context-pack path,
+summary, and goal-gap scorecard so an operator can audit exactly what the planner saw.
+
+Planners should treat `goal_gap_scorecard.categories` as ordered priority evidence. A `blocked`
+category means the next stage should resolve that local blocker before adding broad new work.
+`missing` means the harness lacks local evidence for the category, not that the capability is known
+to be absent. Use `risk_score`, `severity`, `evidence_paths`, and `recommended_next_stage_themes`
+instead of reading drive reports ad hoc when deciding the next self-iteration theme.
+
+Do not treat protected live-drive or checkpoint-window evidence as a recovery blocker. A
+stale-running category with an `in_progress` rationale means the current drive has a fresh heartbeat
+and planners should wait for or build around that local run, not request
+`recover-stale-running-drive`. A checkpoint category with `checkpoint_pending` or `in_progress`
+rationale means only harness-owned or file-scope paths are dirty. Plan `close-git-boundary` work only
+when the category recommends it or `checkpoint_readiness.blocking_paths` is non-empty.
 
 ## Generated Goal Gates
 

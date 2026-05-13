@@ -452,7 +452,7 @@ class ShellExecutorAdapter:
         kind="process",
         adapter="builtin.shell",
         input_mode="command",
-        capabilities=("local_process", "exit_code", "stdout", "stderr"),
+        capabilities=("local_process", "workspace_write", "exit_code", "stdout", "stderr"),
         uses_command_policy=True,
     )
 

@@ -7,12 +7,14 @@ import shutil
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .core import (
     COMPLETED_STATUSES,
     Harness,
+    REPLAY_GUARD_SCHEMA_VERSION,
     discover_projects,
     init_project,
     parse_utc_timestamp,
@@ -29,6 +31,21 @@ WORKSPACE_DISPATCH_LEASE_SCHEMA_VERSION = 1
 WORKSPACE_DISPATCH_LEASE_DIRNAME = "workspace-dispatch-lease"
 WORKSPACE_DISPATCH_LEASE_STALE_SECONDS_ENV = "ENGINEERING_HARNESS_WORKSPACE_DISPATCH_LEASE_STALE_AFTER_SECONDS"
 DEFAULT_WORKSPACE_DISPATCH_LEASE_STALE_SECONDS = 3600
+WORKSPACE_DISPATCH_DEFAULT_SCHEDULER_POLICY = "fair"
+WORKSPACE_DISPATCH_PATH_ORDER_SCHEDULER_POLICY = "path-order"
+WORKSPACE_DISPATCH_SCHEDULER_POLICIES = (
+    WORKSPACE_DISPATCH_DEFAULT_SCHEDULER_POLICY,
+    WORKSPACE_DISPATCH_PATH_ORDER_SCHEDULER_POLICY,
+)
+WORKSPACE_DISPATCH_HISTORY_LIMIT = 50
+WORKSPACE_DISPATCH_RECENT_HISTORY_LIMIT = 10
+WORKSPACE_DISPATCH_SELECTED_COOLDOWN_SECONDS = 3600
+WORKSPACE_DISPATCH_NONPRODUCTIVE_BACKOFF_SECONDS_ENV = (
+    "ENGINEERING_HARNESS_WORKSPACE_DISPATCH_NONPRODUCTIVE_BACKOFF_SECONDS"
+)
+DEFAULT_WORKSPACE_DISPATCH_NONPRODUCTIVE_BACKOFF_SECONDS = 3600
+MAX_WORKSPACE_DISPATCH_NONPRODUCTIVE_BACKOFF_SECONDS = 86400
+WORKSPACE_DISPATCH_NONPRODUCTIVE_BACKOFF_PENALTY = -10000
 
 
 def resolve_project_root(args: argparse.Namespace) -> Path:
@@ -174,6 +191,17 @@ def cmd_status(args: argparse.Namespace) -> int:
         drive_control = summary.get("drive_control", {})
         approval_queue = summary.get("approval_queue", {})
         print(f"Drive control: {drive_control.get('status', 'idle')}")
+        checkpoint_readiness = (
+            summary.get("checkpoint_readiness")
+            if isinstance(summary.get("checkpoint_readiness"), dict)
+            else {}
+        )
+        if checkpoint_readiness:
+            print(
+                "Checkpoint readiness: "
+                f"{checkpoint_readiness.get('reason', 'unknown')} "
+                f"blocking={str(bool(checkpoint_readiness.get('blocking'))).lower()}"
+            )
         watchdog = drive_control.get("watchdog", {}) if isinstance(drive_control, dict) else {}
         if watchdog:
             print(f"Drive watchdog: {watchdog.get('status', 'idle')} - {watchdog.get('message', '')}")
@@ -361,6 +389,38 @@ def checkpoint_requested_payload(payload: dict) -> bool:
     return any("materialization_checkpoint_intent" in item for item in payload.get("continuations", []))
 
 
+def drive_replay_guard_payload(payload: dict, final_status: dict) -> dict:
+    result_guards = [
+        deepcopy(result["replay_guard"])
+        for result in payload.get("results", [])
+        if isinstance(result, dict) and isinstance(result.get("replay_guard"), dict)
+    ]
+    reused_phases: list[dict] = []
+    for guard in result_guards:
+        phases = guard.get("reused_phases")
+        if isinstance(phases, list):
+            reused_phases.extend(deepcopy(item) for item in phases if isinstance(item, dict))
+    status_guard = (
+        deepcopy(final_status.get("replay_guard"))
+        if isinstance(final_status.get("replay_guard"), dict)
+        else {}
+    )
+    if not reused_phases:
+        phases = status_guard.get("reused_phases")
+        if isinstance(phases, list):
+            reused_phases.extend(deepcopy(item) for item in phases if isinstance(item, dict))
+    return {
+        "schema_version": REPLAY_GUARD_SCHEMA_VERSION,
+        "kind": "engineering-harness.drive-replay-guard",
+        "status": "reused" if reused_phases else "none",
+        "result_count": len(result_guards),
+        "reused_phase_count": len(reused_phases),
+        "reused_phases": reused_phases,
+        "result_guards": result_guards,
+        "status_summary": status_guard,
+    }
+
+
 def write_drive_report(harness: Harness, payload: dict) -> str:
     report_dir = harness.report_dir / "drives"
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -378,6 +438,7 @@ def write_drive_report(harness: Harness, payload: dict) -> str:
         payload,
         final_status=final_status if final_status else None,
     )
+    payload["replay_guard"] = drive_replay_guard_payload(payload, final_status)
     lines = [
         "# Harness Drive Report",
         "",
@@ -388,9 +449,89 @@ def write_drive_report(harness: Harness, payload: dict) -> str:
         f"- Tasks run: {len(payload['results'])}",
         f"- Message: {payload['message']}",
         "",
-        "## Task Results",
+        "## Stale Running Recovery",
         "",
     ]
+    drive_control = final_status.get("drive_control") if isinstance(final_status.get("drive_control"), dict) else {}
+    recovery = payload.get("stale_running_recovery")
+    if not isinstance(recovery, dict):
+        recovery = (
+            drive_control.get("stale_running_recovery")
+            if isinstance(drive_control.get("stale_running_recovery"), dict)
+            else None
+        )
+    preflight = payload.get("stale_running_preflight")
+    if not isinstance(preflight, dict):
+        preflight = (
+            drive_control.get("stale_running_preflight")
+            if isinstance(drive_control.get("stale_running_preflight"), dict)
+            else None
+        )
+    block = (
+        drive_control.get("stale_running_block")
+        if isinstance(drive_control.get("stale_running_block"), dict)
+        else None
+    )
+    if isinstance(recovery, dict):
+        lines.extend(
+            [
+                f"- Status: `{recovery.get('status')}`",
+                f"- Reason: `{recovery.get('reason')}`",
+                f"- Previous pid: `{recovery.get('previous_pid') or 'unknown'}`",
+                f"- Heartbeat age seconds: `{recovery.get('heartbeat_age_seconds')}`",
+                f"- Threshold seconds: `{recovery.get('threshold_seconds')}`",
+                f"- Recovered at: {recovery.get('recovered_at')}",
+                f"- Recommended follow-up: {recovery.get('recommended_follow_up')}",
+                "",
+                "Machine-readable stale running recovery:",
+                "",
+                "```json",
+                json.dumps(recovery, indent=2, sort_keys=True),
+                "```",
+                "",
+            ]
+        )
+    elif isinstance(block, dict) or (isinstance(preflight, dict) and preflight.get("status") == "blocked"):
+        block_payload = block if isinstance(block, dict) else preflight
+        lines.extend(
+            [
+                f"- Status: `{block_payload.get('status')}`",
+                f"- Reason: `{block_payload.get('reason')}`",
+                f"- Message: {block_payload.get('message')}",
+                "",
+                "Machine-readable stale running preflight:",
+                "",
+                "```json",
+                json.dumps(block_payload, indent=2, sort_keys=True),
+                "```",
+                "",
+            ]
+        )
+    else:
+        lines.extend(["No stale running recovery was needed for this drive.", ""])
+    replay_guard = payload.get("replay_guard", {})
+    reused_phases = replay_guard.get("reused_phases") if isinstance(replay_guard, dict) else []
+    lines.extend(
+        [
+            "## Phase Replay Guard",
+            "",
+            f"- Status: `{replay_guard.get('status', 'none') if isinstance(replay_guard, dict) else 'none'}`",
+            f"- Reused phases: `{len(reused_phases) if isinstance(reused_phases, list) else 0}`",
+            "",
+            "Machine-readable replay guard:",
+            "",
+            "```json",
+            json.dumps(replay_guard, indent=2, sort_keys=True),
+            "```",
+            "",
+        ]
+    )
+    lines.extend(
+        [
+        "## Task Results",
+        "",
+        ]
+    )
     if not payload["results"]:
         lines.append("No task was executed.")
     for result in payload["results"]:
@@ -421,6 +562,12 @@ def write_drive_report(harness: Harness, payload: dict) -> str:
         )
         for milestone in item.get("milestones_added", []):
             lines.append(f"  - Milestone: `{milestone.get('id')}` {milestone.get('title')} ({milestone.get('tasks')} task(s))")
+        readiness = item.get("checkpoint_readiness_before_materialization")
+        if isinstance(readiness, dict):
+            lines.append(
+                "  - Checkpoint readiness before materialization: "
+                f"`{readiness.get('reason')}` blocking=`{str(bool(readiness.get('blocking'))).lower()}`"
+            )
         intent = item.get("materialization_checkpoint_intent")
         if intent:
             lines.append(
@@ -459,6 +606,26 @@ def write_drive_report(harness: Harness, payload: dict) -> str:
             task = result.get("task", {})
             git = result.get("git", {})
             lines.append(f"- Task `{task.get('id')}` checkpoint deferred: {git.get('message')}")
+    checkpoint_readiness = payload.get("checkpoint_readiness") if isinstance(payload.get("checkpoint_readiness"), dict) else {}
+    lines.extend(["", "## Checkpoint Readiness", ""])
+    if not checkpoint_readiness:
+        lines.append("No checkpoint readiness evidence was recorded.")
+    else:
+        lines.extend(
+            [
+                f"- Ready: `{str(bool(checkpoint_readiness.get('ready'))).lower()}`",
+                f"- Blocking: `{str(bool(checkpoint_readiness.get('blocking'))).lower()}`",
+                f"- Reason: `{checkpoint_readiness.get('reason')}`",
+                f"- Dirty paths: `{len(checkpoint_readiness.get('dirty_paths', []))}`",
+                f"- Blocking paths: `{len(checkpoint_readiness.get('blocking_paths', []))}`",
+                f"- Safe-to-checkpoint paths: `{len(checkpoint_readiness.get('safe_to_checkpoint_paths', []))}`",
+                f"- Recommended action: {checkpoint_readiness.get('recommended_action')}",
+                "",
+                "```json",
+                json.dumps(checkpoint_readiness, indent=2, sort_keys=True),
+                "```",
+            ]
+        )
     self_iterations = payload.get("self_iterations", [])
     lines.extend(["", "## Self Iterations", ""])
     if not self_iterations:
@@ -473,6 +640,17 @@ def write_drive_report(harness: Harness, payload: dict) -> str:
         )
         if item.get("report"):
             lines.append(f"  - Report: `{item['report']}`")
+        readiness = item.get("checkpoint_readiness") if isinstance(item.get("checkpoint_readiness"), dict) else {}
+        if readiness:
+            lines.append(
+                "  - Checkpoint readiness: "
+                f"`{readiness.get('reason')}` "
+                f"blocking=`{str(bool(readiness.get('blocking'))).lower()}` "
+                f"dirty_paths=`{len(readiness.get('dirty_paths', []))}` "
+                f"blocking_paths=`{len(readiness.get('blocking_paths', []))}`"
+            )
+            if readiness.get("recommended_action"):
+                lines.append(f"  - Recommended operator action: {readiness.get('recommended_action')}")
     approval_queue = payload.get("approval_queue", {})
     lines.extend(["", "## Approval Leases", ""])
     if not approval_queue:
@@ -706,6 +884,7 @@ def run_project_drive(root: Path, args: argparse.Namespace) -> tuple[int, dict]:
     root = root.resolve()
     harness = Harness(root)
     started_at = utc_now()
+    drive_start_checkpoint_readiness = harness.checkpoint_readiness()
     start = harness.start_drive()
     if not start["started"]:
         final_status = harness.status_summary()
@@ -719,6 +898,10 @@ def run_project_drive(root: Path, args: argparse.Namespace) -> tuple[int, dict]:
             "results": [],
             "continuations": [],
             "self_iterations": [],
+            "checkpoint_readiness": final_status.get("checkpoint_readiness", {}),
+            "drive_control": start.get("drive_control"),
+            "stale_running_preflight": start.get("stale_running_preflight"),
+            "stale_running_recovery": start.get("stale_running_recovery"),
             "final_status": final_status,
         }
         payload["goal_gap_retrospective"] = harness.drive_goal_gap_retrospective(payload, final_status=final_status)
@@ -782,6 +965,7 @@ def run_project_drive(root: Path, args: argparse.Namespace) -> tuple[int, dict]:
                         clear_task=True,
                     )
                     checkpoint_intent = None
+                    checkpoint_readiness = harness.checkpoint_readiness()
                     if checkpoint_requested(args):
                         checkpoint_intent = harness.roadmap_materialization_checkpoint_intent(
                             reason="rolling_drive_queue_empty",
@@ -793,6 +977,7 @@ def run_project_drive(root: Path, args: argparse.Namespace) -> tuple[int, dict]:
                         max_new_milestones=args.continuation_batch_size,
                         reason="rolling_drive_queue_empty",
                     )
+                    continuation["checkpoint_readiness_before_materialization"] = checkpoint_readiness
                     if checkpoint_intent is not None:
                         continuation["materialization_checkpoint_intent"] = checkpoint_intent
                         materialization_checkpoint = harness.git_checkpoint_roadmap_materialization(
@@ -827,6 +1012,7 @@ def run_project_drive(root: Path, args: argparse.Namespace) -> tuple[int, dict]:
                     reason="drive_queue_empty",
                     allow_agent=args.allow_agent,
                     allow_live=args.allow_live,
+                    checkpoint_readiness=drive_start_checkpoint_readiness if not results else None,
                 )
                 self_iterations.append(iteration)
                 if iteration["status"] == "planned" and int(iteration.get("pending_stage_count_after", 0)) > 0:
@@ -899,6 +1085,15 @@ def run_project_drive(root: Path, args: argparse.Namespace) -> tuple[int, dict]:
         "continuations": continuations,
         "self_iterations": self_iterations,
         "checkpoint_requested": checkpoint_requested(args),
+        "checkpoint_readiness": final_status.get("checkpoint_readiness", {}),
+        "drive_control": final_status.get("drive_control"),
+        "stale_running_preflight": start.get("stale_running_preflight"),
+        "stale_running_recovery": start.get("stale_running_recovery")
+        or (
+            final_status.get("drive_control", {}).get("stale_running_recovery")
+            if isinstance(final_status.get("drive_control"), dict)
+            else None
+        ),
         "final_status": final_status,
     }
     payload["goal_gap_retrospective"] = harness.drive_goal_gap_retrospective(payload, final_status=final_status)
@@ -914,6 +1109,13 @@ def print_drive_payload(payload: dict, *, json_output: bool) -> None:
     print(f"Tasks run: {len(payload.get('results', []))}")
     print(f"Continuations: {len(payload.get('continuations', []))}")
     print(f"Self-iterations: {len(payload.get('self_iterations', []))}")
+    checkpoint_readiness = payload.get("checkpoint_readiness") if isinstance(payload.get("checkpoint_readiness"), dict) else {}
+    if checkpoint_readiness:
+        print(
+            "Checkpoint readiness: "
+            f"{checkpoint_readiness.get('reason', 'unknown')} "
+            f"blocking={str(bool(checkpoint_readiness.get('blocking'))).lower()}"
+        )
     print(f"Drive report: {payload['drive_report']}")
     final_status = payload.get("final_status") if isinstance(payload.get("final_status"), dict) else {}
     next_task = final_status.get("next_task") if isinstance(final_status, dict) else None
@@ -981,18 +1183,69 @@ def _workspace_task_counts(summary: dict) -> dict:
     return counts
 
 
+def _workspace_scheduler_policy(args: argparse.Namespace) -> str:
+    value = getattr(args, "scheduler_policy", WORKSPACE_DISPATCH_DEFAULT_SCHEDULER_POLICY)
+    return value if value in WORKSPACE_DISPATCH_SCHEDULER_POLICIES else WORKSPACE_DISPATCH_DEFAULT_SCHEDULER_POLICY
+
+
+def _coerce_bounded_nonnegative_int(value, default: int, maximum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    if number < 0:
+        return default
+    return min(number, maximum)
+
+
+def _workspace_dispatch_nonproductive_backoff_seconds(args: argparse.Namespace) -> int:
+    cli_value = getattr(args, "nonproductive_backoff_seconds", None)
+    if cli_value is not None:
+        return _coerce_bounded_nonnegative_int(
+            cli_value,
+            DEFAULT_WORKSPACE_DISPATCH_NONPRODUCTIVE_BACKOFF_SECONDS,
+            MAX_WORKSPACE_DISPATCH_NONPRODUCTIVE_BACKOFF_SECONDS,
+        )
+    return _coerce_bounded_nonnegative_int(
+        os.environ.get(WORKSPACE_DISPATCH_NONPRODUCTIVE_BACKOFF_SECONDS_ENV),
+        DEFAULT_WORKSPACE_DISPATCH_NONPRODUCTIVE_BACKOFF_SECONDS,
+        MAX_WORKSPACE_DISPATCH_NONPRODUCTIVE_BACKOFF_SECONDS,
+    )
+
+
 def _compact_workspace_status_summary(summary: dict) -> dict:
     drive_control = summary.get("drive_control") if isinstance(summary.get("drive_control"), dict) else {}
     watchdog = drive_control.get("watchdog") if isinstance(drive_control.get("watchdog"), dict) else {}
+    stale_running_recovery = (
+        deepcopy(drive_control.get("stale_running_recovery"))
+        if isinstance(drive_control.get("stale_running_recovery"), dict)
+        else None
+    )
+    stale_running_preflight = (
+        deepcopy(drive_control.get("stale_running_preflight"))
+        if isinstance(drive_control.get("stale_running_preflight"), dict)
+        else None
+    )
+    stale_running_block = (
+        deepcopy(drive_control.get("stale_running_block"))
+        if isinstance(drive_control.get("stale_running_block"), dict)
+        else None
+    )
     approval_queue = summary.get("approval_queue") if isinstance(summary.get("approval_queue"), dict) else {}
     failure_isolation = summary.get("failure_isolation") if isinstance(summary.get("failure_isolation"), dict) else {}
     next_task = summary.get("next_task") if isinstance(summary.get("next_task"), dict) else None
+    continuation = summary.get("continuation") if isinstance(summary.get("continuation"), dict) else {}
+    self_iteration = summary.get("self_iteration") if isinstance(summary.get("self_iteration"), dict) else {}
+    checkpoint_readiness = (
+        summary.get("checkpoint_readiness") if isinstance(summary.get("checkpoint_readiness"), dict) else {}
+    )
     return {
         "project": summary.get("project"),
         "profile": summary.get("profile"),
         "root": summary.get("root"),
         "roadmap": summary.get("roadmap"),
         "task_counts": _workspace_task_counts(summary),
+        "checkpoint_readiness": checkpoint_readiness,
         "next_task": (
             {
                 "id": next_task.get("id"),
@@ -1002,6 +1255,20 @@ def _compact_workspace_status_summary(summary: dict) -> dict:
             if next_task
             else None
         ),
+        "continuation": {
+            "enabled": bool(continuation.get("enabled", False)),
+            "stage_count": int(continuation.get("stage_count", 0) or 0),
+            "pending_stage_count": int(continuation.get("pending_stage_count", 0) or 0),
+            "next_stage": continuation.get("next_stage"),
+        },
+        "self_iteration": {
+            "enabled": bool(self_iteration.get("enabled", False)),
+            "completed_count": int(self_iteration.get("completed_count", 0) or 0),
+            "max_iterations": self_iteration.get("max_iterations"),
+            "latest_assessment": deepcopy(self_iteration.get("latest_assessment"))
+            if isinstance(self_iteration.get("latest_assessment"), dict)
+            else None,
+        },
         "drive_control": {
             "status": drive_control.get("status", "idle"),
             "active": bool(drive_control.get("active", False)),
@@ -1011,6 +1278,9 @@ def _compact_workspace_status_summary(summary: dict) -> dict:
             "stale_reason": drive_control.get("stale_reason") or watchdog.get("reason"),
             "watchdog_status": watchdog.get("status"),
             "watchdog_message": watchdog.get("message"),
+            "stale_running_recovery": stale_running_recovery,
+            "stale_running_preflight": stale_running_preflight,
+            "stale_running_block": stale_running_block,
         },
         "approval_queue": {
             "pending_count": int(approval_queue.get("pending_count", 0) or 0),
@@ -1027,6 +1297,7 @@ def _compact_workspace_status_summary(summary: dict) -> dict:
 def _workspace_dispatch_queue_item(workspace: Path, project, args: argparse.Namespace, index: int) -> dict:
     item = {
         "index": index,
+        "scheduler_rank": index,
         "project": project.name,
         "root": str(project.root),
         "roadmap": str(project.roadmap_path) if project.roadmap_path else None,
@@ -1037,6 +1308,17 @@ def _workspace_dispatch_queue_item(workspace: Path, project, args: argparse.Name
         "selected": False,
         "dispatch_status": "skipped",
         "skip_reasons": [],
+        "scheduler_policy": _workspace_scheduler_policy(args),
+        "score": None,
+        "score_components": {},
+        "selected_reason": None,
+        "backoff": {
+            "schema_version": 1,
+            "kind": "workspace_dispatch_nonproductive_backoff",
+            "decision": "not_evaluated",
+            "active": False,
+            "points": 0,
+        },
     }
     if not _path_within(project.root, workspace):
         _add_dispatch_skip(
@@ -1074,10 +1356,41 @@ def _workspace_dispatch_queue_item(workspace: Path, project, args: argparse.Name
         )
         return item
 
+    stale_running_preflight = harness.recover_stale_running_preflight(reason="workspace_drive_selection_preflight")
+    if isinstance(stale_running_preflight, dict) and stale_running_preflight.get("status") in {
+        "recovered",
+        "blocked",
+        "recoverable",
+    }:
+        item["stale_running_preflight"] = stale_running_preflight
+    if isinstance(stale_running_preflight, dict) and stale_running_preflight.get("status") == "recovered":
+        item["stale_running_recovery"] = stale_running_preflight
+    elif isinstance(stale_running_preflight, dict) and stale_running_preflight.get("status") == "blocked":
+        item["stale_running_block"] = stale_running_preflight
+
     summary = harness.status_summary(refresh_approvals=False)
     compact_summary = _compact_workspace_status_summary(summary)
     item["summary"] = compact_summary
+    checkpoint_readiness = compact_summary.get("checkpoint_readiness", {})
+    item["checkpoint_readiness"] = checkpoint_readiness
+    if isinstance(checkpoint_readiness, dict) and checkpoint_readiness.get("blocking"):
+        _add_dispatch_skip(
+            item,
+            "checkpoint_not_ready",
+            "project has unrelated dirty git paths that must be resolved before unattended dispatch",
+            reason=checkpoint_readiness.get("reason"),
+            blocking_paths=checkpoint_readiness.get("blocking_paths", []),
+            dirty_paths=checkpoint_readiness.get("dirty_paths", []),
+            recommended_action=checkpoint_readiness.get("recommended_action"),
+        )
     drive_control = compact_summary["drive_control"]
+    stale_running_block = (
+        drive_control.get("stale_running_block")
+        if isinstance(drive_control.get("stale_running_block"), dict)
+        else item.get("stale_running_block")
+        if isinstance(item.get("stale_running_block"), dict)
+        else None
+    )
     if drive_control.get("pause_requested") or drive_control.get("status") == "paused":
         _add_dispatch_skip(item, "paused", "drive is paused for this project")
     if drive_control.get("cancel_requested") or drive_control.get("status") == "cancelled":
@@ -1088,9 +1401,15 @@ def _workspace_dispatch_queue_item(workspace: Path, project, args: argparse.Name
             "stale_running",
             "drive control is stale and must be resumed before dispatch",
             stale_reason=drive_control.get("stale_reason"),
+            stale_running_block=stale_running_block,
         )
     elif drive_control.get("active") or drive_control.get("status") == "running":
-        _add_dispatch_skip(item, "already_running", "a drive is already running for this project")
+        _add_dispatch_skip(
+            item,
+            "already_running",
+            "a drive is already running for this project",
+            stale_running_block=stale_running_block,
+        )
 
     pending_approvals = int(compact_summary["approval_queue"].get("pending_count", 0) or 0)
     if pending_approvals > 0:
@@ -1118,13 +1437,587 @@ def _workspace_dispatch_queue_item(workspace: Path, project, args: argparse.Name
     return item
 
 
+def _read_json_mapping(path: Path) -> dict | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _workspace_score_path_key(item: dict) -> str:
+    root = item.get("root")
+    try:
+        return str(Path(str(root)).resolve())
+    except OSError:
+        return str(root or "")
+
+
+def _workspace_int(value) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _workspace_format_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _workspace_timestamp_plus_seconds(value, seconds: int) -> str | None:
+    parsed = parse_utc_timestamp(value)
+    if parsed is None:
+        return None
+    return _workspace_format_utc(parsed + timedelta(seconds=seconds))
+
+
+def _workspace_selected_drive_payload(selected: dict, dispatch_payload: dict) -> tuple[dict | None, dict]:
+    drive = dispatch_payload.get("drive") if isinstance(dispatch_payload.get("drive"), dict) else None
+    if drive is not None:
+        return drive, {"kind": "workspace_dispatch_sidecar"}
+
+    drive_report_json = selected.get("drive_report_json")
+    root = selected.get("root")
+    if not drive_report_json or not root:
+        return None, {"kind": "missing_drive_report"}
+    candidate = Path(str(drive_report_json))
+    path = candidate if candidate.is_absolute() else Path(str(root)) / candidate
+    drive = _read_json_mapping(path)
+    if drive is None:
+        return None, {"kind": "unreadable_project_drive_report", "path": str(drive_report_json)}
+    return drive, {"kind": "project_drive_report", "path": str(drive_report_json)}
+
+
+def _workspace_drive_progress_evidence(drive: dict | None) -> dict:
+    drive = drive if isinstance(drive, dict) else {}
+    results = drive.get("results") if isinstance(drive.get("results"), list) else []
+    continuations = drive.get("continuations") if isinstance(drive.get("continuations"), list) else []
+    self_iterations = drive.get("self_iterations") if isinstance(drive.get("self_iterations"), list) else []
+    completed_result_count = sum(
+        1
+        for result in results
+        if isinstance(result, dict) and str(result.get("status") or "") in COMPLETED_STATUSES
+    )
+    materialized_continuation_count = sum(
+        1
+        for continuation in continuations
+        if (
+            isinstance(continuation, dict)
+            and continuation.get("status") == "advanced"
+            and (_workspace_int(continuation.get("tasks_added")) or 0) > 0
+        )
+    )
+    planned_self_iteration_count = sum(
+        1
+        for iteration in self_iterations
+        if (
+            isinstance(iteration, dict)
+            and iteration.get("status") == "planned"
+            and (_workspace_int(iteration.get("pending_stage_count_after")) or 0)
+            > (_workspace_int(iteration.get("stage_count_before")) or 0)
+        )
+    )
+    return {
+        "result_count": len(results),
+        "completed_result_count": completed_result_count,
+        "continuation_count": len(continuations),
+        "materialized_continuation_count": materialized_continuation_count,
+        "self_iteration_count": len(self_iterations),
+        "planned_self_iteration_count": planned_self_iteration_count,
+        "useful_progress": (
+            completed_result_count > 0
+            or materialized_continuation_count > 0
+            or planned_self_iteration_count > 0
+        ),
+    }
+
+
+def _workspace_planner_validation_failed(drive: dict | None) -> bool:
+    if not isinstance(drive, dict):
+        return False
+    self_iterations = drive.get("self_iterations") if isinstance(drive.get("self_iterations"), list) else []
+    for iteration in self_iterations:
+        if not isinstance(iteration, dict):
+            continue
+        validation = iteration.get("validation") if isinstance(iteration.get("validation"), dict) else {}
+        if iteration.get("status") == "rejected" and validation.get("status") == "failed":
+            return True
+    return False
+
+
+def _workspace_dispatch_outcome(
+    workspace: Path,
+    dispatch_payload: dict,
+    selected: dict,
+    report_path: Path,
+) -> dict:
+    drive, drive_source = _workspace_selected_drive_payload(selected, dispatch_payload)
+    progress = _workspace_drive_progress_evidence(drive)
+    drive_status = selected.get("drive_status") or (drive or {}).get("status")
+    drive_exit_code = _workspace_int(selected.get("drive_exit_code"))
+    dispatch_status = dispatch_payload.get("status")
+    reason = "useful_progress" if progress["useful_progress"] else "no_nonproductive_signal"
+    classification = "productive" if progress["useful_progress"] else "neutral"
+    message = "selected drive produced useful local progress" if progress["useful_progress"] else "no backoff signal"
+
+    if not progress["useful_progress"]:
+        drive_status_text = str(drive_status or "")
+        if _workspace_planner_validation_failed(drive):
+            classification = "nonproductive"
+            reason = "planner_validation_failed"
+            message = "self-iteration planner output failed validation without materializing useful work"
+        elif drive_status_text == "budget_exhausted":
+            classification = "nonproductive"
+            reason = "budget_without_progress"
+            message = "drive exhausted budget without completing a task or materializing work"
+        elif drive_status_text in {"cancelled", "paused", "stale", "timeout"}:
+            classification = "nonproductive"
+            reason = "interrupted"
+            message = f"drive stopped as {drive_status_text} without useful progress"
+        elif (
+            dispatch_status == "drive_failed"
+            or (drive_exit_code is not None and drive_exit_code != 0)
+            or drive_status_text in {"blocked", "failed", "isolated_failure"}
+        ):
+            classification = "nonproductive"
+            reason = "drive_failed"
+            message = "selected project drive failed without useful progress"
+
+    drive_report = selected.get("drive_report") or (drive or {}).get("drive_report")
+    drive_report_json = selected.get("drive_report_json") or (drive or {}).get("drive_report_json")
+    return {
+        "schema_version": 1,
+        "classification": classification,
+        "productive": classification == "productive",
+        "nonproductive": classification == "nonproductive",
+        "reason": reason,
+        "message": message,
+        "dispatch_status": dispatch_status,
+        "drive_status": drive_status,
+        "drive_exit_code": drive_exit_code,
+        "drive_report": drive_report,
+        "drive_report_json": drive_report_json,
+        "drive_evidence_source": drive_source,
+        "progress": progress,
+        "source_report": dispatch_payload.get("dispatch_report_json") or _workspace_relative(workspace, report_path),
+        "source_dispatch_report": dispatch_payload.get("dispatch_report"),
+    }
+
+
+def _workspace_dispatch_history(workspace: Path) -> list[dict]:
+    report_dir = workspace / ".engineering" / "reports" / "workspace-dispatches"
+    if not report_dir.exists():
+        return []
+    paths = sorted(
+        [path for path in report_dir.glob("*.json") if path.is_file()],
+        key=lambda path: _workspace_relative(workspace, path),
+        reverse=True,
+    )[:WORKSPACE_DISPATCH_HISTORY_LIMIT]
+    history: list[dict] = []
+    for path in paths:
+        payload = _read_json_mapping(path)
+        if not isinstance(payload, dict):
+            continue
+        selected = payload.get("selected") if isinstance(payload.get("selected"), dict) else None
+        if not selected:
+            continue
+        outcome = _workspace_dispatch_outcome(workspace, payload, selected, path)
+        history.append(
+            {
+                "path": _workspace_relative(workspace, path),
+                "dispatch_report": payload.get("dispatch_report"),
+                "status": payload.get("status"),
+                "finished_at": payload.get("finished_at") or payload.get("started_at"),
+                "selected_project": selected.get("project"),
+                "selected_root": selected.get("root"),
+                "selected_score": selected.get("score"),
+                "drive_status": selected.get("drive_status"),
+                "drive_exit_code": selected.get("drive_exit_code"),
+                "drive_report": selected.get("drive_report"),
+                "drive_report_json": selected.get("drive_report_json"),
+                "outcome": outcome,
+            }
+        )
+    return history
+
+
+def _workspace_same_root(left: str | None, right: str | None) -> bool:
+    if not left or not right:
+        return False
+    try:
+        return Path(left).resolve() == Path(right).resolve()
+    except OSError:
+        return str(left) == str(right)
+
+
+def _workspace_history_succeeded(record: dict) -> bool:
+    outcome = record.get("outcome") if isinstance(record.get("outcome"), dict) else {}
+    if outcome.get("productive"):
+        return True
+    if outcome.get("nonproductive"):
+        return False
+    if record.get("status") == "dispatched" and record.get("drive_exit_code") in (None, 0):
+        return True
+    return str(record.get("drive_status") or "") in {"completed", "budget_exhausted", "paused"}
+
+
+def _workspace_history_failed(record: dict) -> bool:
+    if record.get("status") == "drive_failed":
+        return True
+    exit_code = record.get("drive_exit_code")
+    try:
+        return exit_code is not None and int(exit_code) != 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _workspace_latest_drive_retrospective(project_root: Path) -> dict | None:
+    report_dir = project_root / ".engineering" / "reports" / "tasks" / "drives"
+    if not report_dir.exists():
+        return None
+    paths = sorted(
+        [path for path in report_dir.glob("*.json") if path.is_file()],
+        key=lambda path: str(path),
+        reverse=True,
+    )
+    for path in paths[:WORKSPACE_DISPATCH_HISTORY_LIMIT]:
+        payload = _read_json_mapping(path)
+        retrospective = payload.get("goal_gap_retrospective") if isinstance(payload, dict) else None
+        if not isinstance(retrospective, dict):
+            continue
+        generated_at = retrospective.get("generated_at")
+        return {
+            "path": str(path.relative_to(project_root)),
+            "generated_at": generated_at,
+            "age_seconds": _workspace_dispatch_timestamp_age_seconds(generated_at),
+            "retrospective": retrospective,
+        }
+    return None
+
+
+def _workspace_goal_gap_score(project_root: Path) -> dict:
+    severity_weights = {"critical": 120, "high": 90, "medium": 50, "low": 20, "info": 5}
+    latest = _workspace_latest_drive_retrospective(project_root)
+    if latest is None:
+        return {
+            "source": None,
+            "generated_at": None,
+            "age_seconds": None,
+            "max_severity": None,
+            "severity_points": 0,
+            "age_points": 0,
+            "points": 0,
+        }
+    retrospective = latest["retrospective"]
+    severities = [
+        str(item.get("severity") or "info")
+        for item in retrospective.get("remaining_risks", [])
+        if isinstance(item, dict)
+    ]
+    max_severity = None
+    severity_points = 0
+    for severity in severities:
+        points = severity_weights.get(severity, 0)
+        if points > severity_points:
+            severity_points = points
+            max_severity = severity
+    age_seconds = latest.get("age_seconds")
+    age_points = min(72, int(age_seconds // 3600)) if isinstance(age_seconds, int) else 0
+    return {
+        "source": latest.get("path"),
+        "generated_at": latest.get("generated_at"),
+        "age_seconds": age_seconds,
+        "max_severity": max_severity,
+        "severity_points": severity_points,
+        "age_points": age_points,
+        "points": severity_points + age_points,
+    }
+
+
+def _workspace_history_score(item: dict, history: list[dict]) -> dict:
+    root = str(item.get("root") or "")
+    project_history = [
+        record for record in history if _workspace_same_root(str(record.get("selected_root") or ""), root)
+    ]
+    recent_history = history[:WORKSPACE_DISPATCH_RECENT_HISTORY_LIMIT]
+    recent_project_history = [
+        record for record in recent_history if _workspace_same_root(str(record.get("selected_root") or ""), root)
+    ]
+    last_selected = project_history[0] if project_history else None
+    last_selected_at = last_selected.get("finished_at") if last_selected else None
+    last_selected_age_seconds = _workspace_dispatch_timestamp_age_seconds(last_selected_at) if last_selected_at else None
+    recent_success_count = sum(1 for record in recent_project_history if _workspace_history_succeeded(record))
+    recent_failure_count = sum(1 for record in recent_project_history if _workspace_history_failed(record))
+    never_selected_bonus = 80 if not project_history else 0
+    recent_success_penalty = -25 * recent_success_count
+    recent_failure_penalty = -75 * recent_failure_count
+    age_points = min(48, int(last_selected_age_seconds // 3600)) if isinstance(last_selected_age_seconds, int) else 0
+    points = never_selected_bonus + recent_success_penalty + recent_failure_penalty + age_points
+    return {
+        "has_workspace_history": bool(history),
+        "selected_count": len(project_history),
+        "recent_window_size": WORKSPACE_DISPATCH_RECENT_HISTORY_LIMIT,
+        "recent_success_count": recent_success_count,
+        "recent_failure_count": recent_failure_count,
+        "last_selected_at": last_selected_at,
+        "last_selected_age_seconds": last_selected_age_seconds,
+        "last_selected_status": last_selected.get("status") if last_selected else None,
+        "last_drive_status": last_selected.get("drive_status") if last_selected else None,
+        "never_selected_bonus": never_selected_bonus,
+        "recent_success_penalty": recent_success_penalty,
+        "recent_failure_penalty": recent_failure_penalty,
+        "age_points": age_points,
+        "points": points,
+    }
+
+
+def _workspace_nonproductive_backoff_decision(item: dict, history: list[dict], args: argparse.Namespace) -> dict:
+    threshold_seconds = _workspace_dispatch_nonproductive_backoff_seconds(args)
+    decision = {
+        "schema_version": 1,
+        "kind": "workspace_dispatch_nonproductive_backoff",
+        "decision": "disabled" if threshold_seconds <= 0 else "no_history",
+        "active": False,
+        "reason": None,
+        "message": None,
+        "source_report": None,
+        "source_dispatch_report": None,
+        "source_drive_report": None,
+        "source_drive_report_json": None,
+        "age_seconds": None,
+        "threshold_seconds": threshold_seconds,
+        "expires_at": None,
+        "points": 0,
+        "outcome": None,
+    }
+    if threshold_seconds <= 0:
+        return decision
+
+    root = str(item.get("root") or "")
+    project_history = [
+        record for record in history if _workspace_same_root(str(record.get("selected_root") or ""), root)
+    ]
+    if not project_history:
+        return decision
+
+    latest = project_history[0]
+    outcome = latest.get("outcome") if isinstance(latest.get("outcome"), dict) else {}
+    decision.update(
+        {
+            "reason": outcome.get("reason"),
+            "message": outcome.get("message"),
+            "source_report": outcome.get("source_report") or latest.get("path"),
+            "source_dispatch_report": outcome.get("source_dispatch_report") or latest.get("dispatch_report"),
+            "source_drive_report": outcome.get("drive_report") or latest.get("drive_report"),
+            "source_drive_report_json": outcome.get("drive_report_json") or latest.get("drive_report_json"),
+            "outcome": outcome,
+        }
+    )
+    if not outcome.get("nonproductive"):
+        decision["decision"] = "productive" if outcome.get("productive") else "not_nonproductive"
+        return decision
+
+    finished_at = latest.get("finished_at")
+    age_seconds = _workspace_dispatch_timestamp_age_seconds(finished_at)
+    expires_at = _workspace_timestamp_plus_seconds(finished_at, threshold_seconds)
+    active = age_seconds is None or age_seconds < threshold_seconds
+    decision.update(
+        {
+            "decision": "active_penalty" if active else "expired",
+            "active": active,
+            "age_seconds": age_seconds,
+            "expires_at": expires_at,
+            "points": WORKSPACE_DISPATCH_NONPRODUCTIVE_BACKOFF_PENALTY if active else 0,
+        }
+    )
+    return decision
+
+
+def _workspace_dispatch_priority_score(
+    workspace: Path,
+    item: dict,
+    args: argparse.Namespace,
+    history: list[dict],
+) -> dict:
+    summary = item.get("summary") if isinstance(item.get("summary"), dict) else {}
+    task_counts = summary.get("task_counts") if isinstance(summary.get("task_counts"), dict) else {}
+    continuation = summary.get("continuation") if isinstance(summary.get("continuation"), dict) else {}
+    pending_tasks = int(task_counts.get("pending", 0) or 0)
+    pending_continuations = int(continuation.get("pending_stage_count", 0) or 0)
+    pending_task_points = min(pending_tasks, 20) * 100
+    continuation_points = min(pending_continuations, 20) * 60
+    goal_gap = _workspace_goal_gap_score(Path(str(item["root"])))
+    history_score = _workspace_history_score(item, history)
+    nonproductive_backoff = _workspace_nonproductive_backoff_decision(item, history, args)
+    last_selected_age_seconds = history_score.get("last_selected_age_seconds")
+    cooldown_active = (
+        isinstance(last_selected_age_seconds, int)
+        and last_selected_age_seconds < WORKSPACE_DISPATCH_SELECTED_COOLDOWN_SECONDS
+    )
+    cooldown_penalty = -300 if cooldown_active else 0
+    total = (
+        pending_task_points
+        + continuation_points
+        + int(goal_gap.get("points", 0) or 0)
+        + int(history_score.get("points", 0) or 0)
+        + cooldown_penalty
+        + int(nonproductive_backoff.get("points", 0) or 0)
+    )
+    components = {
+        "schema_version": 1,
+        "policy": WORKSPACE_DISPATCH_DEFAULT_SCHEDULER_POLICY,
+        "workspace": str(workspace),
+        "pending_tasks": {"count": pending_tasks, "points": pending_task_points},
+        "pending_continuations": {"count": pending_continuations, "points": continuation_points},
+        "goal_gap": goal_gap,
+        "workspace_history": history_score,
+        "cooldown": {
+            "window_seconds": WORKSPACE_DISPATCH_SELECTED_COOLDOWN_SECONDS,
+            "active": cooldown_active,
+            "last_selected_age_seconds": last_selected_age_seconds,
+            "points": cooldown_penalty,
+        },
+        "nonproductive_backoff": nonproductive_backoff,
+        "total": total,
+    }
+    return {"score": total, "components": components}
+
+
+def _score_workspace_dispatch_queue(workspace: Path, queue: list[dict], args: argparse.Namespace) -> list[dict]:
+    policy = _workspace_scheduler_policy(args)
+    if policy == WORKSPACE_DISPATCH_PATH_ORDER_SCHEDULER_POLICY:
+        for rank, item in enumerate(queue):
+            item["scheduler_policy"] = policy
+            item["scheduler_rank"] = rank
+            if item.get("eligible"):
+                item["score"] = 0
+                item["score_components"] = {
+                    "schema_version": 1,
+                    "policy": policy,
+                    "path_order_index": item.get("index"),
+                    "total": 0,
+                }
+                item["backoff"] = {
+                    "schema_version": 1,
+                    "kind": "workspace_dispatch_nonproductive_backoff",
+                    "decision": "not_evaluated_path_order",
+                    "active": False,
+                    "threshold_seconds": _workspace_dispatch_nonproductive_backoff_seconds(args),
+                    "points": 0,
+                }
+            else:
+                item["score"] = None
+                item["score_components"] = {
+                    "schema_version": 1,
+                    "policy": policy,
+                    "blocked": True,
+                    "skip_codes": [
+                        reason.get("code")
+                        for reason in item.get("skip_reasons", [])
+                        if isinstance(reason, dict)
+                    ],
+                }
+                item["backoff"] = {
+                    "schema_version": 1,
+                    "kind": "workspace_dispatch_nonproductive_backoff",
+                    "decision": "blocked",
+                    "active": False,
+                    "threshold_seconds": _workspace_dispatch_nonproductive_backoff_seconds(args),
+                    "points": 0,
+                }
+        return queue
+
+    history = _workspace_dispatch_history(workspace)
+    for item in queue:
+        item["scheduler_policy"] = policy
+        if item.get("eligible"):
+            score = _workspace_dispatch_priority_score(workspace, item, args, history)
+            item["score"] = score["score"]
+            item["score_components"] = score["components"]
+            item["backoff"] = score["components"].get("nonproductive_backoff", {})
+        else:
+            item["score"] = None
+            item["score_components"] = {
+                "schema_version": 1,
+                "policy": policy,
+                "blocked": True,
+                "skip_codes": [
+                    reason.get("code")
+                    for reason in item.get("skip_reasons", [])
+                    if isinstance(reason, dict)
+                ],
+            }
+            item["backoff"] = {
+                "schema_version": 1,
+                "kind": "workspace_dispatch_nonproductive_backoff",
+                "decision": "blocked",
+                "active": False,
+                "threshold_seconds": _workspace_dispatch_nonproductive_backoff_seconds(args),
+                "points": 0,
+            }
+
+    eligible = sorted(
+        [item for item in queue if item.get("eligible")],
+        key=lambda item: (-int(item.get("score") or 0), _workspace_score_path_key(item)),
+    )
+    skipped = sorted([item for item in queue if not item.get("eligible")], key=lambda item: int(item.get("index", 0)))
+    ordered = eligible + skipped
+    for rank, item in enumerate(ordered):
+        item["scheduler_rank"] = rank
+    return ordered
+
+
+def _workspace_selected_reason(selected: dict, args: argparse.Namespace) -> dict:
+    policy = _workspace_scheduler_policy(args)
+    if policy == WORKSPACE_DISPATCH_PATH_ORDER_SCHEDULER_POLICY:
+        return {
+            "code": "path_order_first_eligible",
+            "message": "first eligible project by deterministic path order",
+            "scheduler_policy": policy,
+            "path_order_index": selected.get("index"),
+        }
+    return {
+        "code": "highest_fair_score",
+        "message": "highest fair scheduler score; resolved equal scores by deterministic path order",
+        "scheduler_policy": policy,
+        "score": selected.get("score"),
+        "scheduler_rank": selected.get("scheduler_rank"),
+        "tie_breaker": "resolved_project_path",
+    }
+
+
 def build_workspace_dispatch_queue(workspace: Path, args: argparse.Namespace) -> list[dict]:
     workspace = workspace.resolve()
     projects = discover_projects(workspace, max_depth=args.max_depth)
-    return [
+    queue = [
         _workspace_dispatch_queue_item(workspace, project, args, index)
         for index, project in enumerate(projects)
     ]
+    return _score_workspace_dispatch_queue(workspace, queue, args)
+
+
+def _workspace_stale_running_recoveries(queue: list[dict]) -> list[dict]:
+    return [
+        deepcopy(item["stale_running_recovery"])
+        for item in queue
+        if isinstance(item.get("stale_running_recovery"), dict)
+    ]
+
+
+def _workspace_stale_running_blocks(queue: list[dict]) -> list[dict]:
+    blocks: list[dict] = []
+    for item in queue:
+        block = item.get("stale_running_block")
+        if isinstance(block, dict):
+            blocks.append(deepcopy(block))
+            continue
+        summary = item.get("summary") if isinstance(item.get("summary"), dict) else {}
+        drive_control = summary.get("drive_control") if isinstance(summary.get("drive_control"), dict) else {}
+        block = drive_control.get("stale_running_block")
+        if isinstance(block, dict):
+            blocks.append(deepcopy(block))
+    return blocks
+
 
 
 def _workspace_dispatch_report_path(workspace: Path) -> Path:
@@ -1148,6 +2041,8 @@ def _workspace_relative(workspace: Path, path: Path) -> str:
 
 def _workspace_dispatch_limits(args: argparse.Namespace) -> dict:
     return {
+        "scheduler_policy": _workspace_scheduler_policy(args),
+        "nonproductive_backoff_seconds": _workspace_dispatch_nonproductive_backoff_seconds(args),
         "max_tasks": args.max_tasks,
         "time_budget_seconds": args.time_budget_seconds,
         "rolling": bool(args.rolling),
@@ -1194,6 +2089,7 @@ def _workspace_dispatch_command_options(workspace: Path, args: argparse.Namespac
     payload = {
         "workspace": str(workspace),
         "max_depth": args.max_depth,
+        "scheduler_policy": _workspace_scheduler_policy(args),
         "lease_stale_after_seconds": _workspace_dispatch_lease_stale_after_seconds(args),
     }
     payload.update(_workspace_dispatch_limits(args))
@@ -1616,6 +2512,7 @@ def write_workspace_dispatch_report(workspace: Path, payload: dict) -> str:
         f"- Finished: {payload['finished_at']}",
         f"- Projects scanned: `{len(payload.get('queue', []))}`",
         f"- Eligible projects: `{payload.get('eligible_count', 0)}`",
+        f"- Scheduler policy: `{payload.get('scheduler_policy') or payload.get('limits', {}).get('scheduler_policy')}`",
         f"- Selected project: `{(payload.get('selected') or {}).get('project') or 'none'}`",
         f"- Message: {payload['message']}",
         "",
@@ -1655,6 +2552,41 @@ def write_workspace_dispatch_report(workspace: Path, payload: dict) -> str:
                 "",
             ]
         )
+    recoveries = payload.get("stale_running_recoveries") if isinstance(payload.get("stale_running_recoveries"), list) else []
+    blocks = payload.get("stale_running_blocks") if isinstance(payload.get("stale_running_blocks"), list) else []
+    lines.extend(["## Project Stale Running Recovery", ""])
+    if not recoveries and not blocks:
+        lines.append("No project stale running recovery evidence was recorded.")
+    for recovery in recoveries:
+        if not isinstance(recovery, dict):
+            continue
+        lines.append(
+            "- Recovered "
+            f"`{recovery.get('reason')}` previous_pid=`{recovery.get('previous_pid') or 'unknown'}` "
+            f"heartbeat_age=`{recovery.get('heartbeat_age_seconds')}` "
+            f"threshold=`{recovery.get('threshold_seconds')}` recovered_at={recovery.get('recovered_at')}"
+        )
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        lines.append(
+            "- Blocked "
+            f"`{block.get('reason')}` previous_pid=`{block.get('previous_pid') or 'unknown'}` "
+            f"heartbeat_age=`{block.get('heartbeat_age_seconds')}` "
+            f"threshold=`{block.get('threshold_seconds')}`"
+        )
+    if recoveries or blocks:
+        lines.extend(
+            [
+                "",
+                "Machine-readable project stale running recovery:",
+                "",
+                "```json",
+                json.dumps({"recoveries": recoveries, "blocks": blocks}, indent=2, sort_keys=True),
+                "```",
+            ]
+        )
+    lines.append("")
     lines.extend(
         [
         "## Dispatch Queue",
@@ -1665,13 +2597,63 @@ def write_workspace_dispatch_report(workspace: Path, payload: dict) -> str:
         lines.append("No projects were discovered.")
     for item in payload.get("queue", []):
         lines.append(
-            f"- `{item.get('index')}` `{item.get('project')}` `{item.get('dispatch_status')}` "
-            f"eligible=`{str(bool(item.get('eligible'))).lower()}` root=`{item.get('root')}`"
+            f"- rank=`{item.get('scheduler_rank')}` path=`{item.get('index')}` `{item.get('project')}` "
+            f"`{item.get('dispatch_status')}` eligible=`{str(bool(item.get('eligible'))).lower()}` "
+            f"score=`{item.get('score')}` root=`{item.get('root')}`"
         )
+        selected_reason = item.get("selected_reason") if isinstance(item.get("selected_reason"), dict) else {}
+        if selected_reason:
+            lines.append(f"  - Selected reason: `{selected_reason.get('code')}` {selected_reason.get('message')}")
+        components = item.get("score_components") if isinstance(item.get("score_components"), dict) else {}
+        if components:
+            lines.extend(
+                [
+                    "  - Score components:",
+                    "",
+                    "    ```json",
+                    "\n".join(
+                        f"    {line}" for line in json.dumps(components, indent=2, sort_keys=True).splitlines()
+                    ),
+                    "    ```",
+                ]
+            )
+        backoff = item.get("backoff") if isinstance(item.get("backoff"), dict) else {}
+        if backoff:
+            lines.append(
+                "  - Nonproductive backoff: "
+                f"`{backoff.get('decision')}` active=`{str(bool(backoff.get('active'))).lower()}` "
+                f"reason=`{backoff.get('reason') or 'none'}` "
+                f"age=`{backoff.get('age_seconds')}` threshold=`{backoff.get('threshold_seconds')}` "
+                f"expires=`{backoff.get('expires_at') or 'none'}` source=`{backoff.get('source_report') or 'none'}`"
+            )
         summary = item.get("summary") if isinstance(item.get("summary"), dict) else {}
         next_task = summary.get("next_task") if isinstance(summary.get("next_task"), dict) else None
         if next_task:
             lines.append(f"  - Next task: `{next_task.get('id')}` {next_task.get('title')}")
+        checkpoint_readiness = item.get("checkpoint_readiness")
+        if isinstance(checkpoint_readiness, dict):
+            lines.append(
+                "  - Checkpoint readiness: "
+                f"`{checkpoint_readiness.get('reason')}` "
+                f"ready=`{str(bool(checkpoint_readiness.get('ready'))).lower()}` "
+                f"blocking=`{str(bool(checkpoint_readiness.get('blocking'))).lower()}` "
+                f"blocking_paths=`{len(checkpoint_readiness.get('blocking_paths', []))}`"
+            )
+        stale_recovery = item.get("stale_running_recovery")
+        if isinstance(stale_recovery, dict):
+            lines.append(
+                "  - Stale running recovery: "
+                f"`{stale_recovery.get('reason')}` "
+                f"previous_pid=`{stale_recovery.get('previous_pid') or 'unknown'}` "
+                f"recovered_at=`{stale_recovery.get('recovered_at')}`"
+            )
+        stale_block = item.get("stale_running_block")
+        if isinstance(stale_block, dict):
+            lines.append(
+                "  - Stale running block: "
+                f"`{stale_block.get('reason')}` "
+                f"previous_pid=`{stale_block.get('previous_pid') or 'unknown'}`"
+            )
         for reason in item.get("skip_reasons", []):
             lines.append(f"  - Skip `{reason.get('code')}`: {reason.get('message')}")
 
@@ -1685,6 +2667,7 @@ def write_workspace_dispatch_report(workspace: Path, payload: dict) -> str:
                 f"- Status: `{drive.get('status')}`",
                 f"- Tasks run: `{len(drive.get('results', []))}`",
                 f"- Continuations: `{len(drive.get('continuations', []))}`",
+                f"- Self-iterations: `{len(drive.get('self_iterations', []))}`",
                 f"- Drive report: `{drive.get('drive_report')}`",
             ]
         )
@@ -1700,6 +2683,7 @@ def write_workspace_dispatch_report(workspace: Path, payload: dict) -> str:
             "drive_report_json": drive.get("drive_report_json"),
             "result_count": len(drive.get("results", [])),
             "continuation_count": len(drive.get("continuations", [])),
+            "self_iteration_count": len(drive.get("self_iterations", [])),
         }
     lines.extend(
         [
@@ -1729,6 +2713,7 @@ def workspace_drive_dispatch(args: argparse.Namespace) -> tuple[int, dict]:
             "schema_version": 1,
             "kind": "engineering-harness.workspace-drive-dispatch",
             "workspace": str(workspace),
+            "scheduler_policy": _workspace_scheduler_policy(args),
             "status": status,
             "message": message,
             "started_at": started_at,
@@ -1740,6 +2725,8 @@ def workspace_drive_dispatch(args: argparse.Namespace) -> tuple[int, dict]:
             "selected": None,
             "drive": None,
             "lease": workspace_dispatch_lease_payload(workspace, acquisition),
+            "stale_running_recoveries": [],
+            "stale_running_blocks": [],
         }
         write_workspace_dispatch_report(workspace, payload)
         return 1, payload
@@ -1759,10 +2746,19 @@ def workspace_drive_dispatch(args: argparse.Namespace) -> tuple[int, dict]:
         else:
             selected["selected"] = True
             selected["dispatch_status"] = "dispatched"
+            selected["selected_reason"] = _workspace_selected_reason(selected, args)
             selected_project = {
                 "project": selected.get("project"),
                 "root": selected.get("root"),
                 "queue_index": selected.get("index"),
+                "scheduler_rank": selected.get("scheduler_rank"),
+                "scheduler_policy": selected.get("scheduler_policy"),
+                "score": selected.get("score"),
+                "selected_reason": selected.get("selected_reason"),
+                "backoff": selected.get("backoff"),
+                "checkpoint_readiness": selected.get("checkpoint_readiness"),
+                "stale_running_recovery": selected.get("stale_running_recovery"),
+                "stale_running_preflight": selected.get("stale_running_preflight"),
             }
             heartbeat_workspace_dispatch_lease(
                 acquisition,
@@ -1776,9 +2772,12 @@ def workspace_drive_dispatch(args: argparse.Namespace) -> tuple[int, dict]:
                 _add_dispatch_skip(
                     item,
                     "one_project_per_invocation",
-                    "another eligible project was selected first in deterministic queue order",
+                    "another eligible project was selected by the workspace scheduler",
                     selected_project=selected.get("project"),
                     selected_root=selected.get("root"),
+                    scheduler_policy=_workspace_scheduler_policy(args),
+                    selected_score=selected.get("score"),
+                    project_score=item.get("score"),
                 )
             drive_args = _workspace_drive_args(args, Path(str(selected["root"])))
             heartbeat_workspace_dispatch_lease(acquisition, activity="workspace-dispatch-driving")
@@ -1797,6 +2796,7 @@ def workspace_drive_dispatch(args: argparse.Namespace) -> tuple[int, dict]:
             "schema_version": 1,
             "kind": "engineering-harness.workspace-drive-dispatch",
             "workspace": str(workspace),
+            "scheduler_policy": _workspace_scheduler_policy(args),
             "status": status,
             "message": message,
             "started_at": started_at,
@@ -1810,6 +2810,15 @@ def workspace_drive_dispatch(args: argparse.Namespace) -> tuple[int, dict]:
                     "project": selected.get("project"),
                     "root": selected.get("root"),
                     "queue_index": selected.get("index"),
+                    "scheduler_rank": selected.get("scheduler_rank"),
+                    "scheduler_policy": selected.get("scheduler_policy"),
+                    "score": selected.get("score"),
+                    "score_components": selected.get("score_components"),
+                    "selected_reason": selected.get("selected_reason"),
+                    "backoff": selected.get("backoff"),
+                    "checkpoint_readiness": selected.get("checkpoint_readiness"),
+                    "stale_running_recovery": selected.get("stale_running_recovery"),
+                    "stale_running_preflight": selected.get("stale_running_preflight"),
                     "drive_status": selected.get("drive_status"),
                     "drive_exit_code": selected.get("drive_exit_code"),
                     "drive_report": selected.get("drive_report"),
@@ -1819,6 +2828,8 @@ def workspace_drive_dispatch(args: argparse.Namespace) -> tuple[int, dict]:
                 else None
             ),
             "drive": drive_payload,
+            "stale_running_recoveries": _workspace_stale_running_recoveries(queue),
+            "stale_running_blocks": _workspace_stale_running_blocks(queue),
         }
         return drive_exit_code, payload
     finally:
@@ -1840,6 +2851,8 @@ def cmd_workspace_drive(args: argparse.Namespace) -> int:
         raise ValueError("--max-continuations and --max-self-iterations must be non-negative")
     if args.lease_stale_after_seconds is not None and args.lease_stale_after_seconds < 1:
         raise ValueError("--lease-stale-after-seconds must be at least 1")
+    if args.nonproductive_backoff_seconds is not None and args.nonproductive_backoff_seconds < 0:
+        raise ValueError("--nonproductive-backoff-seconds must be non-negative")
     exit_code, payload = workspace_drive_dispatch(args)
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -1906,6 +2919,13 @@ def build_parser() -> argparse.ArgumentParser:
     workspace_drive.add_argument("--continuation-batch-size", type=int, default=1)
     workspace_drive.add_argument("--no-progress-limit", type=int, default=2)
     workspace_drive.add_argument("--lease-stale-after-seconds", type=int, default=None)
+    workspace_drive.add_argument("--nonproductive-backoff-seconds", type=int, default=None)
+    workspace_drive.add_argument(
+        "--scheduler-policy",
+        choices=WORKSPACE_DISPATCH_SCHEDULER_POLICIES,
+        default=WORKSPACE_DISPATCH_DEFAULT_SCHEDULER_POLICY,
+        help="Workspace project ordering policy: fair priority scoring or legacy path-order",
+    )
     workspace_drive.add_argument("--allow-live", action="store_true")
     workspace_drive.add_argument("--allow-manual", action="store_true")
     workspace_drive.add_argument("--allow-agent", action="store_true")

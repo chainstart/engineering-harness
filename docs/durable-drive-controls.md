@@ -46,6 +46,20 @@ ENGINEERING_HARNESS_DRIVE_STALE_AFTER_SECONDS=7200 python3 -m engineering_harnes
 The watchdog only probes the recorded pid with a non-destructive local liveness check. It never kills
 or signals unrelated work beyond that liveness probe.
 
+Before a new `drive` starts selecting work, the harness runs a local stale-running recovery preflight
+against the durable `drive_control` block. Automatic recovery only happens when all of these are true:
+
+- `drive_control.status` is `running`;
+- the last heartbeat is older than the configured watchdog threshold or missing;
+- the recorded pid is missing or no longer running.
+
+In that case the harness transitions `drive_control` back to `idle`, appends a
+`stale-running-recovery` history event, writes `stale_running_recovery` evidence with the previous
+pid, heartbeat age, threshold, reason, `recovered_at`, and recommended follow-up, then continues with
+normal task selection. If the recorded pid is alive, or if the heartbeat is still fresh, the preflight
+does not mutate state and the new drive is blocked with `stale_running_block` / `stale_running_preflight`
+evidence.
+
 ## Runtime Dashboard Payload
 
 `status --json` also includes `runtime_dashboard`, a dashboard-ready summary for long unattended
@@ -60,6 +74,8 @@ Inspect these fields first:
 
 - `runtime_dashboard.drive_watchdog`: active drive pid, heartbeat age, stale reason, and current
   liveness verdict.
+- `runtime_dashboard.drive_control.stale_running_recovery` and `stale_running_block`: the latest
+  automatic recovery evidence or the current reason recovery is unsafe.
 - `runtime_dashboard.current_task` and `current_phase`: the active task/phase when a drive is
   running, otherwise the next roadmap task when one is selectable.
 - `runtime_dashboard.executor_no_progress`: configured no-progress thresholds, current executor
@@ -68,16 +84,48 @@ Inspect these fields first:
   plus compact pending approval records.
 - `runtime_dashboard.failure_isolation`: unresolved isolated task failures and their local recovery
   actions.
+- `runtime_dashboard.replay_guard`: restart-safe phase reuse evidence for interrupted task drives,
+  including which implementation or acceptance phases were reused and the matching command-group
+  fingerprints.
+- `runtime_dashboard.self_iteration.latest_assessment`: the latest self-iteration planner or
+  checkpoint-gate result, including compact checkpoint readiness evidence when a gate blocked.
 - `runtime_dashboard.workspace_dispatch`: nearest workspace dispatch queue, latest dispatch report,
   and active or latest lease status.
 - `runtime_dashboard.latest_reports`: latest task, drive, and workspace dispatch report metadata with
   JSON sidecar paths.
+- `runtime_dashboard.goal_gap_scorecard`: bounded deterministic scorecard for unattended-reliability
+  categories such as stuck detection, stale-running recovery, checkpoint boundaries, failure
+  isolation, duplicate-plan guard, approval/capability safety, workspace dispatch, and E2E evidence.
 - `runtime_dashboard.goal_gap.next_actions`: deterministic next actions from the latest drive
   goal-gap retrospective, or a current-status fallback when no drive report exists yet.
 
 The rest of the status payload remains machine-readable and stable for scripts. Operators can still
 open the referenced Markdown report when they need full stdout/stderr context, but the dashboard block
 is intended to answer the first triage questions without reading raw reports.
+
+`status --json` also exposes the same scorecard at top-level `goal_gap_scorecard`. Each category is
+ordered by harness priority and includes:
+
+- `status`: `complete`, `partial`, `missing`, or `blocked`.
+- `risk_score`: integer `0` to `100`; higher values should be handled earlier.
+- `severity`: integer `0` to `4`, derived from the risk score for simple sorting.
+- `evidence_paths`: bounded local JSON/report/status paths or payload keys used for the decision.
+- `rationale` and `recommended_next_stage_themes`: compact planner/operator guidance.
+
+Interpret `blocked` as an immediate local blocker, `missing` as absent local evidence, and `partial`
+as evidence that exists but is incomplete or still carries risk. The scorecard is local-only and uses
+existing status, manifest, approval, failure, watchdog, checkpoint, dispatch, test/source, git, and
+latest goal-gap retrospective evidence.
+
+During a live drive, a fresh heartbeat is treated as protected in-progress work even if the recorded
+pid cannot currently be observed. In that case the stale-running category reports an `in_progress`
+rationale and does not recommend `recover-stale-running-drive`. That recovery theme is reserved for
+the deterministic stale case where the heartbeat is stale and the owner pid is dead or missing.
+
+Checkpoint categories make the same distinction between protected work and blockers. Dirty
+`safe_to_checkpoint_paths` from roadmap materialization, the active drive task's file scope, or the
+next task's file scope are reported as `checkpoint_pending` or `in_progress` rationale. The
+`close-git-boundary` recommendation appears only when `blocking_paths` is non-empty.
 
 ## Rolling Checkpoint Boundaries
 
@@ -94,6 +142,62 @@ report records a deferred materialization checkpoint and later generated task ch
 explicitly marked `deferred` with the dirty paths that forced the boundary to stay open. This preserves
 the existing protection against committing unrelated user changes while distinguishing that case from
 ordinary task checkpoint skips.
+
+## Checkpoint Readiness
+
+`status --json`, drive JSON sidecars, and drive Markdown reports include `checkpoint_readiness`. This
+is a read-only local git model; it never commits, cleans, stashes, or pushes. It classifies current
+dirty paths as:
+
+- `harness_materialization`: harness-owned roadmap/materialization paths, such as
+  `.engineering/roadmap.yaml`;
+- `task_scope`: paths inside the active drive task's `file_scope`, or the next task's `file_scope`
+  when no current drive task is recorded;
+- `unrelated_user`: dirty paths outside both of those boundaries.
+
+The payload reports `ready`, `blocking`, `reason`, `dirty_paths`, `blocking_paths`,
+`safe_to_checkpoint_paths`, and `recommended_action`. Staged, modified, deleted, and untracked paths
+are all included in `dirty_paths`; `dirty_path_states` keeps the porcelain status evidence for
+debugging.
+
+Interpret the fields conservatively:
+
+- `reason: clean`: unattended checkpointing has no local git blocker.
+- `reason: harness_materialization_dirty`: only roadmap/materialization paths are dirty. Review or
+  checkpoint those paths before unrelated work, or let a rolling materialization checkpoint handle
+  them when checkpointing is enabled.
+- `reason: task_scope_dirty`: dirty paths are inside the current or next task scope. Review and
+  checkpoint them before switching to unrelated work.
+- `blocking: true`: unrelated user dirtiness is present. Commit, stash, move, or otherwise resolve
+  the `blocking_paths` yourself, then rerun `status --json` or the workspace dispatcher. The harness
+  will not commit or clean those paths for you.
+
+### Self-Iteration Checkpoint Gate
+
+Before self-iteration invokes a planner, the harness evaluates checkpoint readiness. If unrelated
+dirty paths are already present, the planner is not invoked and `.engineering/roadmap.yaml` is not
+changed. The harness writes a blocked self-iteration assessment under
+`.engineering/reports/tasks/assessments/` with:
+
+- `status: blocked`;
+- `checkpoint_readiness`;
+- `dirty_paths` and `blocking_paths`;
+- `reason`; and
+- `recommended_action`.
+
+The same compact evidence is present in `drive --json`, the drive Markdown/JSON report,
+`status --json` at `self_iteration.latest_assessment`, and
+`runtime_dashboard.self_iteration.latest_assessment`.
+
+After a planner exits, the harness checks checkpoint readiness again before accepting the roadmap
+diff. Harness-owned files created by the self-iteration run itself, such as its snapshot, context
+pack, assessment sidecar, and active harness state file, are allowed for this acceptance check. Any
+other planner-created dirty path blocks acceptance; the previous roadmap text is restored and the
+assessment records the blocking paths.
+
+Recovery is local and explicit: inspect `blocking_paths`, commit/stash/move or otherwise resolve
+only the operator-owned dirty paths yourself, then rerun `status --json`, `drive --self-iterate`, or
+the workspace dispatcher. The harness does not clean, stash, or commit those paths.
 
 ## Goal-Gap Retrospective
 
@@ -234,9 +338,9 @@ python3 -m engineering_harness.cli resume --project-root /path/to/project --reas
 python3 -m engineering_harness.cli drive --project-root /path/to/project
 ```
 
-`resume` clears pause, cancel, and stale watchdog state. It does not start work by itself; run `drive`
-after resuming. If a drive is still actively running with a fresh heartbeat, `resume` leaves that
-active state in place.
+`resume` clears pause, cancel, and reviewed stale watchdog state. It does not start work by itself;
+run `drive` after resuming. If a drive is still actively running with a live pid or a fresh heartbeat,
+`resume` leaves that active state in place.
 
 ## Recover A Stale Drive
 
@@ -246,14 +350,42 @@ If status shows `drive_control.status: stale`, inspect the last activity and tas
 python3 -m engineering_harness.cli status --project-root /path/to/project --json
 ```
 
-When the recorded process is gone or the heartbeat is stale, clear the stale running state locally:
+For unattended local drives, the next `drive` invocation automatically recovers only the deterministic
+stale-running case where the heartbeat is stale and the recorded pid is missing or dead. The drive
+report JSON, Markdown report, `status --json`, and runtime dashboard expose the
+`stale_running_recovery` block.
+
+When a stale state was already marked and reviewed, or when an operator intentionally wants to clear a
+paused/cancelled control, clear it locally:
 
 ```bash
 python3 -m engineering_harness.cli resume --project-root /path/to/project --reason "recover stale drive"
 python3 -m engineering_harness.cli drive --project-root /path/to/project
 ```
 
-The next drive selects work from durable task state and reports. It does not kill the old pid.
+The next drive selects work from durable task state and reports. It does not kill the old pid. If the
+heartbeat is fresh, status and the scorecard keep the run as protected `in_progress` work so a
+concurrent local run is not overwritten. If the heartbeat is stale but the pid is still alive, stale
+recovery remains blocked for operator review.
+
+## Restart-Safe Phase Replay
+
+When a local drive is interrupted after a task phase has already passed, the next local `drive`
+continues from durable phase state instead of blindly replaying completed commands. A passed
+`implementation` phase, or the latest passed `acceptance-N` phase, is reused only when its saved
+command-group fingerprint matches the current task definition. If the task command group changed, or
+the task is in an explicit failed/blocked retry state, the guard leaves the phase runnable.
+
+Replay-guard reuse is local and deterministic. It never requires network access or external account
+state, and it does not bypass remaining required work: E2E commands, file-scope checks, manifest
+writing, failure-isolation cleanup, checkpoint gates, and normal finalization still run. Evidence is
+recorded in:
+
+- task `phase_history` with `event: "reused"` and `metadata.replay_guard`;
+- task run manifests under `replay_guard`, plus per-command `executor_result.metadata.replay_guard`;
+- drive Markdown and JSON reports under `replay_guard`;
+- `status --json` at top-level `replay_guard`;
+- `runtime_dashboard.replay_guard`.
 
 ## Cancel A Drive
 

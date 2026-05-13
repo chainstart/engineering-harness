@@ -3,7 +3,7 @@
 Executor adapters let the harness run shell commands, Codex prompts, and future execution backends
 without changing task semantics. Roadmap tasks still define command groups with `executor`,
 `command` or `prompt`, `timeout_seconds`, optional `no_progress_timeout_seconds`, `required`,
-`model`, and `sandbox`.
+`model`, `sandbox`, and optional `requested_capabilities`.
 
 ## Adapter Interface
 
@@ -25,6 +25,33 @@ Tests and future integrations can pass a custom registry to `Harness(..., execut
 Unknown executor ids fail roadmap validation and task preflight with the same clear messages used
 by existing harness behavior.
 
+## Capability Requests
+
+Roadmap command entries may declare `requested_capabilities` when a task needs an explicit local
+executor capability contract:
+
+```json
+{
+  "name": "local tests",
+  "command": "python3 -m pytest tests -q",
+  "requested_capabilities": ["local_process", "workspace_write", "stdout", "stderr", "exit_code"]
+}
+```
+
+The field is optional for backward compatibility. When present it must be a non-empty list of known
+capability names. The current local vocabulary is:
+
+- Low-risk local capabilities: `local_process`, `workspace_write`, `exit_code`, `stdout`, `stderr`,
+  `agent`, `local_dagger_cli`, `containerized_execution`, and `requires_explicit_configuration`.
+- Unsafe request markers: `network`, `network_access`, `secret_access`, `secrets`,
+  `browser_automation`, `deployment`, `deploy`, `live_operations`, and `live`.
+
+Before a command runs, the harness compares `requested_capabilities` with the selected executor's
+metadata capabilities. Supported low-risk requests are allowed. Unsupported requests are denied.
+Unsafe request markers are denied even if an executor could technically perform them, because the
+unattended local harness does not yet have an explicit approval mechanism for network access,
+secret access, browser automation, deployment, or live operations.
+
 ## Manifest Contract
 
 Each run keeps the legacy manifest fields for compatibility:
@@ -40,6 +67,8 @@ Each run keeps the legacy manifest fields for compatibility:
 - `no_progress_timeout_seconds`
 - `model`
 - `sandbox`
+- `requested_capabilities`
+- `executor_capabilities`
 
 Each run also includes normalized executor fields:
 
