@@ -3303,6 +3303,84 @@
           "generated_at": "2026-05-13T15:31:17Z"
         }
       ]
+    },
+    {
+      "id": "domain-frontend-generator",
+      "title": "Add domain-aware default frontend planning and generation hooks",
+      "status": "planned",
+      "objective": "Close the frontend gap. Add a domain-aware frontend module that inspects a target project goal/task profile and emits a required frontend experience plan by default: dashboard-only for autonomous theorem provers, submission/review/return workflows for student ",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-13T15:39:47Z",
+      "tasks": [
+        {
+          "id": "add-domain-frontend-generator",
+          "title": "Add domain-aware default frontend planning and generation hooks",
+          "status": "pending",
+          "max_attempts": 4,
+          "max_task_iterations": 4,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 5400,
+              "sandbox": "workspace-write",
+              "prompt": "Close the frontend gap. Add a domain-aware frontend module that inspects a target project goal/task profile and emits a required frontend experience plan by default: dashboard-only for autonomous theorem provers, submission/review/return workflows for student paper review systems, account/role flows for multi-role systems, and app-specific views for ordinary software. Expose this plan in roadmap generation, frontend-tasks, status/runtime-dashboard evidence, and tests. Keep generated artifacts local and minimal, but make the decision contract explicit and enforceable.\nKeep the work local-only. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes unless the existing harness checkpoint path explicitly handles git in local tests."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 2700,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing tests for this stage while preserving existing drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "domain frontend generator tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"frontend and (domain or role or dashboard or submission or account)\"",
+              "required": true,
+              "timeout_seconds": 1500
+            },
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 1500
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 300
+            }
+          ],
+          "e2e": [
+            {
+              "name": "domain frontend planning e2e",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q -k domain_frontend_generator_e2e",
+              "required": true,
+              "timeout_seconds": 1500
+            },
+            {
+              "name": "status remains machine-readable",
+              "command": "bin/engh status --project-root . --json",
+              "required": true,
+              "timeout_seconds": 300
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T15:39:47Z"
+        }
+      ]
     }
   ],
   "continuation": {
