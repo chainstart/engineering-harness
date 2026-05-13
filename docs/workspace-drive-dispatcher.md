@@ -195,11 +195,13 @@ Every invocation writes a Markdown report and JSON sidecar under:
 <workspace>/.engineering/reports/workspace-dispatches/
 ```
 
-The JSON output and sidecar include the scheduler policy, full queue, each eligible project score,
-score components, checkpoint readiness, nonproductive backoff decision, skip reasons, selected
-reason, selected project, stale-running recovery/block evidence, drive status, self-iteration count,
-and the selected project drive report path. Use the project-level report for task execution details
-and the workspace report for scheduling evidence.
+The JSON output and sidecar include the scheduler policy, durable `queue_summary`, full queue, each
+eligible project score, score components, explicit priority/starvation-prevention evidence, resource
+budget fields, project drive-lease ownership snapshot, retry/backoff summary, checkpoint readiness,
+nonproductive backoff decision, skip reasons, selected reason, selected project, stale-running
+recovery/block evidence, drive status, self-iteration count, and the selected project drive report
+path. Use the project-level report for task execution details and the workspace report for scheduling
+evidence.
 
 ## Operating Loop
 
@@ -271,9 +273,11 @@ ls -t /path/to/workspace/.engineering/reports/workspace-dispatches/*.json | head
 python3 -m json.tool /path/to/workspace/.engineering/reports/workspace-dispatches/<report>.json
 ```
 
-Check `status`, `selected`, `queue[].skip_reasons`, `queue[].checkpoint_readiness`,
-`queue[].stale_running_recovery`, `queue[].stale_running_block`, and `lease` first. Top-level
-`status` value `lease_held` is normal contention evidence for overlapping ticks.
+Check `status`, `selected`, `queue_summary`, `queue[].skip_reasons`,
+`queue[].checkpoint_readiness`, `queue[].project_lease`, `queue[].resource_budget`,
+`queue[].retry_backoff_summary`, `queue[].stale_running_recovery`,
+`queue[].stale_running_block`, and `lease` first. Top-level `status` value `lease_held` is normal
+contention evidence for overlapping ticks.
 `lease.recovered: true` with a `recovery.reason` such as `pid_gone` or `heartbeat_stale` shows stale
 local lease recovery. Project-level `stale_running_recoveries[]` shows recovered drive-control state
 before selection. For a selected project, open `selected.drive_report_json` or
@@ -281,10 +285,10 @@ before selection. For a selected project, open `selected.drive_report_json` or
 `approvals --json` or `status --json` before resuming or approving anything.
 
 For scheduler questions, inspect `scheduler_policy`, `selected.selected_reason`,
-`queue[].scheduler_rank`, `queue[].score`, `queue[].backoff`, and `queue[].score_components`. Safety
-skips such as approval blocks and unresolved isolated failures remain blocking evidence and are not
-scored; their queue items carry `score: null` with the skip codes under
-`score_components.skip_codes`.
+`queue[].scheduler_rank`, `queue[].score`, `queue[].priority`, `queue[].backoff`,
+`queue[].retry_backoff_summary`, and `queue[].score_components`. Safety skips such as approval
+blocks and unresolved isolated failures remain blocking evidence and are not scored; their queue
+items carry `score: null` with the skip codes under `score_components.skip_codes`.
 
 Project status now carries the nearest workspace dispatch evidence under
 `runtime_dashboard.workspace_dispatch`. From a project directory, use:
@@ -293,12 +297,14 @@ Project status now carries the nearest workspace dispatch evidence under
 bin/engh status --project-root . --json
 ```
 
-That dashboard block shows the latest dispatch queue, selected project, active workspace lease when
-one exists, latest released lease evidence, stale-running recovery or block evidence, score
+That dashboard block shows the latest dispatch queue, queue summary, selected project, active
+workspace lease when one exists, latest released lease evidence, per-project drive lease evidence,
+resource budgets, retry/backoff summaries, stale-running recovery or block evidence, score
 components, selected reason, scheduler policy, nonproductive backoff evidence, and the dispatch report
 sidecar paths. It is the quickest way to answer whether the project is skipped by workspace
 scheduling, cooling down after a recent selection or nonproductive drive, blocked by a lease, blocked
-by live drive-control protection, or simply waiting behind another eligible project.
+by live drive-control protection, out of retry budget, or simply waiting behind another eligible
+project.
 
 The same status payload also carries the nearest daemon supervisor evidence under
 `runtime_dashboard.daemon_supervisor_runtime` and top-level `daemon_supervisor_runtime`. Inspect

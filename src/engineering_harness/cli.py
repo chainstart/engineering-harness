@@ -1328,8 +1328,24 @@ def _compact_workspace_status_summary(summary: dict) -> dict:
             "cancel_requested": bool(drive_control.get("cancel_requested", False)),
             "stale": bool(drive_control.get("stale", False)),
             "stale_reason": drive_control.get("stale_reason") or watchdog.get("reason"),
+            "pid": drive_control.get("pid"),
+            "started_at": drive_control.get("started_at"),
+            "last_heartbeat_at": drive_control.get("last_heartbeat_at"),
+            "heartbeat_count": int(drive_control.get("heartbeat_count", 0) or 0),
+            "stale_after_seconds": drive_control.get("stale_after_seconds"),
+            "current_activity": drive_control.get("current_activity"),
             "watchdog_status": watchdog.get("status"),
             "watchdog_message": watchdog.get("message"),
+            "watchdog": {
+                "schema_version": watchdog.get("schema_version"),
+                "status": watchdog.get("status"),
+                "stale": bool(watchdog.get("stale", False)),
+                "reason": watchdog.get("reason"),
+                "pid_alive": watchdog.get("pid_alive"),
+                "heartbeat_at": watchdog.get("heartbeat_at"),
+                "heartbeat_age_seconds": watchdog.get("heartbeat_age_seconds"),
+                "threshold_seconds": watchdog.get("threshold_seconds"),
+            },
             "stale_running_recovery": stale_running_recovery,
             "stale_running_preflight": stale_running_preflight,
             "stale_running_block": stale_running_block,
@@ -1343,6 +1359,119 @@ def _compact_workspace_status_summary(summary: dict) -> dict:
             "has_unresolved": bool(failure_isolation.get("has_unresolved", False)),
             "latest_isolated_failures": failure_isolation.get("latest_isolated_failures", []),
         },
+    }
+
+
+def _workspace_dispatch_resource_budget(args: argparse.Namespace, summary: dict | None = None) -> dict:
+    summary = summary if isinstance(summary, dict) else {}
+    task_counts = summary.get("task_counts") if isinstance(summary.get("task_counts"), dict) else {}
+    continuation = summary.get("continuation") if isinstance(summary.get("continuation"), dict) else {}
+    self_iteration = summary.get("self_iteration") if isinstance(summary.get("self_iteration"), dict) else {}
+    next_task = summary.get("next_task") if isinstance(summary.get("next_task"), dict) else None
+    return {
+        "schema_version": 1,
+        "kind": "engineering-harness.workspace-dispatch-resource-budget",
+        "per_invocation": {
+            "max_tasks": args.max_tasks,
+            "time_budget_seconds": args.time_budget_seconds,
+            "rolling": bool(args.rolling),
+            "self_iterate": bool(args.self_iterate),
+            "max_continuations": args.max_continuations,
+            "max_self_iterations": args.max_self_iterations,
+            "continuation_batch_size": args.continuation_batch_size,
+            "no_progress_limit": args.no_progress_limit,
+        },
+        "project_demand": {
+            "pending_tasks": int(task_counts.get("pending", 0) or 0),
+            "pending_continuations": int(continuation.get("pending_stage_count", 0) or 0),
+            "self_iteration_enabled": bool(self_iteration.get("enabled", False)),
+            "next_task_id": next_task.get("id") if next_task else None,
+        },
+        "capability_budget": {
+            "allow_live": bool(args.allow_live),
+            "allow_manual": bool(args.allow_manual),
+            "allow_agent": bool(args.allow_agent),
+            "commit_after_task": False,
+            "push_after_task": False,
+        },
+    }
+
+
+def _workspace_project_lease_summary(summary: dict) -> dict:
+    drive_control = summary.get("drive_control") if isinstance(summary.get("drive_control"), dict) else {}
+    watchdog = drive_control.get("watchdog") if isinstance(drive_control.get("watchdog"), dict) else {}
+    active = bool(drive_control.get("active", False))
+    stale = bool(drive_control.get("stale", False))
+    status = str(drive_control.get("status") or "idle")
+    protected = (active or status == "running") and not stale
+    protection_reason = None
+    if protected:
+        protection_reason = "active_project_drive_lease"
+    elif stale:
+        protection_reason = str(drive_control.get("stale_reason") or watchdog.get("reason") or "stale")
+    return {
+        "schema_version": 1,
+        "kind": "engineering-harness.project-drive-lease",
+        "status": status,
+        "active": active,
+        "protected": protected,
+        "protection_reason": protection_reason,
+        "owner_pid": drive_control.get("pid"),
+        "started_at": drive_control.get("started_at"),
+        "last_heartbeat_at": drive_control.get("last_heartbeat_at"),
+        "heartbeat_count": int(drive_control.get("heartbeat_count", 0) or 0),
+        "stale": stale,
+        "stale_reason": drive_control.get("stale_reason") or watchdog.get("reason"),
+        "stale_after_seconds": drive_control.get("stale_after_seconds") or watchdog.get("threshold_seconds"),
+        "current_activity": drive_control.get("current_activity"),
+        "watchdog": watchdog,
+    }
+
+
+def _workspace_task_retry_summary(harness: Harness, summary: dict) -> dict:
+    next_task = summary.get("next_task") if isinstance(summary.get("next_task"), dict) else None
+    if not next_task:
+        return {
+            "schema_version": 1,
+            "kind": "engineering-harness.workspace-dispatch-task-retry",
+            "next_task_id": None,
+            "status": "no_pending_task",
+            "attempts": 0,
+            "max_attempts": 0,
+            "attempts_remaining": 0,
+            "exhausted": False,
+        }
+    task_id = str(next_task.get("id") or "")
+    try:
+        task = harness.task_by_id(task_id)
+    except KeyError:
+        return {
+            "schema_version": 1,
+            "kind": "engineering-harness.workspace-dispatch-task-retry",
+            "next_task_id": task_id,
+            "status": "unknown",
+            "attempts": 0,
+            "max_attempts": 0,
+            "attempts_remaining": 0,
+            "exhausted": False,
+        }
+    state = harness.load_state()
+    task_state = state.get("tasks", {}).get(task.id, {})
+    if not isinstance(task_state, dict):
+        task_state = {}
+    attempts = _workspace_int(task_state.get("attempts")) or 0
+    max_attempts = int(task.max_attempts)
+    attempts_remaining = max(0, max_attempts - attempts)
+    status = str(task_state.get("status", task.status))
+    return {
+        "schema_version": 1,
+        "kind": "engineering-harness.workspace-dispatch-task-retry",
+        "next_task_id": task.id,
+        "status": status,
+        "attempts": attempts,
+        "max_attempts": max_attempts,
+        "attempts_remaining": attempts_remaining,
+        "exhausted": attempts >= max_attempts,
     }
 
 
@@ -1363,6 +1492,29 @@ def _workspace_dispatch_queue_item(workspace: Path, project, args: argparse.Name
         "scheduler_policy": _workspace_scheduler_policy(args),
         "score": None,
         "score_components": {},
+        "priority": {
+            "schema_version": 1,
+            "kind": "engineering-harness.workspace-dispatch-priority",
+            "policy": _workspace_scheduler_policy(args),
+            "score": None,
+            "scheduler_rank": index,
+            "starvation_prevention": {},
+        },
+        "resource_budget": _workspace_dispatch_resource_budget(args),
+        "project_lease": {
+            "schema_version": 1,
+            "kind": "engineering-harness.project-drive-lease",
+            "status": "not_evaluated",
+            "active": False,
+            "protected": False,
+        },
+        "retry_backoff_summary": {
+            "schema_version": 1,
+            "kind": "engineering-harness.workspace-dispatch-retry-backoff-summary",
+            "task_retry": None,
+            "nonproductive_backoff": None,
+            "backoff_active": False,
+        },
         "selected_reason": None,
         "backoff": {
             "schema_version": 1,
@@ -1423,6 +1575,9 @@ def _workspace_dispatch_queue_item(workspace: Path, project, args: argparse.Name
     summary = harness.status_summary(refresh_approvals=False)
     compact_summary = _compact_workspace_status_summary(summary)
     item["summary"] = compact_summary
+    item["resource_budget"] = _workspace_dispatch_resource_budget(args, compact_summary)
+    item["project_lease"] = _workspace_project_lease_summary(compact_summary)
+    item["retry_backoff_summary"]["task_retry"] = _workspace_task_retry_summary(harness, compact_summary)
     checkpoint_readiness = compact_summary.get("checkpoint_readiness", {})
     item["checkpoint_readiness"] = checkpoint_readiness
     if isinstance(checkpoint_readiness, dict) and checkpoint_readiness.get("blocking"):
@@ -1935,6 +2090,59 @@ def _workspace_dispatch_priority_score(
     return {"score": total, "components": components}
 
 
+def _workspace_priority_evidence(item: dict, args: argparse.Namespace) -> dict:
+    components = item.get("score_components") if isinstance(item.get("score_components"), dict) else {}
+    history = components.get("workspace_history") if isinstance(components.get("workspace_history"), dict) else {}
+    cooldown = components.get("cooldown") if isinstance(components.get("cooldown"), dict) else {}
+    backoff = item.get("backoff") if isinstance(item.get("backoff"), dict) else {}
+    return {
+        "schema_version": 1,
+        "kind": "engineering-harness.workspace-dispatch-priority",
+        "policy": _workspace_scheduler_policy(args),
+        "eligible": bool(item.get("eligible", False)),
+        "selected": bool(item.get("selected", False)),
+        "score": item.get("score"),
+        "scheduler_rank": item.get("scheduler_rank"),
+        "path_order_index": item.get("index"),
+        "tie_breaker": "resolved_project_path",
+        "starvation_prevention": {
+            "selected_count": history.get("selected_count"),
+            "never_selected_bonus": history.get("never_selected_bonus", 0),
+            "last_selected_at": history.get("last_selected_at"),
+            "last_selected_age_seconds": history.get("last_selected_age_seconds"),
+            "age_points": history.get("age_points", 0),
+            "cooldown_active": bool(cooldown.get("active", False)),
+            "cooldown_points": cooldown.get("points", 0),
+            "nonproductive_backoff_active": bool(backoff.get("active", False)),
+            "nonproductive_backoff_points": backoff.get("points", 0),
+        },
+    }
+
+
+def _workspace_retry_backoff_summary(item: dict) -> dict:
+    existing = item.get("retry_backoff_summary") if isinstance(item.get("retry_backoff_summary"), dict) else {}
+    task_retry = existing.get("task_retry") if isinstance(existing.get("task_retry"), dict) else None
+    backoff = item.get("backoff") if isinstance(item.get("backoff"), dict) else None
+    return {
+        "schema_version": 1,
+        "kind": "engineering-harness.workspace-dispatch-retry-backoff-summary",
+        "task_retry": deepcopy(task_retry) if isinstance(task_retry, dict) else None,
+        "nonproductive_backoff": deepcopy(backoff) if isinstance(backoff, dict) else None,
+        "attempts_remaining": task_retry.get("attempts_remaining") if isinstance(task_retry, dict) else None,
+        "retry_exhausted": bool(task_retry.get("exhausted", False)) if isinstance(task_retry, dict) else False,
+        "backoff_active": bool(backoff.get("active", False)) if isinstance(backoff, dict) else False,
+        "backoff_decision": backoff.get("decision") if isinstance(backoff, dict) else None,
+        "backoff_reason": backoff.get("reason") if isinstance(backoff, dict) else None,
+    }
+
+
+def _finalize_workspace_dispatch_queue_evidence(queue: list[dict], args: argparse.Namespace) -> list[dict]:
+    for item in queue:
+        item["priority"] = _workspace_priority_evidence(item, args)
+        item["retry_backoff_summary"] = _workspace_retry_backoff_summary(item)
+    return queue
+
+
 def _score_workspace_dispatch_queue(workspace: Path, queue: list[dict], args: argparse.Namespace) -> list[dict]:
     policy = _workspace_scheduler_policy(args)
     if policy == WORKSPACE_DISPATCH_PATH_ORDER_SCHEDULER_POLICY:
@@ -1977,7 +2185,7 @@ def _score_workspace_dispatch_queue(workspace: Path, queue: list[dict], args: ar
                     "threshold_seconds": _workspace_dispatch_nonproductive_backoff_seconds(args),
                     "points": 0,
                 }
-        return queue
+        return _finalize_workspace_dispatch_queue_evidence(queue, args)
 
     history = _workspace_dispatch_history(workspace)
     for item in queue:
@@ -2016,7 +2224,7 @@ def _score_workspace_dispatch_queue(workspace: Path, queue: list[dict], args: ar
     ordered = eligible + skipped
     for rank, item in enumerate(ordered):
         item["scheduler_rank"] = rank
-    return ordered
+    return _finalize_workspace_dispatch_queue_evidence(ordered, args)
 
 
 def _workspace_selected_reason(selected: dict, args: argparse.Namespace) -> dict:
@@ -2108,6 +2316,52 @@ def _workspace_dispatch_limits(args: argparse.Namespace) -> dict:
         "allow_agent": bool(args.allow_agent),
         "push_after_task": False,
         "commit_after_task": False,
+    }
+
+
+def _workspace_dispatch_queue_summary(queue: list[dict], args: argparse.Namespace) -> dict:
+    items = []
+    for item in queue:
+        if not isinstance(item, dict):
+            continue
+        backoff = item.get("backoff") if isinstance(item.get("backoff"), dict) else {}
+        project_lease = item.get("project_lease") if isinstance(item.get("project_lease"), dict) else {}
+        items.append(
+            {
+                "project": item.get("project"),
+                "root": item.get("root"),
+                "scheduler_rank": item.get("scheduler_rank"),
+                "eligible": bool(item.get("eligible", False)),
+                "selected": bool(item.get("selected", False)),
+                "dispatch_status": item.get("dispatch_status"),
+                "score": item.get("score"),
+                "skip_codes": [
+                    str(reason.get("code"))
+                    for reason in item.get("skip_reasons", [])
+                    if isinstance(reason, dict) and reason.get("code")
+                ],
+                "backoff_active": bool(backoff.get("active", False)),
+                "backoff_decision": backoff.get("decision"),
+                "project_lease_status": project_lease.get("status"),
+                "project_lease_active": bool(project_lease.get("active", False)),
+            }
+        )
+    return {
+        "schema_version": 1,
+        "kind": "engineering-harness.workspace-dispatch-queue-summary",
+        "scheduler_policy": _workspace_scheduler_policy(args),
+        "item_count": len(queue),
+        "eligible_count": sum(1 for item in queue if isinstance(item, dict) and item.get("eligible")),
+        "skipped_count": sum(
+            1
+            for item in queue
+            if isinstance(item, dict) and item.get("dispatch_status") == "skipped"
+        ),
+        "selected_project": next(
+            (item.get("project") for item in queue if isinstance(item, dict) and item.get("selected")),
+            None,
+        ),
+        "items": items,
     }
 
 
@@ -2669,6 +2923,57 @@ def write_workspace_dispatch_report(workspace: Path, payload: dict) -> str:
                     "    ```",
                 ]
             )
+        priority = item.get("priority") if isinstance(item.get("priority"), dict) else {}
+        if priority:
+            starvation = (
+                priority.get("starvation_prevention")
+                if isinstance(priority.get("starvation_prevention"), dict)
+                else {}
+            )
+            lines.append(
+                "  - Priority: "
+                f"rank=`{priority.get('scheduler_rank')}` score=`{priority.get('score')}` "
+                f"cooldown=`{str(bool(starvation.get('cooldown_active'))).lower()}` "
+                f"backoff=`{str(bool(starvation.get('nonproductive_backoff_active'))).lower()}`"
+            )
+        resource_budget = item.get("resource_budget") if isinstance(item.get("resource_budget"), dict) else {}
+        if resource_budget:
+            budget = (
+                resource_budget.get("per_invocation")
+                if isinstance(resource_budget.get("per_invocation"), dict)
+                else {}
+            )
+            demand = (
+                resource_budget.get("project_demand")
+                if isinstance(resource_budget.get("project_demand"), dict)
+                else {}
+            )
+            lines.append(
+                "  - Resource budget: "
+                f"max_tasks=`{budget.get('max_tasks')}` time_budget_seconds=`{budget.get('time_budget_seconds')}` "
+                f"pending_tasks=`{demand.get('pending_tasks')}` "
+                f"pending_continuations=`{demand.get('pending_continuations')}`"
+            )
+        project_lease = item.get("project_lease") if isinstance(item.get("project_lease"), dict) else {}
+        if project_lease:
+            lines.append(
+                "  - Project lease: "
+                f"`{project_lease.get('status')}` active=`{str(bool(project_lease.get('active'))).lower()}` "
+                f"protected=`{str(bool(project_lease.get('protected'))).lower()}` "
+                f"owner_pid=`{project_lease.get('owner_pid') or 'none'}`"
+            )
+        retry_backoff = (
+            item.get("retry_backoff_summary")
+            if isinstance(item.get("retry_backoff_summary"), dict)
+            else {}
+        )
+        if retry_backoff:
+            lines.append(
+                "  - Retry/backoff summary: "
+                f"attempts_remaining=`{retry_backoff.get('attempts_remaining')}` "
+                f"retry_exhausted=`{str(bool(retry_backoff.get('retry_exhausted'))).lower()}` "
+                f"backoff=`{retry_backoff.get('backoff_decision') or 'none'}`"
+            )
         backoff = item.get("backoff") if isinstance(item.get("backoff"), dict) else {}
         if backoff:
             lines.append(
@@ -2772,6 +3077,7 @@ def workspace_drive_dispatch(args: argparse.Namespace) -> tuple[int, dict]:
             "finished_at": utc_now(),
             "limits": _workspace_dispatch_limits(args),
             "queue": [],
+            "queue_summary": _workspace_dispatch_queue_summary([], args),
             "eligible_count": 0,
             "skipped_count": 0,
             "selected": None,
@@ -2799,6 +3105,8 @@ def workspace_drive_dispatch(args: argparse.Namespace) -> tuple[int, dict]:
             selected["selected"] = True
             selected["dispatch_status"] = "dispatched"
             selected["selected_reason"] = _workspace_selected_reason(selected, args)
+            selected["priority"] = _workspace_priority_evidence(selected, args)
+            selected["retry_backoff_summary"] = _workspace_retry_backoff_summary(selected)
             selected_project = {
                 "project": selected.get("project"),
                 "root": selected.get("root"),
@@ -2806,6 +3114,10 @@ def workspace_drive_dispatch(args: argparse.Namespace) -> tuple[int, dict]:
                 "scheduler_rank": selected.get("scheduler_rank"),
                 "scheduler_policy": selected.get("scheduler_policy"),
                 "score": selected.get("score"),
+                "priority": selected.get("priority"),
+                "resource_budget": selected.get("resource_budget"),
+                "project_lease": selected.get("project_lease"),
+                "retry_backoff_summary": selected.get("retry_backoff_summary"),
                 "selected_reason": selected.get("selected_reason"),
                 "backoff": selected.get("backoff"),
                 "checkpoint_readiness": selected.get("checkpoint_readiness"),
@@ -2831,6 +3143,7 @@ def workspace_drive_dispatch(args: argparse.Namespace) -> tuple[int, dict]:
                     selected_score=selected.get("score"),
                     project_score=item.get("score"),
                 )
+                item["retry_backoff_summary"] = _workspace_retry_backoff_summary(item)
             drive_args = _workspace_drive_args(args, Path(str(selected["root"])))
             heartbeat_workspace_dispatch_lease(acquisition, activity="workspace-dispatch-driving")
             drive_exit_code, drive_payload = run_project_drive(Path(str(selected["root"])), drive_args)
@@ -2855,6 +3168,7 @@ def workspace_drive_dispatch(args: argparse.Namespace) -> tuple[int, dict]:
             "finished_at": utc_now(),
             "limits": _workspace_dispatch_limits(args),
             "queue": queue,
+            "queue_summary": _workspace_dispatch_queue_summary(queue, args),
             "eligible_count": eligible_count,
             "skipped_count": skipped_count,
             "selected": (
@@ -2866,6 +3180,10 @@ def workspace_drive_dispatch(args: argparse.Namespace) -> tuple[int, dict]:
                     "scheduler_policy": selected.get("scheduler_policy"),
                     "score": selected.get("score"),
                     "score_components": selected.get("score_components"),
+                    "priority": selected.get("priority"),
+                    "resource_budget": selected.get("resource_budget"),
+                    "project_lease": selected.get("project_lease"),
+                    "retry_backoff_summary": selected.get("retry_backoff_summary"),
                     "selected_reason": selected.get("selected_reason"),
                     "backoff": selected.get("backoff"),
                     "checkpoint_readiness": selected.get("checkpoint_readiness"),

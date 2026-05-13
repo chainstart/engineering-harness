@@ -4427,6 +4427,7 @@ class Harness:
                 "latest_report": None,
                 "queue_count": 0,
                 "queue": [],
+                "queue_summary": None,
                 "selected": None,
                 "latest_report_lease": None,
                 "stale_running_recoveries": [],
@@ -4463,6 +4464,9 @@ class Harness:
             "latest_report": latest_report,
             "queue_count": len(queue),
             "queue": queue,
+            "queue_summary": deepcopy(latest_payload.get("queue_summary"))
+            if isinstance(latest_payload, dict) and isinstance(latest_payload.get("queue_summary"), dict)
+            else None,
             "selected": deepcopy(latest_payload.get("selected")) if isinstance(latest_payload, dict) else None,
             "latest_report_lease": latest_report_lease,
             "stale_running_recoveries": deepcopy(latest_payload.get("stale_running_recoveries"))
@@ -4555,6 +4559,18 @@ class Harness:
                     "score": item.get("score"),
                     "score_components": deepcopy(item.get("score_components"))
                     if isinstance(item.get("score_components"), dict)
+                    else {},
+                    "priority": deepcopy(item.get("priority"))
+                    if isinstance(item.get("priority"), dict)
+                    else {},
+                    "resource_budget": deepcopy(item.get("resource_budget"))
+                    if isinstance(item.get("resource_budget"), dict)
+                    else {},
+                    "project_lease": deepcopy(item.get("project_lease"))
+                    if isinstance(item.get("project_lease"), dict)
+                    else {},
+                    "retry_backoff_summary": deepcopy(item.get("retry_backoff_summary"))
+                    if isinstance(item.get("retry_backoff_summary"), dict)
                     else {},
                     "selected_reason": deepcopy(item.get("selected_reason"))
                     if isinstance(item.get("selected_reason"), dict)

@@ -3802,6 +3802,101 @@ def test_workspace_drive_skips_without_mutating_skipped_project(tmp_path, capsys
     assert {reason["code"] for reason in paused_item["skip_reasons"]} == {"paused"}
 
 
+def test_workspace_multi_project_scheduler_e2e(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    failed = init_workspace_project(workspace, "aa-e2e-nonproductive-project")
+    alternate = init_workspace_project(workspace, "bb-e2e-alternate-project")
+    paused = init_workspace_project(workspace, "cc-e2e-paused-project", marker="paused-e2e-marker.txt")
+    configure_workspace_self_iteration_project(failed, "raise SystemExit(7)\n")
+    configure_workspace_self_iteration_project(
+        alternate,
+        workspace_backoff_planner_source(workspace_backoff_stage("e2e-alternate-stage", "e2e-alternate-task")),
+    )
+    assert cli_main(["pause", "--project-root", str(paused), "--reason", "operator"]) == 0
+    capsys.readouterr()
+    paused_snapshot = project_text_snapshot(paused)
+
+    write_workspace_dispatch_lease(workspace, owner_pid=os.getpid())
+    lease_exit, lease_payload = run_workspace_drive_json(
+        capsys,
+        workspace,
+        "--self-iterate",
+        "--max-self-iterations",
+        "1",
+    )
+    assert lease_exit == 1
+    assert lease_payload["status"] == "lease_held"
+    assert lease_payload["queue_summary"]["item_count"] == 0
+    assert lease_payload["lease"]["assessment"]["holder"]["owner_pid"] == os.getpid()
+    assert not (alternate / "e2e-alternate-task.txt").exists()
+    workspace_dispatch_lease_path(workspace).unlink()
+    workspace_dispatch_lease_dir(workspace).rmdir()
+
+    first_exit, first = run_workspace_drive_json(
+        capsys,
+        workspace,
+        "--self-iterate",
+        "--max-self-iterations",
+        "1",
+    )
+    failed_after_first = project_text_snapshot(failed)
+    second_exit, second = run_workspace_drive_json(
+        capsys,
+        workspace,
+        "--self-iterate",
+        "--max-self-iterations",
+        "1",
+    )
+
+    assert first_exit == 1
+    assert first["selected"]["project"] == "aa-e2e-nonproductive-project"
+    assert first["selected"]["project_lease"]["status"] == "idle"
+    assert first["selected"]["resource_budget"]["per_invocation"]["max_self_iterations"] == 1
+    assert second_exit == 0
+    assert second["selected"]["project"] == "bb-e2e-alternate-project"
+    assert second["queue_summary"]["selected_project"] == "bb-e2e-alternate-project"
+    assert second["queue_summary"]["item_count"] == 3
+    assert (alternate / ".engineering/roadmap.yaml").exists()
+    assert project_text_snapshot(failed) == failed_after_first
+    assert project_text_snapshot(paused) == paused_snapshot
+    assert not (paused / "paused-e2e-marker.txt").exists()
+
+    by_project = {item["project"]: item for item in second["queue"]}
+    failed_item = by_project["aa-e2e-nonproductive-project"]
+    paused_item = by_project["cc-e2e-paused-project"]
+    assert failed_item["dispatch_status"] == "skipped"
+    assert failed_item["backoff"]["active"] is True
+    assert failed_item["backoff"]["reason"] == "drive_failed"
+    assert failed_item["priority"]["starvation_prevention"]["nonproductive_backoff_active"] is True
+    assert failed_item["resource_budget"]["per_invocation"]["self_iterate"] is True
+    assert failed_item["project_lease"]["active"] is False
+    assert failed_item["retry_backoff_summary"]["backoff_active"] is True
+    assert failed_item["retry_backoff_summary"]["backoff_reason"] == "drive_failed"
+    assert "paused" in {reason["code"] for reason in paused_item["skip_reasons"]}
+    assert paused_item["score_components"]["blocked"] is True
+
+    sidecar = json.loads((workspace / second["dispatch_report_json"]).read_text(encoding="utf-8"))
+    sidecar_failed = next(item for item in sidecar["queue"] if item["project"] == "aa-e2e-nonproductive-project")
+    assert sidecar["queue_summary"]["selected_project"] == "bb-e2e-alternate-project"
+    assert sidecar_failed["retry_backoff_summary"]["nonproductive_backoff"]["source_report"] == first[
+        "dispatch_report_json"
+    ]
+    report_text = (workspace / second["dispatch_report"]).read_text(encoding="utf-8")
+    assert "Resource budget" in report_text
+    assert "Project lease" in report_text
+    assert "Retry/backoff summary" in report_text
+
+    assert cli_main(["status", "--project-root", str(alternate), "--json"]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    dispatch = status_payload["runtime_dashboard"]["workspace_dispatch"]
+    dashboard_failed = next(item for item in dispatch["queue"] if item["project"] == "aa-e2e-nonproductive-project")
+    assert dispatch["queue_summary"]["selected_project"] == "bb-e2e-alternate-project"
+    assert dashboard_failed["project_lease"]["status"] == "idle"
+    assert dashboard_failed["retry_backoff_summary"]["backoff_active"] is True
+    assert dashboard_failed["resource_budget"]["per_invocation"]["max_self_iterations"] == 1
+
+
 def test_daemon_supervisor_runtime_smoke_restartable_loop_continues_without_duplicate_work(tmp_path, capsys):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
