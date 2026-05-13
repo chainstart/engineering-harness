@@ -7,7 +7,12 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from .core import DEFAULT_EXPERIENCE_PLANS, EXPERIENCE_KEYWORDS, EXPERIENCE_KIND_ALIASES
+from .domain_frontend import (
+    DOMAIN_FRONTEND_GENERATOR_ID,
+    build_domain_frontend_plan,
+    derive_domain_frontend_decision,
+    keyword_matches as domain_frontend_keyword_matches,
+)
 from .goal_intake import normalize_goal_intake
 from .io import write_mapping
 
@@ -188,6 +193,7 @@ def _starter_roadmap(
             "stage_count_requested": stage_count,
             "stage_count_default": DEFAULT_GOAL_STAGE_COUNT,
             "stage_count_max": MAX_GOAL_STAGE_COUNT,
+            "domain_frontend": deepcopy(experience.get("decision_contract", {})),
         },
         "generated_from": {
             "kind": goal_intake["kind"],
@@ -198,6 +204,7 @@ def _starter_roadmap(
             "constraints": constraints,
             "experience_kind": experience["kind"],
             "experience_provided": bool(goal_intake["experience"]["provided"]),
+            "domain_frontend": deepcopy(experience.get("decision_contract", {})),
             "safety_mode": goal_intake["safety"]["mode"],
         },
         "goal": {
@@ -893,26 +900,21 @@ def _experience_plan(
     blueprint_path: str | None,
     explicit_kind: str | None,
 ) -> dict[str, Any]:
-    if explicit_kind:
-        plan = deepcopy(DEFAULT_EXPERIENCE_PLANS[explicit_kind])
-        plan["derived"] = False
-        plan["provided_by"] = "goal-intake"
-        plan["derivation_rationale"] = [
-            f"explicit experience kind: {explicit_kind}",
-            f"profile: {profile}",
-        ]
-        return plan
-
-    kind, rationale = _derive_experience_kind(
+    plan = build_domain_frontend_plan(
         project_name=project_name,
         profile=profile,
         goal_text=goal_text,
         blueprint_path=blueprint_path,
+        explicit_kind=explicit_kind,
+        source="derived",
+        explicit_source="goal-intake",
     )
-    plan = deepcopy(DEFAULT_EXPERIENCE_PLANS[kind])
-    plan["derived"] = True
-    plan["derived_by"] = GOAL_ROADMAP_PLANNER_ID
-    plan["derivation_rationale"] = rationale
+    if explicit_kind:
+        plan["provided_by"] = "goal-intake"
+    else:
+        plan["derived_by"] = GOAL_ROADMAP_PLANNER_ID
+        plan["domain_frontend_generated_by"] = DOMAIN_FRONTEND_GENERATOR_ID
+    plan["derivation_rationale"] = list(plan.get("rationale", []))
     return plan
 
 
@@ -923,38 +925,13 @@ def _derive_experience_kind(
     goal_text: str,
     blueprint_path: str | None,
 ) -> tuple[str, list[str]]:
-    hint_text = " ".join(item for item in (project_name, profile, goal_text, str(blueprint_path or "")) if item).lower()
-    priority = ["submission-review", "multi-role-app", "api-only", "cli-only", "dashboard"]
-    for kind in priority:
-        matches = _keyword_matches(hint_text, EXPERIENCE_KIND_ALIASES[kind])
-        if matches:
-            return kind, _rationale(profile=profile, decision=f"matched {kind} goal hint", matches=matches)
-
-    matches_by_kind = {
-        kind: _keyword_matches(hint_text, keywords)
-        for kind, keywords in EXPERIENCE_KEYWORDS.items()
-    }
-    scores = {kind: len(matches) for kind, matches in matches_by_kind.items()}
-    if profile in {"python-agent", "agent-monorepo"}:
-        scores["dashboard"] += 1
-    if profile in {"trading-research", "evm-security-research", "lean-formalization"}:
-        scores["dashboard"] += 2
-    thresholds = {
-        "submission-review": 2,
-        "multi-role-app": 2,
-        "api-only": 2,
-        "cli-only": 2,
-        "dashboard": 1,
-    }
-    candidates = [kind for kind in priority if scores[kind] >= thresholds[kind]]
-    if candidates:
-        chosen = max(candidates, key=lambda kind: (scores[kind], -priority.index(kind)))
-        return chosen, _rationale(
-            profile=profile,
-            decision=f"matched {chosen} goal signals",
-            matches=matches_by_kind[chosen],
-        )
-    return "dashboard", _rationale(profile=profile, decision="defaulted to dashboard experience", matches=[])
+    decision = derive_domain_frontend_decision(
+        project_name=project_name,
+        profile=profile,
+        goal_text=goal_text,
+        blueprint_path=blueprint_path,
+    )
+    return str(decision.get("experience_kind", "dashboard")), list(decision.get("rationale", []))
 
 
 def _self_iteration_is_appropriate(*, profile: str, goal_text: str) -> bool:
@@ -964,12 +941,7 @@ def _self_iteration_is_appropriate(*, profile: str, goal_text: str) -> bool:
 
 
 def _keyword_matches(text: str, keywords: tuple[str, ...]) -> list[str]:
-    matches: list[str] = []
-    for keyword in keywords:
-        expression = re.escape(keyword.lower()).replace(r"\ ", r"\s+")
-        if re.search(rf"(?<![a-z0-9]){expression}(?![a-z0-9])", text):
-            matches.append(keyword)
-    return matches
+    return domain_frontend_keyword_matches(text, keywords)
 
 
 def _rationale(*, profile: str, decision: str, matches: list[str]) -> list[str]:

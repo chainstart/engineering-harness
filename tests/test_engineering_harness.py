@@ -13,6 +13,11 @@ import pytest
 from engineering_harness.goal_intake import GoalIntakeValidationError, normalize_goal_intake, validate_goal_intake
 from engineering_harness.goal_planner import plan_goal_roadmap
 from engineering_harness.core import Harness, discover_projects, init_project, utc_now
+from engineering_harness.domain_frontend import (
+    DOMAIN_FRONTEND_DECISION_KIND,
+    DOMAIN_FRONTEND_GENERATOR_ID,
+    build_domain_frontend_plan,
+)
 from engineering_harness.executors import (
     DAGGER_ENABLE_ENV,
     DaggerExecutorAdapter,
@@ -2517,6 +2522,103 @@ def test_validate_roadmap_allows_missing_experience_for_backward_compatibility(t
     assert harness.status_summary()["experience"]["source"] == "derived"
 
 
+def test_domain_frontend_generator_dashboard_only_for_autonomous_theorem_prover():
+    plan = build_domain_frontend_plan(
+        project_name="Lean Proof Runner",
+        profile="lean-formalization",
+        goal_text="Build an autonomous theorem prover that searches proofs and records proof artifacts.",
+    )
+
+    assert plan["kind"] == "dashboard"
+    assert plan["domain"] == "autonomous-theorem-prover"
+    assert plan["surface_policy"] == "dashboard-only"
+    assert plan["frontend_required"] is True
+    assert "proof attempt queue" in plan["primary_surfaces"]
+    assert plan["auth"]["required"] is False
+    assert plan["decision_contract"]["kind"] == DOMAIN_FRONTEND_DECISION_KIND
+    assert plan["decision_contract"]["status"] == "required"
+    assert plan["decision_contract"]["generated_by"] == DOMAIN_FRONTEND_GENERATOR_ID
+
+
+def test_domain_frontend_generator_submission_review_return_workflow():
+    plan = build_domain_frontend_plan(
+        project_name="Student Paper Review",
+        profile="python-agent",
+        goal_text="Build a student paper submission, reviewer comments, returned decision, and revision workflow.",
+    )
+
+    assert plan["kind"] == "submission-review"
+    assert plan["domain"] == "student-paper-review"
+    assert plan["surface_policy"] == "submission-review-return"
+    assert "returned work view" in plan["primary_surfaces"]
+    assert plan["auth"]["roles"] == ["student", "reviewer"]
+    assert any("return" in item["id"] for item in plan["e2e_journeys"])
+
+
+def test_domain_frontend_generator_account_role_flows_for_multi_role_system():
+    plan = build_domain_frontend_plan(
+        project_name="Operations Console",
+        profile="node-frontend",
+        goal_text="Build account login, role assignment, admin operator approval, permission denial, and audit flows.",
+    )
+
+    assert plan["kind"] == "multi-role-app"
+    assert plan["domain"] == "multi-role-system"
+    assert plan["surface_policy"] == "account-role-flows"
+    assert plan["auth"]["required"] is True
+    assert "account setup" in plan["primary_surfaces"]
+    assert "role assignment" in plan["primary_surfaces"]
+    assert "access denied state" in plan["primary_surfaces"]
+
+
+def test_domain_frontend_generator_app_specific_views_for_ordinary_software():
+    plan = build_domain_frontend_plan(
+        project_name="Recipe Tracker",
+        profile="node-frontend",
+        goal_text="Build a recipe tracker app with collection, editor, shopping list, empty, and error views.",
+    )
+
+    assert plan["kind"] == "app-specific"
+    assert plan["domain"] == "ordinary-software"
+    assert plan["surface_policy"] == "app-specific-views"
+    assert plan["auth"]["required"] is False
+    assert "primary app workspace" in plan["primary_surfaces"]
+    assert plan["e2e_journeys"][0]["id"] == "user-completes-primary-workflow"
+
+
+def test_domain_frontend_generator_e2e_exposes_roadmap_frontend_tasks_and_status(tmp_path, capsys):
+    project = tmp_path / "proof-dashboard"
+    project.mkdir()
+    proposal = plan_goal_roadmap(
+        project_root=project,
+        project_name="Proof Dashboard",
+        profile="lean-formalization",
+        goal_text="Build an autonomous theorem prover dashboard for proof attempts and local artifacts.",
+        stage_count=1,
+    )
+    engineering_dir = project / ".engineering"
+    engineering_dir.mkdir()
+    roadmap_path = engineering_dir / "roadmap.yaml"
+    roadmap_path.write_text(json.dumps(proposal["roadmap"]), encoding="utf-8")
+
+    harness = Harness(project)
+    frontend = harness.frontend_task_plan()
+    status = harness.status_summary()
+    cli_exit = cli_main(["status", "--project-root", str(project), "--json"])
+    status_payload = json.loads(capsys.readouterr().out)
+
+    assert proposal["roadmap"]["experience"]["decision_contract"]["domain"] == "autonomous-theorem-prover"
+    assert proposal["roadmap"]["planning"]["domain_frontend"]["surface_policy"] == "dashboard-only"
+    assert frontend["status"] == "proposed"
+    assert frontend["domain_frontend"]["domain"] == "autonomous-theorem-prover"
+    assert frontend["milestone"]["domain_frontend"]["status"] == "required"
+    assert status["domain_frontend"]["experience_kind"] == "dashboard"
+    assert status["runtime_dashboard"]["domain_frontend"]["status"] == "required"
+    assert status["runtime_dashboard"]["frontend_experience"]["domain"] == "autonomous-theorem-prover"
+    assert cli_exit == 0
+    assert status_payload["runtime_dashboard"]["domain_frontend"]["domain"] == "autonomous-theorem-prover"
+
+
 @pytest.mark.parametrize(
     ("project_name", "roadmap_updates", "task_title", "expected_kind", "expected_persona", "auth_required"),
     [
@@ -2543,6 +2645,14 @@ def test_validate_roadmap_allows_missing_experience_for_backward_compatibility(t
             "multi-role-app",
             "admin",
             True,
+        ),
+        (
+            "recipe-tracker",
+            {},
+            "Build a recipe tracker app with editor, collection, detail, empty, and error views.",
+            "app-specific",
+            "user",
+            False,
         ),
         (
             "api-service",

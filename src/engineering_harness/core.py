@@ -23,6 +23,19 @@ from .executors import (
     ExecutorTaskContext,
     default_executor_registry,
 )
+from .domain_frontend import (
+    DOMAIN_FRONTEND_DECISION_KIND,
+    DOMAIN_FRONTEND_GENERATOR_ID,
+    DOMAIN_FRONTEND_PLAN_SCHEMA_VERSION,
+    DEFAULT_EXPERIENCE_PLANS as DOMAIN_DEFAULT_EXPERIENCE_PLANS,
+    EXPERIENCE_KEYWORDS as DOMAIN_EXPERIENCE_KEYWORDS,
+    EXPERIENCE_KIND_ALIASES as DOMAIN_EXPERIENCE_KIND_ALIASES,
+    EXPERIENCE_KINDS as DOMAIN_EXPERIENCE_KINDS,
+    annotate_explicit_domain_frontend_plan,
+    build_domain_frontend_plan,
+    derive_domain_frontend_decision,
+    keyword_matches as domain_frontend_keyword_matches,
+)
 from .io import append_jsonl, load_mapping, write_json, write_mapping
 from .profiles import command_policy, default_roadmap
 
@@ -31,7 +44,7 @@ COMPLETED_STATUSES = {"done", "passed", "skipped"}
 BLOCKED_STATUSES = {"blocked", "paused"}
 CONFIG_CANDIDATES = (".engineering/roadmap.yaml", ".engineering/roadmap.json", "ops/engineering/roadmap.yaml")
 PRUNE_DIRS = {".git", "node_modules", ".venv", "venv", ".pytest_cache", "dist", "out", "cache", "artifacts"}
-EXPERIENCE_KINDS = {"dashboard", "submission-review", "multi-role-app", "api-only", "cli-only"}
+EXPERIENCE_KINDS = DOMAIN_EXPERIENCE_KINDS
 POLICY_INPUT_SCHEMA_VERSION = 1
 POLICY_DECISION_SCHEMA_VERSION = 1
 PHASE_STATE_SCHEMA_VERSION = 1
@@ -236,6 +249,9 @@ EXPERIENCE_KEYWORDS: dict[str, tuple[str, ...]] = {
         "observability",
     ),
 }
+DEFAULT_EXPERIENCE_PLANS = DOMAIN_DEFAULT_EXPERIENCE_PLANS
+EXPERIENCE_KIND_ALIASES = DOMAIN_EXPERIENCE_KIND_ALIASES
+EXPERIENCE_KEYWORDS = DOMAIN_EXPERIENCE_KEYWORDS
 FRONTEND_TASK_MILESTONE_ID = "frontend-visualization"
 FRONTEND_TASK_GENERATOR = "engineering-harness-frontend-task-generator"
 SELF_ITERATION_CONTEXT_SCHEMA_VERSION = 1
@@ -347,6 +363,7 @@ SELF_ITERATION_UNSAFE_REQUIREMENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], .
     ("paid service", re.compile(r"\bpaid[- ]?(?:service|services|account|accounts|hosting|deployment|api|subscription)\b")),
 )
 FRONTEND_KIND_LABELS = {
+    "app-specific": "app-specific frontend",
     "dashboard": "operator dashboard",
     "submission-review": "submission review workflow",
     "multi-role-app": "multi-role application",
@@ -354,6 +371,34 @@ FRONTEND_KIND_LABELS = {
     "cli-only": "CLI-first experience",
 }
 FRONTEND_KIND_TASK_GUIDANCE: dict[str, dict[str, Any]] = {
+    "app-specific": {
+        "file_scope": [
+            "src/**",
+            "app/**",
+            "web/**",
+            "frontend/**",
+            "ui/**",
+            "components/**",
+            "tests/**",
+            "docs/**",
+            "templates/**",
+            "package.json",
+            "pyproject.toml",
+        ],
+        "acceptance_terms": ["app-specific", "workspace", "create", "detail", "empty", "error"],
+        "implementation_focus": (
+            "Build or document the app-specific primary workflow using the project's existing UI conventions. "
+            "Cover the main workspace, create or edit flow, detail state, empty state, and error state."
+        ),
+        "journey_candidates": (
+            "tests/e2e/{slug}.spec.ts",
+            "tests/e2e/{slug}.spec.js",
+            "tests/e2e/{slug}.test.ts",
+            "tests/e2e/{slug}.py",
+            "e2e/{slug}.spec.ts",
+            "docs/e2e/{slug}.md",
+        ),
+    },
     "dashboard": {
         "file_scope": [
             "src/**",
@@ -5965,6 +6010,11 @@ continuation stage(s) were appended.
             if isinstance(summary.get("goal_gap_scorecard"), dict)
             else self.goal_gap_scorecard(status_summary=summary, latest_reports=latest_reports)
         )
+        frontend_experience = (
+            deepcopy(summary.get("experience"))
+            if isinstance(summary.get("experience"), dict)
+            else self.frontend_experience_plan()
+        )
         return {
             "schema_version": RUNTIME_DASHBOARD_SCHEMA_VERSION,
             "kind": "engineering-harness.runtime-dashboard",
@@ -5972,6 +6022,8 @@ continuation stage(s) were appended.
             "project": summary.get("project"),
             "root": summary.get("root"),
             "status_source": "engh status --json",
+            "frontend_experience": frontend_experience,
+            "domain_frontend": self._runtime_domain_frontend_payload(frontend_experience),
             "drive_control": self._runtime_drive_control_payload(drive_control),
             "drive_watchdog": deepcopy(drive_control.get("watchdog") if isinstance(drive_control.get("watchdog"), dict) else {}),
             "current_task": current_task,
@@ -5992,6 +6044,33 @@ continuation stage(s) were appended.
             "latest_reports": latest_reports,
             "goal_gap_scorecard": goal_gap_scorecard,
             "goal_gap": self._runtime_goal_gap_payload(summary, latest_reports),
+        }
+
+    def _runtime_domain_frontend_payload(self, experience: dict[str, Any]) -> dict[str, Any]:
+        decision = (
+            deepcopy(experience.get("decision_contract"))
+            if isinstance(experience.get("decision_contract"), dict)
+            else {}
+        )
+        personas = self._string_items(experience.get("personas"))
+        surfaces = self._string_items(experience.get("primary_surfaces"))
+        journeys = [item for item in experience.get("e2e_journeys", []) if isinstance(item, dict)]
+        return {
+            "schema_version": DOMAIN_FRONTEND_PLAN_SCHEMA_VERSION,
+            "kind": "engineering-harness.domain-frontend-runtime-evidence.v1",
+            "status": "required" if bool(experience.get("frontend_required", True)) else "optional",
+            "generated_by": DOMAIN_FRONTEND_GENERATOR_ID,
+            "experience_kind": experience.get("kind"),
+            "domain": experience.get("domain") or decision.get("domain"),
+            "source": experience.get("source"),
+            "derived": bool(experience.get("derived", False)),
+            "required": bool(experience.get("required", True)),
+            "frontend_required": bool(experience.get("frontend_required", True)),
+            "surface_policy": experience.get("surface_policy") or decision.get("surface_policy"),
+            "persona_count": len(personas),
+            "surface_count": len(surfaces),
+            "journey_count": len(journeys),
+            "decision_contract": decision,
         }
 
     def _runtime_drive_control_payload(self, drive_control: dict[str, Any]) -> dict[str, Any]:
@@ -6975,6 +7054,7 @@ continuation stage(s) were appended.
         next_task = self.next_task()
         checkpoint_readiness = self.checkpoint_readiness(self._checkpoint_readiness_task(next_task, drive_control))
         daemon_supervisor_runtime = self._runtime_daemon_supervisor_summary()
+        experience = self.frontend_experience_plan()
         summary = {
             "project": self.roadmap.get("project", self.project_root.name),
             "profile": self.roadmap.get("profile"),
@@ -6984,7 +7064,8 @@ continuation stage(s) were appended.
             "milestones": list(milestones.values()),
             "next_task": self.task_payload(next_task),
             "checkpoint_readiness": checkpoint_readiness,
-            "experience": self.frontend_experience_plan(),
+            "experience": experience,
+            "domain_frontend": deepcopy(experience.get("decision_contract", {})),
             "continuation": self.continuation_summary(),
             "self_iteration": self.self_iteration_summary(),
             "drive_control": drive_control,
@@ -7565,83 +7646,53 @@ continuation stage(s) were appended.
         }
 
     def frontend_experience_plan(self) -> dict[str, Any]:
+        profile = str(self.roadmap.get("profile", "") or "").strip().lower()
+        project_kind = self._roadmap_project_kind()
+        project_name = str(self.roadmap.get("project", self.project_root.name))
+        goal_text = self._roadmap_goal_text()
+        hint_values = [self._roadmap_hint_text(profile=profile, project_kind=project_kind)]
         experience = self.roadmap.get("experience")
         if isinstance(experience, dict):
-            plan = deepcopy(experience)
-            plan["source"] = "explicit"
-            plan["derived"] = False
-            plan["recommendation"] = str(plan.get("kind", "")).strip() or None
-            plan["rationale"] = ["roadmap declares an explicit experience block"]
-            return plan
+            return annotate_explicit_domain_frontend_plan(
+                experience,
+                project_name=project_name,
+                profile=profile,
+                project_kind=project_kind,
+                goal_text=goal_text,
+                hint_values=hint_values,
+                source="explicit",
+            )
         if experience is not None:
             return {
                 "source": "explicit-invalid",
                 "derived": False,
                 "recommendation": None,
                 "kind": None,
+                "required": True,
+                "frontend_required": True,
                 "rationale": ["roadmap declares an experience block, but it is not a mapping"],
             }
 
-        kind, rationale = self._derive_default_experience_kind()
-        plan = deepcopy(DEFAULT_EXPERIENCE_PLANS[kind])
-        plan["source"] = "derived"
-        plan["derived"] = True
-        plan["recommendation"] = kind
-        plan["rationale"] = rationale
-        return plan
+        return build_domain_frontend_plan(
+            project_name=project_name,
+            profile=profile,
+            project_kind=project_kind,
+            goal_text=goal_text,
+            hint_values=hint_values,
+            source="derived",
+        )
 
     def _derive_default_experience_kind(self) -> tuple[str, list[str]]:
         profile = str(self.roadmap.get("profile", "") or "").strip().lower()
         project_kind = self._roadmap_project_kind()
-        hint_text = self._roadmap_hint_text(profile=profile, project_kind=project_kind)
-
-        for kind in ("submission-review", "multi-role-app", "api-only", "cli-only", "dashboard"):
-            aliases = EXPERIENCE_KIND_ALIASES[kind]
-            alias_matches = self._keyword_matches(hint_text, aliases)
-            if alias_matches:
-                return kind, self._experience_rationale(
-                    profile=profile,
-                    project_kind=project_kind,
-                    matched=alias_matches,
-                    decision=f"matched {kind} roadmap hint",
-                )
-
-        matches = {
-            kind: self._keyword_matches(hint_text, keywords)
-            for kind, keywords in EXPERIENCE_KEYWORDS.items()
-        }
-        scores = {kind: len(kind_matches) for kind, kind_matches in matches.items()}
-        if profile in {"python-agent", "agent-monorepo"}:
-            scores["dashboard"] += 1
-        if profile in {"trading-research", "evm-security-research", "lean-formalization"}:
-            scores["dashboard"] += 2
-        if project_kind in {"python", "agent", "evm"}:
-            scores["dashboard"] += 1
-
-        thresholds = {
-            "submission-review": 2,
-            "multi-role-app": 2,
-            "api-only": 2,
-            "cli-only": 2,
-            "dashboard": 1,
-        }
-        priority = ["submission-review", "multi-role-app", "api-only", "cli-only", "dashboard"]
-        candidates = [kind for kind in priority if scores[kind] >= thresholds[kind]]
-        if candidates:
-            chosen = max(candidates, key=lambda kind: (scores[kind], -priority.index(kind)))
-            return chosen, self._experience_rationale(
-                profile=profile,
-                project_kind=project_kind,
-                matched=matches[chosen],
-                decision=f"matched {chosen} roadmap signals",
-            )
-
-        return "dashboard", self._experience_rationale(
+        decision = derive_domain_frontend_decision(
+            project_name=str(self.roadmap.get("project", self.project_root.name)),
             profile=profile,
             project_kind=project_kind,
-            matched=[],
-            decision="defaulted to the operator dashboard plan",
+            goal_text=self._roadmap_goal_text(),
+            hint_values=[self._roadmap_hint_text(profile=profile, project_kind=project_kind)],
         )
+        return str(decision.get("experience_kind", "dashboard")), list(decision.get("rationale", []))
 
     def _experience_rationale(
         self,
@@ -7668,6 +7719,17 @@ continuation stage(s) were appended.
         _, project_kind = guess_profile(self.project_root)
         return project_kind
 
+    def _roadmap_goal_text(self) -> str:
+        goal = self.roadmap.get("goal")
+        if isinstance(goal, dict):
+            return str(goal.get("text") or goal.get("goal") or "")
+        if isinstance(goal, str):
+            return goal
+        continuation = self.roadmap.get("continuation")
+        if isinstance(continuation, dict):
+            return str(continuation.get("goal") or "")
+        return ""
+
     def _roadmap_hint_text(self, *, profile: str, project_kind: str) -> str:
         values: list[str] = [profile, project_kind]
 
@@ -7689,13 +7751,7 @@ continuation stage(s) were appended.
         return " ".join(values).lower()
 
     def _keyword_matches(self, text: str, keywords: tuple[str, ...]) -> list[str]:
-        matches: list[str] = []
-        for keyword in keywords:
-            expression = re.escape(keyword.lower()).replace(r"\ ", r"\s+")
-            pattern = rf"(?<![a-z0-9]){expression}(?![a-z0-9])"
-            if re.search(pattern, text):
-                matches.append(keyword)
-        return matches
+        return domain_frontend_keyword_matches(text, keywords)
 
     def frontend_task_plan(
         self,
@@ -7712,6 +7768,7 @@ continuation stage(s) were appended.
                 "errors": errors,
                 "materialized": False,
                 "experience": experience,
+                "domain_frontend": deepcopy(experience.get("decision_contract", {})),
                 "milestone": None,
                 "tasks": [],
             }
@@ -7730,6 +7787,7 @@ continuation stage(s) were appended.
             "project": str(self.roadmap.get("project", self.project_root.name)),
             "roadmap": str(self.roadmap_path),
             "experience": experience,
+            "domain_frontend": deepcopy(experience.get("decision_contract", {})),
             "milestone": milestone,
             "tasks": tasks,
             "tasks_added": 0,
@@ -7743,11 +7801,13 @@ continuation stage(s) were appended.
     ) -> dict[str, Any]:
         milestones = self.roadmap.get("milestones")
         if milestones is not None and not isinstance(milestones, list):
+            experience = self.frontend_experience_plan()
             return {
                 "status": "error",
                 "message": "`milestones` must be a list before frontend tasks can be materialized",
                 "materialized": False,
-                "experience": self.frontend_experience_plan(),
+                "experience": experience,
+                "domain_frontend": deepcopy(experience.get("decision_contract", {})),
                 "milestone": None,
                 "tasks": [],
             }
@@ -7759,13 +7819,15 @@ continuation stage(s) were appended.
                 break
         if existing_milestone is not None:
             tasks = existing_milestone.get("tasks", []) if isinstance(existing_milestone.get("tasks"), list) else []
+            experience = self.frontend_experience_plan()
             return {
                 "status": "skipped",
                 "message": f"milestone `{milestone_id}` already exists",
                 "materialized": False,
                 "project": str(self.roadmap.get("project", self.project_root.name)),
                 "roadmap": str(self.roadmap_path),
-                "experience": self.frontend_experience_plan(),
+                "experience": experience,
+                "domain_frontend": deepcopy(experience.get("decision_contract", {})),
                 "milestone": existing_milestone,
                 "tasks": tasks,
                 "tasks_added": 0,
@@ -7790,6 +7852,7 @@ continuation stage(s) were appended.
             "tasks_added": len(tasks),
             "experience_kind": proposal["experience"].get("kind"),
             "experience_source": proposal["experience"].get("source"),
+            "domain_frontend": deepcopy(proposal["experience"].get("decision_contract", {})),
         }
         append_jsonl(self.decision_log_path, event)
         return {
@@ -7841,6 +7904,7 @@ continuation stage(s) were appended.
             "generated_at": generated_at,
             "experience_kind": kind,
             "experience_source": experience.get("source"),
+            "domain_frontend": deepcopy(experience.get("decision_contract", {})),
             "tasks": tasks,
         }
 
@@ -8038,9 +8102,13 @@ continuation stage(s) were appended.
             "task_kind": task_kind,
             "experience_kind": experience.get("kind"),
             "experience_source": experience.get("source"),
+            "domain": experience.get("domain"),
+            "surface_policy": experience.get("surface_policy"),
+            "required": bool(experience.get("frontend_required", True)),
             "personas": self._string_items(experience.get("personas")),
             "primary_surfaces": self._string_items(experience.get("primary_surfaces")),
             "auth": experience.get("auth") if isinstance(experience.get("auth"), dict) else {},
+            "decision_contract": deepcopy(experience.get("decision_contract", {})),
             "stack_policy": "use existing project conventions; no required frontend framework",
         }
         if journey is not None:
@@ -8508,6 +8576,25 @@ continuation stage(s) were appended.
         elif kind not in EXPERIENCE_KINDS:
             allowed = ", ".join(sorted(EXPERIENCE_KINDS))
             errors.append(f"experience.kind `{kind}` is not supported; expected one of: {allowed}")
+
+        decision_contract = experience.get("decision_contract")
+        if decision_contract is not None:
+            if not isinstance(decision_contract, dict):
+                errors.append("experience.decision_contract must be a mapping")
+            else:
+                contract_kind = str(decision_contract.get("kind", "")).strip()
+                if contract_kind and contract_kind != DOMAIN_FRONTEND_DECISION_KIND:
+                    errors.append(
+                        "experience.decision_contract.kind "
+                        f"`{contract_kind}` is not supported; expected {DOMAIN_FRONTEND_DECISION_KIND}"
+                    )
+                contract_experience_kind = str(decision_contract.get("experience_kind", "")).strip()
+                if kind and contract_experience_kind and contract_experience_kind != kind:
+                    errors.append(
+                        "experience.decision_contract.experience_kind must match experience.kind"
+                    )
+                if decision_contract.get("status") not in {None, "required"}:
+                    errors.append("experience.decision_contract.status must be `required` when provided")
 
         personas = self._validate_string_list(
             experience.get("personas"),

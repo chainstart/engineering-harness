@@ -223,6 +223,18 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"Stale approvals: {approval_queue.get('stale_count', 0)}")
         runtime_dashboard = summary.get("runtime_dashboard") if isinstance(summary.get("runtime_dashboard"), dict) else {}
         if runtime_dashboard:
+            frontend = (
+                runtime_dashboard.get("domain_frontend")
+                if isinstance(runtime_dashboard.get("domain_frontend"), dict)
+                else {}
+            )
+            if frontend:
+                print(
+                    "Frontend plan: "
+                    f"{frontend.get('experience_kind', 'unknown')} "
+                    f"domain={frontend.get('domain', 'unknown')} "
+                    f"status={frontend.get('status', 'unknown')}"
+                )
             current_task = runtime_dashboard.get("current_task") if isinstance(runtime_dashboard.get("current_task"), dict) else None
             if current_task:
                 phase = current_task.get("phase") or "none"

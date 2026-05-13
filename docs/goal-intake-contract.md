@@ -18,8 +18,8 @@ Use `engineering_harness.goal_intake.normalize_goal_intake` or
 - `constraints`: optional list of local constraints. Whitespace is collapsed and duplicates are
   removed while preserving order.
 - `desired_experience_kind`: optional requested experience kind. Supported values are
-  `dashboard`, `submission-review`, `multi-role-app`, `api-only`, and `cli-only`; common aliases
-  such as `api only` and `cli` normalize to the canonical ids.
+  `dashboard`, `submission-review`, `multi-role-app`, `app-specific`, `api-only`, and `cli-only`;
+  common aliases such as `app`, `api only`, and `cli` normalize to the canonical ids.
 
 ## Normalized Output
 
@@ -72,6 +72,10 @@ the normalized values needed to seed a roadmap.
 
 The local CLI handoff is `plan-goal`, which renders a deterministic starter roadmap from this
 contract. See [Goal Roadmap Planner](goal-roadmap-planner.md).
+
+When `desired_experience_kind` is omitted, roadmap synthesis uses the domain frontend generator to
+derive a required local experience plan. The derived decision is deterministic and appears in the
+generated roadmap as `experience.decision_contract`.
 
 ## Validation Rules
 

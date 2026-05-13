@@ -43,10 +43,36 @@ Use `--force` only when replacing an existing `.engineering/roadmap.yaml`.
 4. `stage-4-unattended-drive-readiness`
 
 Use a smaller stage count when the first roadmap should stay intentionally narrow. `--experience-kind`
-can pin the experience plan to `dashboard`, `submission-review`, `multi-role-app`, `api-only`, or
-`cli-only`; otherwise the planner derives the kind from the project name, profile, goal text, and
-blueprint path. Repeated `--constraint` values are normalized into the goal intake and copied into
-generated task prompts.
+can pin the experience plan to `dashboard`, `submission-review`, `multi-role-app`, `app-specific`,
+`api-only`, or `cli-only`; otherwise the planner derives the kind from the project name, profile,
+goal text, and blueprint path. Repeated `--constraint` values are normalized into the goal intake and
+copied into generated task prompts.
+
+## Domain Frontend Contract
+
+Roadmap generation always carries a required frontend experience plan. The shared
+`engineering_harness.domain_frontend` module emits a local decision contract under
+`experience.decision_contract`, `planning.domain_frontend`, and `generated_from.domain_frontend`.
+The contract records the selected domain, experience kind, rule id, surface policy, rationale,
+matched hints, and local-only constraints.
+
+The default routing is domain-aware:
+
+- autonomous theorem prover or Lean/formalization goals become `dashboard` plans with a
+  `dashboard-only` surface policy for proof attempts and artifacts;
+- student paper systems become `submission-review` plans covering submission, review, returned
+  decisions, revision upload, and timeline state;
+- multi-role systems become `multi-role-app` plans covering account setup, login, role assignment,
+  permission denial, approval handoff, and audit history;
+- ordinary software becomes `app-specific` with primary workspace, create/edit, detail, empty, and
+  error views;
+- API-first and CLI-first goals keep non-browser API or CLI experience contracts with local examples
+  and deterministic journey checks.
+
+`bin/engh frontend-tasks` includes the same decision contract in its proposal/materialization output.
+`bin/engh status --json` exposes it at both top-level `domain_frontend` and
+`runtime_dashboard.domain_frontend`, with the complete annotated plan under
+`runtime_dashboard.frontend_experience`.
 
 ## Generated Roadmap Shape
 

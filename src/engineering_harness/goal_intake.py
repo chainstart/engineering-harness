@@ -10,6 +10,7 @@ from .profiles import PROFILES
 GOAL_INTAKE_SCHEMA_VERSION = 1
 GOAL_INTAKE_KIND = "engineering-harness.goal-intake.v1"
 SUPPORTED_EXPERIENCE_KINDS = {
+    "app-specific",
     "api-only",
     "cli-only",
     "dashboard",
@@ -247,6 +248,9 @@ def _normalize_experience_kind(value: str | None, *, errors: list[str]) -> str |
     aliases = {
         "api": "api-only",
         "api-first": "api-only",
+        "app": "app-specific",
+        "app-specific-views": "app-specific",
+        "application": "app-specific",
         "cli": "cli-only",
         "cli-first": "cli-only",
         "multi-role": "multi-role-app",
