@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -112,6 +113,69 @@ def init_git_repo(project: Path, message: str = "initial") -> None:
     subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=project, check=True)
     subprocess.run(["git", "add", "-A"], cwd=project, check=True)
     subprocess.run(["git", "commit", "-m", message], cwd=project, check=True, capture_output=True, text=True)
+
+
+def init_workspace_project(workspace: Path, dirname: str, *, name: str | None = None, marker: str | None = None) -> Path:
+    project = workspace / dirname
+    project.mkdir()
+    init_project(project, "python-agent", name=name or dirname)
+    if marker:
+        roadmap_path = project / ".engineering/roadmap.yaml"
+        roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+        roadmap["milestones"][0]["tasks"][0]["acceptance"][0]["command"] = (
+            f"python3 -c \"from pathlib import Path; Path('{marker}').write_text('ok')\""
+        )
+        roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    return project
+
+
+def workspace_dispatch_lease_dir(workspace: Path) -> Path:
+    return workspace / ".engineering/state/workspace-dispatch-lease"
+
+
+def workspace_dispatch_lease_path(workspace: Path) -> Path:
+    return workspace_dispatch_lease_dir(workspace) / "lease.json"
+
+
+def write_workspace_dispatch_lease(
+    workspace: Path,
+    *,
+    owner_pid: int,
+    heartbeat_at: str | None = None,
+    stale_after_seconds: int = 3600,
+) -> dict:
+    now = utc_now()
+    payload = {
+        "schema_version": 1,
+        "kind": "engineering-harness.workspace-dispatch-lease",
+        "status": "running",
+        "workspace": str(workspace.resolve()),
+        "owner_pid": owner_pid,
+        "started_at": heartbeat_at or now,
+        "last_heartbeat_at": heartbeat_at or now,
+        "heartbeat_count": 1,
+        "selected_project": None,
+        "command_options": {
+            "workspace": str(workspace.resolve()),
+            "max_depth": 3,
+            "max_tasks": 1,
+            "allow_live": False,
+            "allow_manual": False,
+            "allow_agent": False,
+            "push_after_task": False,
+            "commit_after_task": False,
+            "lease_stale_after_seconds": stale_after_seconds,
+        },
+        "stale_after_seconds": stale_after_seconds,
+        "current_activity": "test",
+    }
+    lease_dir = workspace_dispatch_lease_dir(workspace)
+    lease_dir.mkdir(parents=True, exist_ok=True)
+    workspace_dispatch_lease_path(workspace).write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return payload
 
 
 def report_policy_evidence(project: Path, result: dict) -> dict:
@@ -1171,6 +1235,134 @@ def test_harness_can_repair_after_failed_acceptance(tmp_path):
     assert phases == ["acceptance-1", "repair-1", "acceptance-2"]
 
 
+def test_failure_isolation_records_acceptance_failure_after_repair(tmp_path):
+    project = tmp_path / "failure-isolation-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="failure-isolation-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["max_attempts"] = 1
+    task["max_task_iterations"] = 2
+    task["repair"] = [
+        {
+            "name": "repair marker",
+            "command": "python3 -c \"from pathlib import Path; Path('repair.txt').write_text('fixed')\"",
+        }
+    ]
+    task["acceptance"][0]["command"] = "python3 -c \"raise SystemExit(3)\""
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    result = harness.run_task(harness.next_task(), allow_agent=True)
+
+    assert result["status"] == "failed"
+    assert [run["phase"] for run in result["runs"]] == ["acceptance-1", "repair-1", "acceptance-2"]
+    manifest = task_manifest(project, result)
+    isolation = manifest["failure_isolation"]
+    assert result["failure_isolation"] == isolation
+    assert isolation["schema_version"] == 1
+    assert isolation["task_id"] == "tests"
+    assert isolation["status"] == "failed"
+    assert isolation["phase"] == "acceptance-2"
+    assert isolation["failure_kind"] == "acceptance_failure"
+    assert isolation["retry_exhausted"] is True
+    assert isolation["retry_exhaustion"]["repair_iteration_exhausted"] is True
+    assert isolation["retry_exhaustion"]["task_attempt_exhausted"] is True
+    assert isolation["report_paths"]["task_report"] == result["report"]
+    assert isolation["report_paths"]["task_manifest"] == result["manifest"]
+    assert isolation["relevant_report_paths"] == [result["report"], result["manifest"]]
+    assert isolation["blocking_policy_decisions"] == []
+    assert isolation["file_scope_violations"] == []
+    assert "acceptance-2" in isolation["local_next_action"]
+
+    summary = Harness(project).status_summary()["failure_isolation"]
+    assert summary["unresolved_count"] == 1
+    assert summary["latest_isolated_failures"][0]["task_id"] == "tests"
+    assert summary["latest_isolated_failures"][0]["manifest_path"] == result["manifest"]
+
+
+def test_failure_isolation_records_policy_block(tmp_path):
+    project = tmp_path / "failure-isolation-policy-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="failure-isolation-policy-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0]["command"] = "curl https://example.com"
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    result = harness.run_task(harness.next_task())
+
+    assert result["status"] == "blocked"
+    manifest = task_manifest(project, result)
+    isolation = manifest["failure_isolation"]
+    assert isolation["task_id"] == "tests"
+    assert isolation["phase"] == "acceptance-1"
+    assert isolation["failure_kind"] == "policy_block"
+    assert isolation["retry_exhausted"] is False
+    assert isolation["blocking_policy_decisions"][0]["kind"] == "command_policy"
+    assert isolation["blocking_policy_decisions"][0]["reason"] == "command prefix is not allowlisted"
+    assert "blocking policy" in isolation["local_next_action"]
+
+
+def test_failure_isolation_records_file_scope_violation(tmp_path):
+    project = tmp_path / "failure-isolation-file-scope-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="failure-isolation-file-scope-project")
+    init_git_repo(project)
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["file_scope"] = ["src/**"]
+    task["implementation"] = [
+        {
+            "name": "write unscoped file",
+            "command": "python3 -c \"from pathlib import Path; Path('outside.txt').write_text('outside')\"",
+        }
+    ]
+    task["acceptance"][0]["command"] = "python3 -c \"print('acceptance ok')\""
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    result = harness.run_task(harness.next_task(), allow_agent=True)
+
+    assert result["status"] == "failed"
+    manifest = task_manifest(project, result)
+    isolation = manifest["failure_isolation"]
+    assert isolation["phase"] == "file-scope-guard"
+    assert isolation["failure_kind"] == "file_scope_violation"
+    assert isolation["file_scope_violations"] == ["outside.txt"]
+    assert isolation["blocking_policy_decisions"][0]["kind"] == "file_scope_guard"
+    assert "file-scope violations" in isolation["local_next_action"]
+
+
+def test_status_json_includes_latest_isolated_failures(tmp_path, capsys):
+    project = tmp_path / "isolated-failure-status-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="isolated-failure-status-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["max_attempts"] = 1
+    task["acceptance"][0]["command"] = "python3 -c \"raise SystemExit(4)\""
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    result = Harness(project).run_task(Harness(project).next_task())
+
+    assert cli_main(["status", "--project-root", str(project), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    isolation = payload["failure_isolation"]
+    assert isolation["schema_version"] == 1
+    assert isolation["unresolved_count"] == 1
+    latest = isolation["latest_isolated_failures"][0]
+    assert latest["task_id"] == "tests"
+    assert latest["status"] == "failed"
+    assert latest["failure_kind"] == "acceptance_failure"
+    assert latest["manifest_path"] == result["manifest"]
+    assert latest["report_path"] == result["report"]
+
+
 def test_harness_runs_e2e_after_acceptance(tmp_path):
     project = tmp_path / "agent-project"
     project.mkdir()
@@ -1867,6 +2059,227 @@ def test_drive_runs_until_roadmap_is_empty(tmp_path):
     assert list((project / ".engineering/reports/tasks/drives").glob("*-drive.md"))
 
 
+def test_workspace_dispatch_runs_one_project_in_deterministic_order(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    zeta = init_workspace_project(workspace, "zeta-project", marker="zeta-marker.txt")
+    alpha = init_workspace_project(workspace, "alpha-project", marker="alpha-marker.txt")
+
+    assert cli_main(["workspace-drive", "--workspace", str(workspace), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "dispatched"
+    assert [item["project"] for item in payload["queue"]] == ["alpha-project", "zeta-project"]
+    assert payload["selected"]["project"] == "alpha-project"
+    assert payload["eligible_count"] == 2
+    assert (alpha / "alpha-marker.txt").read_text(encoding="utf-8") == "ok"
+    assert not (zeta / "zeta-marker.txt").exists()
+
+    zeta_item = next(item for item in payload["queue"] if item["project"] == "zeta-project")
+    assert zeta_item["eligible"] is True
+    assert zeta_item["dispatch_status"] == "skipped"
+    assert {reason["code"] for reason in zeta_item["skip_reasons"]} == {"one_project_per_invocation"}
+
+    report = workspace / payload["dispatch_report"]
+    sidecar = workspace / payload["dispatch_report_json"]
+    assert report.exists()
+    assert sidecar.exists()
+    report_text = report.read_text(encoding="utf-8")
+    assert "Workspace Drive Dispatch Report" in report_text
+    assert "one_project_per_invocation" in report_text
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["status"] == "dispatched"
+
+
+def test_workspace_dispatch_rejects_fresh_lease(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    project = init_workspace_project(workspace, "fresh-lease-project", marker="fresh-marker.txt")
+    lease = write_workspace_dispatch_lease(workspace, owner_pid=os.getpid())
+
+    assert cli_main(["workspace-drive", "--workspace", str(workspace), "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "lease_held"
+    assert payload["queue"] == []
+    assert payload["lease"]["status"] == "held"
+    assert payload["lease"]["acquired"] is False
+    assert payload["lease"]["assessment"]["pid_alive"] is True
+    assert payload["lease"]["assessment"]["holder"]["owner_pid"] == lease["owner_pid"]
+    assert (workspace / payload["dispatch_report"]).exists()
+    assert (workspace / payload["dispatch_report_json"]).exists()
+    assert "Workspace Dispatch Lease" in (workspace / payload["dispatch_report"]).read_text(encoding="utf-8")
+    sidecar = json.loads((workspace / payload["dispatch_report_json"]).read_text(encoding="utf-8"))
+    assert sidecar["status"] == "lease_held"
+    assert sidecar["lease"]["assessment"]["holder"]["workspace"] == str(workspace.resolve())
+    assert workspace_dispatch_lease_path(workspace).exists()
+    assert not (project / "fresh-marker.txt").exists()
+
+
+def test_workspace_dispatch_recovers_stale_pid_lease(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    project = init_workspace_project(workspace, "stale-pid-project", marker="stale-pid-marker.txt")
+    write_workspace_dispatch_lease(workspace, owner_pid=unused_pid())
+
+    assert cli_main(["workspace-drive", "--workspace", str(workspace), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "dispatched"
+    assert payload["selected"]["project"] == "stale-pid-project"
+    assert payload["lease"]["status"] == "released"
+    assert payload["lease"]["recovered"] is True
+    assert payload["lease"]["recovery"]["reason"] == "pid_gone"
+    assert payload["lease"]["selected_project"]["project"] == "stale-pid-project"
+    assert (project / "stale-pid-marker.txt").read_text(encoding="utf-8") == "ok"
+    assert not workspace_dispatch_lease_dir(workspace).exists()
+
+
+def test_workspace_dispatch_recovers_stale_heartbeat_lease(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    project = init_workspace_project(workspace, "stale-heartbeat-project", marker="stale-heartbeat-marker.txt")
+    write_workspace_dispatch_lease(
+        workspace,
+        owner_pid=os.getpid(),
+        heartbeat_at="2000-01-01T00:00:00Z",
+        stale_after_seconds=1,
+    )
+
+    assert cli_main(["workspace-drive", "--workspace", str(workspace), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "dispatched"
+    assert payload["lease"]["status"] == "released"
+    assert payload["lease"]["recovery"]["reason"] == "heartbeat_stale"
+    assert payload["lease"]["recovery"]["assessment"]["pid_alive"] is True
+    assert payload["lease"]["heartbeat_count"] >= 4
+    assert (project / "stale-heartbeat-marker.txt").read_text(encoding="utf-8") == "ok"
+    assert not workspace_dispatch_lease_dir(workspace).exists()
+
+
+def test_workspace_dispatch_releases_lease_on_completion_with_json_report_evidence(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    project = init_workspace_project(workspace, "release-project", marker="release-marker.txt")
+
+    assert cli_main(["workspace-drive", "--workspace", str(workspace), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "dispatched"
+    assert payload["lease"]["status"] == "released"
+    assert payload["lease"]["release"]["status"] == "released"
+    assert payload["lease"]["owner_pid"] == os.getpid()
+    assert payload["lease"]["selected_project"]["project"] == "release-project"
+    assert payload["lease"]["command_options"]["allow_live"] is False
+    assert payload["lease"]["command_options"]["allow_manual"] is False
+    assert payload["lease"]["command_options"]["allow_agent"] is False
+    assert payload["limits"]["push_after_task"] is False
+    assert payload["limits"]["commit_after_task"] is False
+    assert payload["lease"]["heartbeat_count"] >= 4
+    report_text = (workspace / payload["dispatch_report"]).read_text(encoding="utf-8")
+    assert "Machine-readable lease" in report_text
+    sidecar = json.loads((workspace / payload["dispatch_report_json"]).read_text(encoding="utf-8"))
+    assert sidecar["lease"]["status"] == "released"
+    assert (project / "release-marker.txt").read_text(encoding="utf-8") == "ok"
+    assert not workspace_dispatch_lease_dir(workspace).exists()
+
+
+def test_workspace_dispatch_queue_explains_safety_skips(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    paused = init_workspace_project(workspace, "paused-project", marker="paused-marker.txt")
+    cancelled = init_workspace_project(workspace, "cancelled-project", marker="cancelled-marker.txt")
+    stale = init_workspace_project(workspace, "stale-project", marker="stale-marker.txt")
+    approval = init_workspace_project(workspace, "approval-project", marker="approval-marker.txt")
+    missing = workspace / "candidate-without-roadmap"
+    missing.mkdir()
+    (missing / "package.json").write_text("{}", encoding="utf-8")
+    invalid = workspace / "invalid-project"
+    (invalid / ".engineering").mkdir(parents=True)
+    (invalid / ".engineering/roadmap.yaml").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "project": "invalid-project",
+                "profile": "python-agent",
+                "milestones": [{"id": "broken", "tasks": [{"id": "broken-task"}]}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    outside_roadmap = tmp_path / "outside-roadmap.json"
+    outside_roadmap.write_text(
+        json.dumps(roadmap_without_experience("outside-roadmap-project", task_title="Outside scope")),
+        encoding="utf-8",
+    )
+    outside = workspace / "roadmap-symlink-project"
+    (outside / ".engineering").mkdir(parents=True)
+    (outside / ".engineering/roadmap.yaml").symlink_to(outside_roadmap)
+
+    assert cli_main(["pause", "--project-root", str(paused), "--reason", "test"]) == 0
+    assert cli_main(["cancel", "--project-root", str(cancelled), "--reason", "test"]) == 0
+    stale_harness = Harness(stale)
+    assert stale_harness.start_drive()["started"] is True
+    stale_state = harness_state(stale)
+    stale_state["drive_control"]["pid"] = unused_pid()
+    write_harness_state(stale, stale_state)
+
+    approval_roadmap_path = approval / ".engineering/roadmap.yaml"
+    approval_roadmap = json.loads(approval_roadmap_path.read_text(encoding="utf-8"))
+    approval_roadmap["milestones"][0]["tasks"][0]["manual_approval_required"] = True
+    approval_roadmap_path.write_text(json.dumps(approval_roadmap), encoding="utf-8")
+    assert cli_main(["drive", "--project-root", str(approval)]) == 1
+    capsys.readouterr()
+
+    assert cli_main(["workspace-drive", "--workspace", str(workspace), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "no_eligible_project"
+    by_project = {item["project"]: item for item in payload["queue"]}
+
+    def skip_codes(project_name: str) -> set[str]:
+        return {reason["code"] for reason in by_project[project_name]["skip_reasons"]}
+
+    assert "paused" in skip_codes("paused-project")
+    assert "cancelled" in skip_codes("cancelled-project")
+    assert "stale_running" in skip_codes("stale-project")
+    assert "waiting_on_approvals" in skip_codes("approval-project")
+    assert "missing_roadmap" in skip_codes("candidate-without-roadmap")
+    assert "invalid_roadmap" in skip_codes("invalid-project")
+    assert "outside_local_scope" in skip_codes("roadmap-symlink-project")
+    assert not (paused / "paused-marker.txt").exists()
+    assert not (cancelled / "cancelled-marker.txt").exists()
+    assert not (stale / "stale-marker.txt").exists()
+    assert not (approval / "approval-marker.txt").exists()
+    assert (workspace / payload["dispatch_report"]).exists()
+
+
+def test_workspace_drive_skips_without_mutating_skipped_project(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    paused = init_workspace_project(workspace, "aa-paused-project", marker="paused-marker.txt")
+    eligible = init_workspace_project(workspace, "bb-eligible-project", marker="eligible-marker.txt")
+    assert cli_main(["pause", "--project-root", str(paused), "--reason", "operator"]) == 0
+    capsys.readouterr()
+
+    paused_state_path = paused / ".engineering/state/harness-state.json"
+    paused_roadmap_path = paused / ".engineering/roadmap.yaml"
+    state_before = paused_state_path.read_text(encoding="utf-8")
+    roadmap_before = paused_roadmap_path.read_text(encoding="utf-8")
+
+    assert cli_main(["workspace-drive", "--workspace", str(workspace), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["selected"]["project"] == "bb-eligible-project"
+    assert (eligible / "eligible-marker.txt").read_text(encoding="utf-8") == "ok"
+    assert not (paused / "paused-marker.txt").exists()
+    assert paused_state_path.read_text(encoding="utf-8") == state_before
+    assert paused_roadmap_path.read_text(encoding="utf-8") == roadmap_before
+    paused_item = next(item for item in payload["queue"] if item["project"] == "aa-paused-project")
+    assert paused_item["dispatch_status"] == "skipped"
+    assert {reason["code"] for reason in paused_item["skip_reasons"]} == {"paused"}
+
+
 def test_drive_pause_resume_and_cancel_controls_are_durable(tmp_path):
     project = tmp_path / "paused-project"
     project.mkdir()
@@ -2110,6 +2523,206 @@ def test_approval_queue_unblocks_manual_live_and_agent_gates(
     state = json.loads((project / ".engineering/state/harness-state.json").read_text(encoding="utf-8"))
     assert state["approval_queue"]["items"][approval["id"]]["status"] == "consumed"
     assert state["tasks"]["tests"]["status"] == "passed"
+
+
+@pytest.mark.parametrize(
+    ("gate", "approval_kind", "decision_kind"),
+    [
+        ("manual", "manual", "manual_approval"),
+        ("agent", "agent", "agent_approval"),
+        ("live", "live", "live_approval"),
+    ],
+)
+def test_approval_lease_records_fingerprints_for_manual_agent_and_live(tmp_path, gate, approval_kind, decision_kind):
+    project = tmp_path / f"{gate}-approval-lease-project"
+    project.mkdir()
+    init_project(project, "python-agent", name=f"{gate}-approval-lease-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["acceptance"][0]["command"] = "python3 -c \"print('lease ok')\""
+    if gate == "manual":
+        task["manual_approval_required"] = True
+    elif gate == "agent":
+        task["agent_approval_required"] = True
+    elif gate == "live":
+        task["acceptance"][0]["command"] += " --live"
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    result = Harness(project).run_task(Harness(project).next_task())
+    assert result["status"] == "blocked"
+    state = harness_state(project)
+    approval = next(item for item in state["approval_queue"]["items"].values() if item["status"] == "pending")
+
+    assert approval["approval_kind"] == approval_kind
+    assert approval["decision_kind"] == decision_kind
+    assert len(approval["approval_fingerprint"]) == 64
+    assert approval["approval_fingerprint_version"] == 1
+    assert approval["approval_fingerprint_payload"]["task"]["id"] == "tests"
+    assert approval["approval_fingerprint_payload"]["approval"]["approval_kind"] == approval_kind
+    assert approval["lease_ttl_seconds"] == 3600
+    assert approval["lease_started_at"] is None
+    assert approval["lease_expires_at"] is None
+
+    approved = Harness(project).approve_approval(approval["id"], reason="lease test")
+    lease = approved["approval"]
+    assert approved["status"] == "approved"
+    assert lease["lease_started_at"]
+    assert lease["lease_expires_at"]
+    assert lease["approval_fingerprint"] == approval["approval_fingerprint"]
+
+
+def test_approval_lease_requeues_changed_command_after_approval(tmp_path, capsys):
+    project = tmp_path / "changed-command-approval-lease-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="changed-command-approval-lease-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["acceptance"][0]["name"] = "live marker"
+    task["acceptance"][0]["command"] = (
+        "python3 -c \"from pathlib import Path; Path('first.txt').write_text('first')\" --live"
+    )
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    assert cli_main(["drive", "--project-root", str(project)]) == 1
+    state = harness_state(project)
+    first = next(item for item in state["approval_queue"]["items"].values() if item["status"] == "pending")
+    assert cli_main(["approve", "--project-root", str(project), first["id"], "--reason", "approve first command"]) == 0
+
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0]["command"] = (
+        "python3 -c \"from pathlib import Path; Path('second.txt').write_text('second')\" --live"
+    )
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    capsys.readouterr()
+    assert cli_main(["drive", "--project-root", str(project), "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["status"] == "blocked"
+    assert not (project / "first.txt").exists()
+    assert not (project / "second.txt").exists()
+    state = harness_state(project)
+    approvals = state["approval_queue"]["items"]
+    stale = [item for item in approvals.values() if item["status"] == "stale"]
+    pending = [item for item in approvals.values() if item["status"] == "pending"]
+    assert len(stale) == 1
+    assert len(pending) == 1
+    assert stale[0]["id"] == first["id"]
+    assert stale[0]["stale_reason"] == "approval fingerprint mismatch: current policy decision changed"
+    assert stale[0]["approval_fingerprint"] != pending[0]["approval_fingerprint"]
+
+    manifest = task_manifest(project, payload["results"][0])
+    assert manifest["approval_queue"]["stale_count"] == 1
+    assert manifest["approval_queue"]["pending_count"] == 1
+    assert manifest["approval_queue"]["stale_reasons"] == {
+        "approval fingerprint mismatch: current policy decision changed": 1
+    }
+    assert payload["approval_queue"]["stale_count"] == 1
+    assert "## Approval Leases" in (project / payload["drive_report"]).read_text(encoding="utf-8")
+
+    assert cli_main(["approvals", "--project-root", str(project), "--json"]) == 0
+    approvals_payload = json.loads(capsys.readouterr().out)
+    assert approvals_payload["stale_count"] == 1
+    assert approvals_payload["pending_count"] == 1
+    assert cli_main(["status", "--project-root", str(project), "--json"]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    assert status_payload["approval_queue"]["stale_count"] == 1
+
+
+def test_approval_fingerprint_stales_executor_prompt_change_after_approval(tmp_path):
+    project = tmp_path / "prompt-approval-fingerprint-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="prompt-approval-fingerprint-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["acceptance"][0] = {"name": "agent work", "executor": "codex", "prompt": "First prompt."}
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    assert cli_main(["drive", "--project-root", str(project)]) == 1
+    state = harness_state(project)
+    approval = next(item for item in state["approval_queue"]["items"].values() if item["status"] == "pending")
+    assert approval["decision_kind"] == "executor_approval"
+    assert cli_main(["approve", "--project-root", str(project), approval["id"], "--reason", "approve first prompt"]) == 0
+
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0]["prompt"] = "Second prompt."
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    assert cli_main(["drive", "--project-root", str(project)]) == 1
+    state = harness_state(project)
+    stale = [item for item in state["approval_queue"]["items"].values() if item["status"] == "stale"]
+    pending = [item for item in state["approval_queue"]["items"].values() if item["status"] == "pending"]
+    assert len(stale) == 1
+    assert len(pending) == 1
+    assert stale[0]["stale_reason"] == "approval fingerprint mismatch: current policy decision changed"
+    assert pending[0]["decision_kind"] == "executor_approval"
+
+
+def test_approval_lease_marks_expired_approval_stale_and_requeues(tmp_path):
+    project = tmp_path / "expired-approval-lease-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="expired-approval-lease-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["approval_leases"] = {"ttl_seconds": 1}
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["manual_approval_required"] = True
+    task["acceptance"][0]["command"] = "python3 -c \"from pathlib import Path; Path('expired.txt').write_text('no')\""
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    assert cli_main(["drive", "--project-root", str(project)]) == 1
+    state = harness_state(project)
+    approval = next(item for item in state["approval_queue"]["items"].values() if item["status"] == "pending")
+    assert cli_main(["approve", "--project-root", str(project), approval["id"], "--reason", "short lease"]) == 0
+    state = harness_state(project)
+    state["approval_queue"]["items"][approval["id"]]["lease_expires_at"] = "2000-01-01T00:00:00Z"
+    write_harness_state(project, state)
+
+    assert cli_main(["drive", "--project-root", str(project)]) == 1
+    state = harness_state(project)
+    stale = [item for item in state["approval_queue"]["items"].values() if item["status"] == "stale"]
+    pending = [item for item in state["approval_queue"]["items"].values() if item["status"] == "pending"]
+    assert len(stale) == 1
+    assert len(pending) == 1
+    assert stale[0]["stale_reason"] == "approval lease expired at 2000-01-01T00:00:00Z"
+    assert pending[0]["lease_ttl_seconds"] == 1
+    assert not (project / "expired.txt").exists()
+
+
+def test_approval_lease_consumed_approval_does_not_satisfy_future_gate(tmp_path):
+    project = tmp_path / "consumed-approval-lease-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="consumed-approval-lease-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["acceptance"][0]["command"] = (
+        "python3 -c \"from pathlib import Path; Path('consumed.txt').write_text('ok')\" --live"
+    )
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    assert cli_main(["drive", "--project-root", str(project)]) == 1
+    state = harness_state(project)
+    approval = next(item for item in state["approval_queue"]["items"].values() if item["status"] == "pending")
+    assert cli_main(["approve", "--project-root", str(project), approval["id"], "--reason", "consume once"]) == 0
+    assert cli_main(["drive", "--project-root", str(project)]) == 0
+    state = harness_state(project)
+    assert state["approval_queue"]["items"][approval["id"]]["status"] == "consumed"
+    assert (project / "consumed.txt").read_text(encoding="utf-8") == "ok"
+
+    (project / "consumed.txt").unlink()
+    state["tasks"]["tests"]["status"] = "pending"
+    write_harness_state(project, state)
+
+    assert cli_main(["drive", "--project-root", str(project)]) == 1
+    state = harness_state(project)
+    approvals = state["approval_queue"]["items"]
+    assert approvals[approval["id"]]["status"] == "consumed"
+    assert len([item for item in approvals.values() if item["status"] == "pending"]) == 1
+    assert not (project / "consumed.txt").exists()
 
 
 def test_drive_can_commit_after_each_completed_task(tmp_path):
@@ -2532,6 +3145,67 @@ def test_drive_rolling_stops_when_continuation_is_exhausted(tmp_path):
     assert "no unmaterialized continuation stage remains" in text
 
 
+def test_rolling_drive_stops_on_unresolved_isolated_failure_before_self_iteration(tmp_path, capsys):
+    project = tmp_path / "isolated-failure-rolling-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="isolated-failure-rolling-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["max_attempts"] = 1
+    task["acceptance"][0]["command"] = "python3 -c \"raise SystemExit(5)\""
+    roadmap["continuation"] = {"enabled": True, "goal": "Continue autonomously.", "stages": []}
+    roadmap["self_iteration"] = {
+        "enabled": True,
+        "objective": "Add another continuation stage.",
+        "planner": {"name": "planner", "command": "python3 planner.py"},
+    }
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    (project / "planner.py").write_text(
+        """
+import json
+from pathlib import Path
+
+roadmap_path = Path(".engineering/roadmap.yaml")
+roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+roadmap.setdefault("continuation", {"enabled": True, "stages": []}).setdefault("stages", []).append(
+    {"id": "should-not-be-added", "title": "Should Not Be Added", "tasks": []}
+)
+roadmap_path.write_text(json.dumps(roadmap, indent=2), encoding="utf-8")
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    failed = Harness(project).run_task(Harness(project).next_task())
+    assert failed["status"] == "failed"
+
+    exit_code = cli_main(
+        [
+            "drive",
+            "--project-root",
+            str(project),
+            "--rolling",
+            "--self-iterate",
+            "--max-self-iterations",
+            "1",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "isolated_failure"
+    assert payload["results"] == []
+    assert payload["continuations"] == []
+    assert payload["self_iterations"] == []
+    assert payload["failure_isolation"]["unresolved_count"] == 1
+    updated = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    assert updated["continuation"]["stages"] == []
+    report_text = (project / payload["drive_report"]).read_text(encoding="utf-8")
+    assert "## Failure Isolation" in report_text
+    assert "should-not-be-added" not in report_text
+
+
 def self_iteration_guard_project(tmp_path: Path, *, max_stages_per_iteration: int = 1) -> tuple[Path, Path]:
     project = tmp_path / "agent-project"
     project.mkdir()
@@ -2583,6 +3257,14 @@ def valid_self_iteration_stage(stage_id: str = "guard-stage", task_id: str = "gu
             }
         ],
     }
+
+
+def append_existing_continuation_stage(roadmap_path: Path, stage: dict) -> dict:
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap.setdefault("continuation", {"enabled": True, "goal": "Continue autonomously.", "stages": []})
+    roadmap["continuation"].setdefault("stages", []).append(stage)
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    return roadmap
 
 
 def write_self_iteration_guard_planner(project: Path, stages: list[dict], *, mutation: str = "") -> None:
@@ -2761,6 +3443,33 @@ def test_self_iteration_context_pack_snapshot_report_and_result(tmp_path):
     assert context["summary"]["source_file_count"] >= 1
 
 
+def test_duplicate_plan_context_pack_includes_bounded_duplicate_summary(tmp_path):
+    project, roadmap_path = self_iteration_context_pack_project(tmp_path)
+    existing_stage = valid_self_iteration_stage("existing-context-stage", "existing-context-task")
+    existing_stage["tasks"][0].pop("implementation")
+    existing_stage["tasks"][0].pop("repair")
+    append_existing_continuation_stage(roadmap_path, existing_stage)
+    captured: dict = {}
+
+    result = Harness(project, executor_registry=context_pack_planner_registry(captured, "context-pack-distinct")).run_self_iteration(
+        reason="duplicate-summary"
+    )
+
+    assert result["status"] == "planned"
+    context = captured["context"]
+    duplicate_plan = context["duplicate_plan"]
+    assert duplicate_plan["algorithm"] == "sha256:self-iteration-stage-plan:v1"
+    assert duplicate_plan["stage_count"] == 1
+    assert duplicate_plan["included_count"] == 1
+    assert duplicate_plan["stages"][0]["stage_id"] == "existing-context-stage"
+    assert len(duplicate_plan["stages"][0]["fingerprint"]) == 64
+    assert len(duplicate_plan["stages"][0]["identity_fingerprint"]) == 64
+    assert duplicate_plan["stages"][0]["task_ids"] == ["existing-context-task"]
+    assert context["summary"]["duplicate_plan_fingerprint_count"] == 1
+    assert context["summary"]["duplicate_plan_duplicate_group_count"] == 0
+    assert result["context_pack"]["summary"]["duplicate_plan_fingerprint_count"] == 1
+
+
 def test_self_iteration_output_guard_accepts_valid_appended_stage(tmp_path):
     project, roadmap_path = self_iteration_guard_project(tmp_path)
     write_self_iteration_guard_planner(project, [valid_self_iteration_stage()])
@@ -2775,6 +3484,77 @@ def test_self_iteration_output_guard_accepts_valid_appended_stage(tmp_path):
     report = Path(project, result["report"]).read_text(encoding="utf-8")
     assert "## Output Validation" in report
     assert "- Status: `passed`" in report
+
+
+def test_duplicate_plan_guard_rejects_exact_duplicate_stage_under_new_ids(tmp_path):
+    project, roadmap_path = self_iteration_guard_project(tmp_path)
+    existing_stage = valid_self_iteration_stage("existing-guard-stage", "existing-guard-task")
+    existing_stage["tasks"][0]["e2e"] = [
+        {
+            "name": "local guard e2e",
+            "command": "python3 -c \"print('guard e2e ok')\"",
+            "timeout_seconds": 30,
+        }
+    ]
+    before = append_existing_continuation_stage(roadmap_path, existing_stage)
+    duplicate_stage = deepcopy(existing_stage)
+    duplicate_stage["id"] = "new-guard-stage"
+    duplicate_stage["tasks"][0]["id"] = "new-guard-task"
+    write_self_iteration_guard_planner(project, [duplicate_stage])
+
+    result = Harness(project).run_self_iteration(reason="duplicate-plan-test")
+
+    assert result["status"] == "rejected"
+    errors = "\n".join(result["validation"]["errors"])
+    assert "duplicates existing continuation stage plan `existing-guard-stage`" in errors
+    assert "fingerprint" in errors
+    assert json.loads(roadmap_path.read_text(encoding="utf-8")) == before
+    report = Path(project, result["report"]).read_text(encoding="utf-8")
+    assert "duplicates existing continuation stage plan `existing-guard-stage`" in report
+
+
+def test_duplicate_plan_guard_rejects_duplicate_task_ids_across_roadmap_tasks(tmp_path):
+    project, roadmap_path = self_iteration_guard_project(tmp_path)
+    before = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    existing_task_id = before["milestones"][0]["tasks"][0]["id"]
+    stage = valid_self_iteration_stage("unique-guard-stage", existing_task_id)
+    stage["title"] = "Unique Guard Stage"
+    stage["objective"] = "Add a distinct local guard task with a reused task id."
+    stage["tasks"][0]["title"] = "Unique Guard Task"
+    stage["tasks"][0]["acceptance"][0]["command"] = "python3 -c \"print('unique guard ok')\""
+    write_self_iteration_guard_planner(project, [stage])
+
+    result = Harness(project).run_self_iteration(reason="duplicate-task-id-test")
+
+    assert result["status"] == "rejected"
+    assert any(
+        f"new continuation task id duplicates an existing roadmap task id: {existing_task_id}" in error
+        for error in result["validation"]["errors"]
+    )
+    assert json.loads(roadmap_path.read_text(encoding="utf-8")) == before
+
+
+def test_duplicate_plan_guard_allows_distinct_stage_with_existing_continuation(tmp_path):
+    project, roadmap_path = self_iteration_guard_project(tmp_path)
+    before_stage = valid_self_iteration_stage("existing-guard-stage", "existing-guard-task")
+    append_existing_continuation_stage(roadmap_path, before_stage)
+    distinct_stage = valid_self_iteration_stage("distinct-guard-stage", "distinct-guard-task")
+    distinct_stage["title"] = "Distinct Guard Stage"
+    distinct_stage["objective"] = "Add a different locally verifiable generated task."
+    distinct_stage["tasks"][0]["title"] = "Distinct Guard Task"
+    distinct_stage["tasks"][0]["file_scope"] = ["src/distinct/**", "tests/distinct/**", "docs/distinct/**"]
+    distinct_stage["tasks"][0]["acceptance"][0]["command"] = "python3 -c \"print('distinct guard ok')\""
+    write_self_iteration_guard_planner(project, [distinct_stage])
+
+    result = Harness(project).run_self_iteration(reason="distinct-plan-test")
+
+    assert result["status"] == "planned"
+    assert result["validation"]["status"] == "passed"
+    updated = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    assert [stage["id"] for stage in updated["continuation"]["stages"]] == [
+        "existing-guard-stage",
+        "distinct-guard-stage",
+    ]
 
 
 def test_self_iteration_output_guard_rejects_too_many_new_stages_and_restores(tmp_path):

@@ -9,7 +9,7 @@ import re
 import subprocess
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -38,7 +38,12 @@ DRIVE_WATCHDOG_SCHEMA_VERSION = 1
 DEFAULT_DRIVE_HEARTBEAT_STALE_SECONDS = 60 * 60
 DRIVE_WATCHDOG_STALE_SECONDS_ENV = "ENGINEERING_HARNESS_DRIVE_STALE_AFTER_SECONDS"
 MATERIALIZATION_CHECKPOINT_SCHEMA_VERSION = 1
-APPROVAL_QUEUE_SCHEMA_VERSION = 1
+APPROVAL_QUEUE_SCHEMA_VERSION = 2
+APPROVAL_FINGERPRINT_SCHEMA_VERSION = 1
+DEFAULT_APPROVAL_LEASE_TTL_SECONDS = 60 * 60
+FAILURE_ISOLATION_SCHEMA_VERSION = 1
+FAILURE_ISOLATION_SUMMARY_LIMIT = 5
+ISOLATED_FAILURE_STATUSES = {"failed", "blocked"}
 APPROVAL_DECISION_KINDS = {
     "manual_approval": "manual",
     "agent_approval": "agent",
@@ -212,6 +217,9 @@ SELF_ITERATION_CONTEXT_LIMITS = {
     "test_name_count": 20,
     "source_file_count": 120,
     "continuation_stage_count": 12,
+    "duplicate_plan_stage_count": 12,
+    "duplicate_plan_task_count": 8,
+    "duplicate_plan_group_count": 8,
     "manifest_run_count": 8,
     "message_chars": 500,
     "git_commit_count": 8,
@@ -440,6 +448,10 @@ def parse_utc_timestamp(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def format_utc_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
 def slug_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
@@ -628,12 +640,18 @@ def project_from_root(root: Path) -> Project:
     configured = config is not None
     name = root.name
     if config:
+        config_in_scope = False
         try:
-            roadmap = load_mapping(config)
-            name = str(roadmap.get("project", name))
-            profile = str(roadmap.get("profile", profile or "")) or profile
-        except Exception:
-            pass
+            config_in_scope = config.resolve().is_relative_to(root)
+        except OSError:
+            config_in_scope = False
+        if config_in_scope:
+            try:
+                roadmap = load_mapping(config)
+                name = str(roadmap.get("project", name))
+                profile = str(roadmap.get("profile", profile or "")) or profile
+            except Exception:
+                pass
     return Project(name=name, root=root, roadmap_path=config, profile=profile, configured=configured, kind=kind)
 
 
@@ -1250,15 +1268,47 @@ class Harness:
         if not isinstance(queue, dict):
             queue = {}
             state["approval_queue"] = queue
-        queue.setdefault("schema_version", APPROVAL_QUEUE_SCHEMA_VERSION)
+        queue["schema_version"] = APPROVAL_QUEUE_SCHEMA_VERSION
         items = queue.setdefault("items", {})
         if not isinstance(items, dict):
             queue["items"] = {}
         queue.setdefault("updated_at", state.get("updated_at"))
         return queue
 
-    def approval_queue_summary(self, *, status_filter: str | None = "pending") -> dict[str, Any]:
-        state = self.load_state()
+    def _approval_lease_ttl_seconds(self) -> int:
+        candidates: list[Any] = []
+        config = self.roadmap.get("approval_leases")
+        if isinstance(config, dict):
+            candidates.extend(
+                [
+                    config.get("ttl_seconds"),
+                    config.get("lease_ttl_seconds"),
+                    config.get("approval_lease_ttl_seconds"),
+                ]
+            )
+        candidates.extend(
+            [
+                self.roadmap.get("approval_lease_ttl_seconds"),
+                self.roadmap.get("approval_lease_ttl"),
+            ]
+        )
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            try:
+                seconds = int(candidate)
+            except (TypeError, ValueError):
+                continue
+            if seconds > 0:
+                return seconds
+        return DEFAULT_APPROVAL_LEASE_TTL_SECONDS
+
+    def _approval_queue_summary_from_state(
+        self,
+        state: dict[str, Any],
+        *,
+        status_filter: str | None = "pending",
+    ) -> dict[str, Any]:
         queue = self._approval_queue(state)
         items = [
             deepcopy(item)
@@ -1268,17 +1318,32 @@ class Harness:
         items.sort(key=lambda item: (str(item.get("created_at") or ""), str(item.get("id") or "")))
         all_items = [item for item in queue.get("items", {}).values() if isinstance(item, dict)]
         counts: dict[str, int] = {}
+        stale_reasons: dict[str, int] = {}
         for item in all_items:
             status = str(item.get("status", "unknown"))
             counts[status] = counts.get(status, 0) + 1
+            if status == "stale":
+                reason = str(item.get("stale_reason") or "unknown")
+                stale_reasons[reason] = stale_reasons.get(reason, 0) + 1
         return {
             "schema_version": APPROVAL_QUEUE_SCHEMA_VERSION,
             "path": self._project_relative_path(self.state_path),
             "status_filter": status_filter,
+            "lease_ttl_seconds": self._approval_lease_ttl_seconds(),
             "counts": dict(sorted(counts.items())),
             "pending_count": counts.get("pending", 0),
+            "approved_count": counts.get("approved", 0),
+            "consumed_count": counts.get("consumed", 0),
+            "stale_count": counts.get("stale", 0),
+            "stale_reasons": dict(sorted(stale_reasons.items())),
             "items": items,
         }
+
+    def approval_queue_summary(self, *, status_filter: str | None = "pending") -> dict[str, Any]:
+        state = self.load_state()
+        if self._refresh_approval_queue_staleness(state):
+            self.save_state(state)
+        return self._approval_queue_summary_from_state(state, status_filter=status_filter)
 
     def approve_approval(
         self,
@@ -1289,24 +1354,42 @@ class Harness:
     ) -> dict[str, Any]:
         state = self.load_state()
         queue = self._approval_queue(state)
+        stale_changed = self._refresh_approval_queue_staleness(state)
         items = queue.setdefault("items", {})
         record = items.get(approval_id)
         if not isinstance(record, dict):
+            if stale_changed:
+                self.save_state(state)
             return {"status": "not_found", "message": f"approval not found: {approval_id}", "approval_id": approval_id}
         previous_status = str(record.get("status", "pending"))
         now = utc_now()
         if previous_status == "consumed":
+            if stale_changed:
+                self.save_state(state)
             return {
                 "status": "consumed",
                 "message": f"approval was already consumed: {approval_id}",
                 "approval": deepcopy(record),
             }
+        if previous_status == "stale":
+            if stale_changed:
+                self.save_state(state)
+            reason_text = str(record.get("stale_reason") or "approval is stale")
+            return {
+                "status": "stale",
+                "message": f"approval is stale and cannot be approved: {approval_id} ({reason_text})",
+                "approval": deepcopy(record),
+            }
+        lease_ttl_seconds = int(record.get("lease_ttl_seconds") or self._approval_lease_ttl_seconds())
         record.update(
             {
                 "status": "approved",
                 "approved_at": now,
                 "approved_by": approved_by,
                 "approval_reason": reason,
+                "lease_started_at": now,
+                "lease_expires_at": self._approval_lease_expires_at(now, lease_ttl_seconds),
+                "lease_ttl_seconds": lease_ttl_seconds,
                 "updated_at": now,
             }
         )
@@ -1318,6 +1401,7 @@ class Harness:
             task_state["approval_unblocked_at"] = now
             task_state["approval_unblocked_by"] = approval_id
             task_state["blocked_on_approval"] = False
+            task_state.pop("failure_isolation", None)
         self.save_state(state)
         append_jsonl(
             self.decision_log_path,
@@ -1361,6 +1445,434 @@ class Harness:
             return "repair"
         return value
 
+    def _approval_flag_for_decision_kind(self, decision_kind: str) -> str:
+        return {
+            "manual_approval": "--allow-manual",
+            "agent_approval": "--allow-agent",
+            "executor_approval": "--allow-agent",
+            "live_approval": "--allow-live",
+        }.get(decision_kind, "")
+
+    def _approval_json_safe(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {str(key): self._approval_json_safe(value[key]) for key in sorted(value)}
+        if isinstance(value, (list, tuple)):
+            return [self._approval_json_safe(item) for item in value]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return redact(value) if isinstance(value, str) else value
+        return redact(str(value))
+
+    def _approval_digest(self, value: Any) -> str:
+        serialized = json.dumps(
+            self._approval_json_safe(value),
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _approval_text_digest(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        return hashlib.sha256(redact(str(value)).encode("utf-8")).hexdigest()
+
+    def _approval_command_fingerprint_payload(self, command: AcceptanceCommand | dict[str, Any]) -> dict[str, Any]:
+        if isinstance(command, AcceptanceCommand):
+            name = command.name
+            command_text = command.command
+            prompt = command.prompt
+            required = command.required
+            timeout_seconds = command.timeout_seconds
+            model = command.model
+            sandbox = command.sandbox
+            executor = command.executor
+        else:
+            name = str(command.get("name") or "")
+            command_text = command.get("command")
+            prompt = command.get("prompt")
+            required = bool(command.get("required", True))
+            timeout_seconds = command.get("timeout_seconds")
+            model = command.get("model")
+            sandbox = command.get("sandbox")
+            executor = str(command.get("executor") or "")
+        return {
+            "name": name,
+            "executor": executor,
+            "required": required,
+            "timeout_seconds": timeout_seconds,
+            "model": model,
+            "sandbox": sandbox,
+            "command_sha256": self._approval_text_digest(command_text),
+            "prompt_sha256": self._approval_text_digest(prompt),
+            "has_command": command_text is not None,
+            "has_prompt": prompt is not None,
+        }
+
+    def _approval_task_command_inventory(self, task: HarnessTask) -> dict[str, Any]:
+        groups = {
+            "implementation": task.implementation,
+            "repair": task.repair,
+            "acceptance": task.acceptance,
+            "e2e": task.e2e,
+        }
+        return {
+            phase: [self._approval_command_fingerprint_payload(command) for command in commands]
+            for phase, commands in groups.items()
+        }
+
+    def _approval_policy_metadata(
+        self,
+        *,
+        decision_kind: str,
+        decision_metadata: dict[str, Any] | None = None,
+        executor_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        command_policy_payload = {
+            "profile": self.command_policy.get("profile") or self.roadmap.get("profile"),
+            "version": self.command_policy.get("version"),
+            "allowed_prefixes": self.command_policy.get("allowed_prefixes", []),
+            "blocked_patterns": self.command_policy.get("blocked_patterns", []),
+            "requires_live_flag_patterns": self.command_policy.get("requires_live_flag_patterns", []),
+        }
+        executor_summary: dict[str, Any] = {}
+        if isinstance(executor_metadata, dict):
+            executor_summary = {
+                key: executor_metadata.get(key)
+                for key in (
+                    "id",
+                    "kind",
+                    "input_mode",
+                    "uses_command_policy",
+                    "requires_agent_approval",
+                )
+                if key in executor_metadata
+            }
+        return {
+            "decision_kind": decision_kind,
+            "command_policy": {
+                "profile": command_policy_payload["profile"],
+                "version": command_policy_payload["version"],
+                "sha256": self._approval_digest(command_policy_payload),
+            },
+            "decision_metadata": self._approval_json_safe(decision_metadata or {}),
+            "executor": self._approval_json_safe(executor_summary),
+        }
+
+    def _approval_fingerprint_payload(
+        self,
+        task: HarnessTask,
+        *,
+        decision_kind: str,
+        phase: str,
+        approval_flag: str,
+        command: AcceptanceCommand | dict[str, Any] | None = None,
+        executor_metadata: dict[str, Any] | None = None,
+        decision_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        phase_key = self._approval_phase_key(phase)
+        approval_kind = APPROVAL_DECISION_KINDS.get(decision_kind, "unknown")
+        inventory = self._approval_task_command_inventory(task)
+        payload: dict[str, Any] = {
+            "schema_version": APPROVAL_FINGERPRINT_SCHEMA_VERSION,
+            "project": {
+                "root": str(self.project_root),
+                "roadmap_path": self._project_relative_path(self.roadmap_path) if self.roadmap_path else None,
+            },
+            "task": {
+                "id": task.id,
+                "milestone_id": task.milestone_id,
+                "manual_approval_required": task.manual_approval_required,
+                "agent_approval_required": task.agent_approval_required,
+            },
+            "phase": phase_key,
+            "approval": {
+                "decision_kind": decision_kind,
+                "approval_kind": approval_kind,
+                "approval_flag": approval_flag,
+            },
+            "file_scope": sorted({str(item) for item in task.file_scope}),
+            "policy": self._approval_policy_metadata(
+                decision_kind=decision_kind,
+                decision_metadata=decision_metadata,
+                executor_metadata=executor_metadata,
+            ),
+        }
+        if command is None:
+            payload["task_command_inventory_sha256"] = self._approval_digest(inventory)
+            payload["task_command_counts"] = {
+                phase_name: len(commands)
+                for phase_name, commands in (
+                    ("implementation", task.implementation),
+                    ("repair", task.repair),
+                    ("acceptance", task.acceptance),
+                    ("e2e", task.e2e),
+                )
+            }
+        else:
+            payload["command"] = self._approval_command_fingerprint_payload(command)
+        return payload
+
+    def _approval_fingerprint(self, payload: dict[str, Any]) -> str:
+        return self._approval_digest(payload)
+
+    def _approval_record_id(
+        self,
+        task: HarnessTask,
+        *,
+        decision_kind: str,
+        approval_kind: str,
+        phase: str,
+        name: str,
+        executor: str,
+        approval_flag: str,
+        approval_fingerprint: str,
+    ) -> str:
+        identity = {
+            "task_id": task.id,
+            "milestone_id": task.milestone_id,
+            "approval_kind": approval_kind,
+            "decision_kind": decision_kind,
+            "phase": self._approval_phase_key(phase),
+            "name": name,
+            "executor": executor,
+            "approval_flag": approval_flag,
+            "approval_fingerprint": approval_fingerprint,
+        }
+        digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+        label_parts = [task.id, approval_kind, self._approval_phase_key(phase)]
+        if name:
+            label_parts.append(name)
+        elif executor:
+            label_parts.append(executor)
+        return f"{self._slugify('-'.join(label_parts))}-{digest}"
+
+    def _approval_current_decision_metadata(
+        self,
+        *,
+        decision_kind: str,
+        command: AcceptanceCommand | None = None,
+    ) -> dict[str, Any]:
+        if decision_kind == "live_approval" and command is not None:
+            return {"matched_live_patterns": self._live_policy_matches(command.command)}
+        return {}
+
+    def _approval_current_identity(
+        self,
+        task: HarnessTask,
+        *,
+        decision_kind: str,
+        phase: str = "task",
+        command: AcceptanceCommand | None = None,
+        name: str | None = None,
+        executor: str | None = None,
+        approval_flag: str | None = None,
+        decision_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        approval_kind = APPROVAL_DECISION_KINDS.get(decision_kind)
+        if approval_kind is None:
+            return None
+        phase_key = self._approval_phase_key(phase)
+        command_name = str(name if name is not None else (command.name if command is not None else ""))
+        executor_id = str(executor if executor is not None else (command.executor if command is not None else ""))
+        flag = str(approval_flag or self._approval_flag_for_decision_kind(decision_kind))
+        executor_metadata = self.executor_registry.metadata_for(command.executor) if command is not None else None
+        metadata = decision_metadata
+        if metadata is None:
+            metadata = self._approval_current_decision_metadata(decision_kind=decision_kind, command=command)
+        fingerprint_payload = self._approval_fingerprint_payload(
+            task,
+            decision_kind=decision_kind,
+            phase=phase_key,
+            approval_flag=flag,
+            command=command,
+            executor_metadata=executor_metadata,
+            decision_metadata=metadata,
+        )
+        approval_fingerprint = self._approval_fingerprint(fingerprint_payload)
+        return {
+            "task_id": task.id,
+            "milestone_id": task.milestone_id,
+            "approval_kind": approval_kind,
+            "decision_kind": decision_kind,
+            "phase": phase_key,
+            "name": command_name,
+            "executor": executor_id,
+            "approval_flag": flag,
+            "approval_fingerprint": approval_fingerprint,
+            "approval_fingerprint_version": APPROVAL_FINGERPRINT_SCHEMA_VERSION,
+            "approval_fingerprint_payload": fingerprint_payload,
+            "id": self._approval_record_id(
+                task,
+                decision_kind=decision_kind,
+                approval_kind=approval_kind,
+                phase=phase_key,
+                name=command_name,
+                executor=executor_id,
+                approval_flag=flag,
+                approval_fingerprint=approval_fingerprint,
+            ),
+        }
+
+    def _approval_find_command(
+        self,
+        task: HarnessTask,
+        *,
+        phase: str,
+        name: str | None = None,
+        executor: str | None = None,
+    ) -> AcceptanceCommand | None:
+        phase_key = self._approval_phase_key(phase)
+        for group_phase, commands in (
+            ("implementation", task.implementation),
+            ("repair", task.repair),
+            ("acceptance", task.acceptance),
+            ("e2e", task.e2e),
+        ):
+            if self._approval_phase_key(group_phase) != phase_key:
+                continue
+            for command in commands:
+                if name is not None and str(command.name) != str(name):
+                    continue
+                if executor is not None and str(command.executor) != str(executor):
+                    continue
+                return command
+        return None
+
+    def _approval_current_identity_from_record(
+        self,
+        record: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        task_id = str(record.get("task_id") or "")
+        task = self.task_by_id(task_id)
+        if task is None:
+            return None, "approval task no longer exists"
+        decision_kind = str(record.get("decision_kind") or "")
+        phase = str(record.get("phase") or "task")
+        name = str(record.get("name") or "")
+        executor = str(record.get("executor") or "")
+        command: AcceptanceCommand | None = None
+        if name or decision_kind in {"executor_approval", "live_approval"}:
+            command = self._approval_find_command(
+                task,
+                phase=phase,
+                name=name or None,
+                executor=executor or None,
+            )
+            if command is None and name:
+                command = self._approval_find_command(
+                    task,
+                    phase=phase,
+                    name=name,
+                    executor=None,
+                )
+            if command is None:
+                return None, "approval policy target no longer exists"
+        current = self._approval_current_identity(
+            task,
+            decision_kind=decision_kind,
+            phase=phase,
+            command=command,
+            name=name or None,
+            executor=executor or None,
+            approval_flag=str(record.get("approval_flag") or self._approval_flag_for_decision_kind(decision_kind)),
+        )
+        if current is None:
+            return None, "approval decision kind is no longer recognized"
+        return current, None
+
+    def _approval_lease_expires_at(self, started_at: str, ttl_seconds: int) -> str:
+        started_dt = parse_utc_timestamp(started_at) or datetime.now(timezone.utc)
+        return format_utc_timestamp(started_dt + timedelta(seconds=ttl_seconds))
+
+    def _approval_expired_reason(self, record: dict[str, Any], *, now: str) -> str | None:
+        if str(record.get("status")) != "approved":
+            return None
+        expires_at = str(record.get("lease_expires_at") or "")
+        expires_dt = parse_utc_timestamp(expires_at)
+        if expires_dt is None:
+            return "approval lease missing expiration timestamp"
+        now_dt = parse_utc_timestamp(now) or datetime.now(timezone.utc)
+        if now_dt >= expires_dt:
+            return f"approval lease expired at {expires_at}"
+        return None
+
+    def _mark_approval_stale(
+        self,
+        record: dict[str, Any],
+        *,
+        reason: str,
+        now: str,
+        current_fingerprint: str | None = None,
+    ) -> bool:
+        previous_status = str(record.get("status", "unknown"))
+        if previous_status == "stale":
+            return False
+        record.update(
+            {
+                "status": "stale",
+                "previous_status": previous_status,
+                "stale_at": now,
+                "stale_reason": reason,
+                "updated_at": now,
+            }
+        )
+        if current_fingerprint is not None:
+            record["current_approval_fingerprint"] = current_fingerprint
+        append_jsonl(
+            self.decision_log_path,
+            {
+                "at": now,
+                "event": "approval",
+                "approval_id": record.get("id"),
+                "task_id": record.get("task_id"),
+                "status": "stale",
+                "previous_status": previous_status,
+                "reason": reason,
+            },
+        )
+        return True
+
+    def _refresh_approval_queue_staleness(self, state: dict[str, Any]) -> bool:
+        queue = self._approval_queue(state)
+        items = queue.setdefault("items", {})
+        now = utc_now()
+        changed = False
+        for record in list(items.values()):
+            if not isinstance(record, dict) or str(record.get("status")) not in {"pending", "approved"}:
+                continue
+            expired_reason = self._approval_expired_reason(record, now=now)
+            if expired_reason is not None:
+                changed = self._mark_approval_stale(record, reason=expired_reason, now=now) or changed
+                continue
+            current, missing_reason = self._approval_current_identity_from_record(record)
+            if current is None:
+                changed = self._mark_approval_stale(
+                    record,
+                    reason=str(missing_reason or "approval policy target is no longer current"),
+                    now=now,
+                ) or changed
+                continue
+            current_fingerprint = str(current.get("approval_fingerprint") or "")
+            record_fingerprint = str(record.get("approval_fingerprint") or "")
+            if not record_fingerprint:
+                changed = self._mark_approval_stale(
+                    record,
+                    reason="approval missing fingerprint metadata",
+                    now=now,
+                    current_fingerprint=current_fingerprint,
+                ) or changed
+                continue
+            if record_fingerprint != current_fingerprint:
+                changed = self._mark_approval_stale(
+                    record,
+                    reason="approval fingerprint mismatch: current policy decision changed",
+                    now=now,
+                    current_fingerprint=current_fingerprint,
+                ) or changed
+        if changed:
+            queue["updated_at"] = now
+        return changed
+
     def _approval_identity_from_decision(self, task: HarnessTask, decision: dict[str, Any]) -> dict[str, Any] | None:
         decision_kind = str(decision.get("kind", ""))
         approval_kind = APPROVAL_DECISION_KINDS.get(decision_kind)
@@ -1368,11 +1880,33 @@ class Harness:
             return None
         policy_input = decision.get("input") if isinstance(decision.get("input"), dict) else {}
         command = policy_input.get("command") if isinstance(policy_input.get("command"), dict) else {}
+        executor_metadata = policy_input.get("executor") if isinstance(policy_input.get("executor"), dict) else None
         phase = self._approval_phase_key(str(decision.get("phase") or policy_input.get("phase") or "task"))
         name = str(decision.get("name") or command.get("name") or "")
         executor = str(decision.get("executor") or command.get("executor") or "")
         approval_flag = str(decision.get("approval_flag") or "")
-        identity = {
+        command_payload = command if command else None
+        fingerprint_payload = self._approval_fingerprint_payload(
+            task,
+            decision_kind=decision_kind,
+            phase=phase,
+            approval_flag=approval_flag,
+            command=command_payload,
+            executor_metadata=executor_metadata,
+            decision_metadata=decision.get("metadata") if isinstance(decision.get("metadata"), dict) else {},
+        )
+        approval_fingerprint = self._approval_fingerprint(fingerprint_payload)
+        return {
+            "id": self._approval_record_id(
+                task,
+                decision_kind=decision_kind,
+                approval_kind=approval_kind,
+                phase=phase,
+                name=name,
+                executor=executor,
+                approval_flag=approval_flag,
+                approval_fingerprint=approval_fingerprint,
+            ),
             "task_id": task.id,
             "milestone_id": task.milestone_id,
             "approval_kind": approval_kind,
@@ -1381,16 +1915,10 @@ class Harness:
             "name": name,
             "executor": executor,
             "approval_flag": approval_flag,
+            "approval_fingerprint": approval_fingerprint,
+            "approval_fingerprint_version": APPROVAL_FINGERPRINT_SCHEMA_VERSION,
+            "approval_fingerprint_payload": fingerprint_payload,
         }
-        raw = json.dumps(identity, sort_keys=True)
-        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
-        label_parts = [task.id, approval_kind, phase]
-        if name:
-            label_parts.append(name)
-        elif executor:
-            label_parts.append(executor)
-        identity["id"] = f"{self._slugify('-'.join(label_parts))}-{digest}"
-        return identity
 
     def _approval_is_approved(
         self,
@@ -1400,12 +1928,29 @@ class Harness:
         phase: str = "task",
         name: str | None = None,
         executor: str | None = None,
+        command: AcceptanceCommand | None = None,
+        state: dict[str, Any] | None = None,
+        mutate_stale: bool = True,
     ) -> bool:
-        state = self.load_state()
-        items = self._approval_queue(state).get("items", {})
+        state_payload = state if state is not None else self.load_state()
+        queue = self._approval_queue(state_payload)
+        items = queue.get("items", {})
         phase_key = self._approval_phase_key(phase)
+        current = self._approval_current_identity(
+            task,
+            decision_kind=decision_kind,
+            phase=phase_key,
+            command=command,
+            name=name,
+            executor=executor,
+        )
+        if current is None:
+            return False
+        current_fingerprint = str(current.get("approval_fingerprint") or "")
+        changed = False
+        now = utc_now()
         for item in items.values():
-            if not isinstance(item, dict) or str(item.get("status")) != "approved":
+            if not isinstance(item, dict) or str(item.get("status")) not in {"approved", "pending"}:
                 continue
             if str(item.get("task_id")) != task.id:
                 continue
@@ -1413,12 +1958,94 @@ class Harness:
                 continue
             if str(item.get("phase", "task")) != phase_key:
                 continue
-            if name is not None and str(item.get("name", "")) != name:
+            item_name = str(item.get("name", ""))
+            if name is not None and item_name != name:
+                continue
+            if name is None and item_name:
                 continue
             if executor is not None and str(item.get("executor", "")) != executor:
+                if mutate_stale:
+                    changed = self._mark_approval_stale(
+                        item,
+                        reason="approval fingerprint mismatch: current policy decision changed",
+                        now=now,
+                        current_fingerprint=current_fingerprint,
+                    ) or changed
                 continue
+            if str(item.get("status")) != "approved":
+                continue
+            expired_reason = self._approval_expired_reason(item, now=now)
+            if expired_reason is not None:
+                if mutate_stale:
+                    changed = self._mark_approval_stale(item, reason=expired_reason, now=now) or changed
+                continue
+            record_fingerprint = str(item.get("approval_fingerprint") or "")
+            if not record_fingerprint:
+                if mutate_stale:
+                    changed = self._mark_approval_stale(
+                        item,
+                        reason="approval missing fingerprint metadata",
+                        now=now,
+                        current_fingerprint=current_fingerprint,
+                    ) or changed
+                continue
+            if record_fingerprint != current_fingerprint:
+                if mutate_stale:
+                    changed = self._mark_approval_stale(
+                        item,
+                        reason="approval fingerprint mismatch: current policy decision changed",
+                        now=now,
+                        current_fingerprint=current_fingerprint,
+                    ) or changed
+                continue
+            if changed:
+                queue["updated_at"] = now
+                if state is None:
+                    self.save_state(state_payload)
             return True
+        if changed:
+            queue["updated_at"] = now
+            if state is None:
+                self.save_state(state_payload)
         return False
+
+    def _approval_record_matches_identity(self, record: dict[str, Any], identity: dict[str, Any]) -> bool:
+        for key in (
+            "task_id",
+            "milestone_id",
+            "approval_kind",
+            "decision_kind",
+            "phase",
+            "name",
+            "executor",
+            "approval_flag",
+            "approval_fingerprint",
+        ):
+            if str(record.get(key, "")) != str(identity.get(key, "")):
+                return False
+        return True
+
+    def _active_approval_id_for_identity(
+        self,
+        items: dict[str, Any],
+        identity: dict[str, Any],
+    ) -> str | None:
+        for approval_id, record in sorted(items.items()):
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("status")) not in {"pending", "approved"}:
+                continue
+            if self._approval_record_matches_identity(record, identity):
+                return str(approval_id)
+        return None
+
+    def _unique_approval_id(self, items: dict[str, Any], approval_id: str) -> str:
+        if approval_id not in items:
+            return approval_id
+        counter = 2
+        while f"{approval_id}-{counter}" in items:
+            counter += 1
+        return f"{approval_id}-{counter}"
 
     def _queue_required_approvals(
         self,
@@ -1426,6 +2053,7 @@ class Harness:
         task: HarnessTask,
         decisions: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
+        self._refresh_approval_queue_staleness(state)
         queue = self._approval_queue(state)
         items = queue.setdefault("items", {})
         created_or_updated: list[dict[str, Any]] = []
@@ -1436,7 +2064,7 @@ class Harness:
             identity = self._approval_identity_from_decision(task, decision)
             if identity is None:
                 continue
-            approval_id = str(identity["id"])
+            approval_id = self._active_approval_id_for_identity(items, identity) or str(identity["id"])
             existing = items.get(approval_id)
             if isinstance(existing, dict) and str(existing.get("status")) in {"pending", "approved"}:
                 existing.update(
@@ -1444,11 +2072,14 @@ class Harness:
                         "last_seen_at": now,
                         "reason": decision.get("reason"),
                         "policy_decision": self._compact_policy_decision(decision),
+                        "lease_ttl_seconds": int(existing.get("lease_ttl_seconds") or self._approval_lease_ttl_seconds()),
                         "updated_at": now,
                     }
                 )
                 created_or_updated.append(deepcopy(existing))
                 continue
+            approval_id = self._unique_approval_id(items, approval_id)
+            identity["id"] = approval_id
             record = {
                 "schema_version": APPROVAL_QUEUE_SCHEMA_VERSION,
                 **identity,
@@ -1457,6 +2088,9 @@ class Harness:
                 "created_at": now,
                 "updated_at": now,
                 "last_seen_at": now,
+                "lease_ttl_seconds": self._approval_lease_ttl_seconds(),
+                "lease_started_at": None,
+                "lease_expires_at": None,
                 "source": "policy",
                 "policy_decision": self._compact_policy_decision(decision),
             }
@@ -1754,6 +2388,24 @@ class Harness:
                 "stage_count_after": self.continuation_summary()["stage_count"],
                 "pending_stage_count_after": self.continuation_summary()["pending_stage_count"],
                 "report": None,
+            }
+        isolated_failures = self.latest_isolated_failures_summary()
+        if int(isolated_failures.get("unresolved_count", 0) or 0) > 0:
+            continuation = self.continuation_summary()
+            message = "unresolved isolated task failure exists; resolve it before self-iteration adds another stage"
+            self.drive_heartbeat(
+                activity="self-iteration",
+                message=message,
+                clear_task=True,
+            )
+            return {
+                "status": "isolated_failure",
+                "message": message,
+                "stage_count_before": continuation["stage_count"],
+                "stage_count_after": continuation["stage_count"],
+                "pending_stage_count_after": continuation["pending_stage_count"],
+                "report": None,
+                "failure_isolation": isolated_failures,
             }
         planner = config.get("planner") or {}
         if not isinstance(planner, dict):
@@ -2053,11 +2705,14 @@ class Harness:
         test_inventory = self._self_iteration_test_inventory()
         source_inventory = self._self_iteration_source_inventory()
         git_context = self._self_iteration_git_context()
+        duplicate_plan = self._self_iteration_duplicate_plan_summary()
         summary = {
             "project": roadmap_context.get("project"),
             "roadmap_path": roadmap_context.get("path"),
             "continuation_stage_count": roadmap_context.get("continuation", {}).get("stage_count", 0),
             "pending_stage_count": roadmap_context.get("continuation", {}).get("pending_stage_count", 0),
+            "duplicate_plan_fingerprint_count": duplicate_plan.get("fingerprint_count", 0),
+            "duplicate_plan_duplicate_group_count": duplicate_plan.get("duplicate_group_count", 0),
             "manifest_count": manifest_context.get("index", {}).get("manifest_count", 0),
             "recent_manifest_count": len(manifest_context.get("recent_task_manifests", [])),
             "task_report_count": report_context.get("task_reports", {}).get("total_count", 0),
@@ -2079,6 +2734,7 @@ class Harness:
             "limits": dict(SELF_ITERATION_CONTEXT_LIMITS),
             "summary": summary,
             "roadmap": roadmap_context,
+            "duplicate_plan": duplicate_plan,
             "manifests": manifest_context,
             "reports": report_context,
             "docs": docs_context,
@@ -2160,6 +2816,139 @@ class Harness:
             ],
             "task_count_truncated": len(tasks) > 8,
         }
+
+    def _self_iteration_duplicate_plan_summary(self) -> dict[str, Any]:
+        continuation = self.roadmap.get("continuation") if isinstance(self.roadmap.get("continuation"), dict) else {}
+        stages = continuation.get("stages", []) if isinstance(continuation, dict) else []
+        if not isinstance(stages, list):
+            stages = []
+        valid_stages = [stage for stage in stages if isinstance(stage, dict)]
+        stage_limit = int(SELF_ITERATION_CONTEXT_LIMITS["duplicate_plan_stage_count"])
+        task_limit = int(SELF_ITERATION_CONTEXT_LIMITS["duplicate_plan_task_count"])
+        group_limit = int(SELF_ITERATION_CONTEXT_LIMITS["duplicate_plan_group_count"])
+        fingerprint_index = self._self_iteration_stage_fingerprint_index(valid_stages)
+        entries = [
+            self._self_iteration_duplicate_plan_entry(stage, task_limit=task_limit)
+            for stage in valid_stages[:stage_limit]
+        ]
+        duplicate_groups = [
+            {
+                "fingerprint": fingerprint,
+                "stage_ids": stage_ids[:task_limit],
+                "stage_count": len(stage_ids),
+                "stage_ids_truncated": len(stage_ids) > task_limit,
+            }
+            for fingerprint, stage_ids in sorted(fingerprint_index.items())
+            if len(stage_ids) > 1
+        ]
+        return {
+            "algorithm": "sha256:self-iteration-stage-plan:v1",
+            "stage_count": len(valid_stages),
+            "included_count": len(entries),
+            "truncated": len(valid_stages) > stage_limit,
+            "fingerprint_count": len(fingerprint_index),
+            "duplicate_group_count": len(duplicate_groups),
+            "duplicate_groups": duplicate_groups[:group_limit],
+            "duplicate_groups_truncated": len(duplicate_groups) > group_limit,
+            "stages": entries,
+        }
+
+    def _self_iteration_duplicate_plan_entry(self, stage: dict[str, Any], *, task_limit: int) -> dict[str, Any]:
+        tasks = stage.get("tasks", [])
+        if not isinstance(tasks, list):
+            tasks = []
+        valid_tasks = [task for task in tasks if isinstance(task, dict)]
+        return {
+            "stage_id": str(stage.get("id", "")).strip(),
+            "title": self._truncate_text(str(stage.get("title", "")), 160),
+            "fingerprint": self._self_iteration_stage_fingerprint(stage),
+            "identity_fingerprint": self._self_iteration_stage_fingerprint(stage, include_task_ids=True),
+            "task_count": len(valid_tasks),
+            "task_ids": [str(task.get("id", "")).strip() for task in valid_tasks[:task_limit]],
+            "task_titles": [
+                self._truncate_text(str(task.get("title", "")), 160)
+                for task in valid_tasks[:task_limit]
+            ],
+            "tasks_truncated": len(valid_tasks) > task_limit,
+        }
+
+    def _self_iteration_stage_fingerprint_index(self, stages: list[Any]) -> dict[str, list[str]]:
+        fingerprints: dict[str, list[str]] = {}
+        for stage_index, stage in enumerate(stages):
+            if not isinstance(stage, dict):
+                continue
+            fingerprint = self._self_iteration_stage_fingerprint(stage)
+            stage_id = str(stage.get("id", "")).strip() or f"continuation.stages[{stage_index}]"
+            fingerprints.setdefault(fingerprint, []).append(stage_id)
+        return fingerprints
+
+    def _self_iteration_stage_fingerprint(
+        self,
+        stage: dict[str, Any],
+        *,
+        include_task_ids: bool = False,
+    ) -> str:
+        payload = self._self_iteration_stage_fingerprint_payload(stage, include_task_ids=include_task_ids)
+        serialized = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _self_iteration_stage_fingerprint_payload(
+        self,
+        stage: dict[str, Any],
+        *,
+        include_task_ids: bool,
+    ) -> dict[str, Any]:
+        tasks = stage.get("tasks", [])
+        if not isinstance(tasks, list):
+            tasks = []
+        return {
+            "version": 1,
+            "title": self._self_iteration_fingerprint_text(stage.get("title")),
+            "objective": self._self_iteration_fingerprint_text(stage.get("objective")),
+            "tasks": [
+                self._self_iteration_task_fingerprint_payload(task, include_task_ids=include_task_ids)
+                for task in tasks
+                if isinstance(task, dict)
+            ],
+        }
+
+    def _self_iteration_task_fingerprint_payload(
+        self,
+        task: dict[str, Any],
+        *,
+        include_task_ids: bool,
+    ) -> dict[str, Any]:
+        payload = {
+            "title": self._self_iteration_fingerprint_text(task.get("title")),
+            "file_scope": self._self_iteration_fingerprint_file_scope(task.get("file_scope")),
+            "acceptance_commands": self._self_iteration_fingerprint_commands(task.get("acceptance")),
+            "e2e_commands": self._self_iteration_fingerprint_commands(task.get("e2e")),
+        }
+        if include_task_ids:
+            payload["id"] = self._self_iteration_fingerprint_text(task.get("id"))
+        return payload
+
+    def _self_iteration_fingerprint_file_scope(self, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        normalized = [self._self_iteration_fingerprint_text(item) for item in value]
+        return sorted({item for item in normalized if item})
+
+    def _self_iteration_fingerprint_commands(self, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        commands: list[str] = []
+        for item in value:
+            command = item.get("command") if isinstance(item, dict) else item
+            normalized = self._self_iteration_fingerprint_text(command)
+            if normalized:
+                commands.append(normalized)
+        return commands
+
+    def _self_iteration_fingerprint_text(self, value: Any) -> str:
+        if value is None:
+            return ""
+        return re.sub(r"\s+", " ", redact(str(value))).strip().casefold()
 
     def _self_iteration_manifest_context(self) -> dict[str, Any]:
         index = self._build_manifest_index()
@@ -2578,7 +3367,10 @@ class Harness:
             )
 
         existing_ids = self._self_iteration_existing_ids(before_roadmap)
+        existing_task_ids = self._self_iteration_existing_task_ids(before_roadmap)
+        existing_stage_fingerprints = self._self_iteration_stage_fingerprint_index(before_stages)
         seen_new_ids: set[str] = set()
+        seen_new_fingerprints: dict[str, str] = {}
         materialized_stage_ids = self._self_iteration_milestone_ids(after_roadmap)
         for offset, stage in enumerate(new_stages):
             stage_index = existing_stage_count + offset
@@ -2587,6 +3379,21 @@ class Harness:
                 errors.append(f"{location} must be a mapping")
                 continue
             stage_id = str(stage.get("id", "")).strip()
+            stage_label = stage_id or f"stage-{stage_index}"
+            stage_fingerprint = self._self_iteration_stage_fingerprint(stage)
+            existing_fingerprint_stage_ids = existing_stage_fingerprints.get(stage_fingerprint, [])
+            if existing_fingerprint_stage_ids:
+                errors.append(
+                    f"new continuation stage `{stage_label}` duplicates existing continuation stage plan "
+                    f"`{existing_fingerprint_stage_ids[0]}` (fingerprint {stage_fingerprint[:12]})"
+                )
+            if stage_fingerprint in seen_new_fingerprints:
+                errors.append(
+                    f"new continuation stage `{stage_label}` duplicates new continuation stage plan "
+                    f"`{seen_new_fingerprints[stage_fingerprint]}` (fingerprint {stage_fingerprint[:12]})"
+                )
+            else:
+                seen_new_fingerprints[stage_fingerprint] = stage_label
             if not stage_id:
                 errors.append(f"{location}.id is required")
             else:
@@ -2606,6 +3413,7 @@ class Harness:
                 stage_id=stage_id or f"stage-{stage_index}",
                 location=location,
                 existing_ids=existing_ids,
+                existing_task_ids=existing_task_ids,
                 seen_new_ids=seen_new_ids,
                 errors=errors,
                 warnings=warnings,
@@ -2719,6 +3527,35 @@ class Harness:
                     )
         return ids
 
+    def _self_iteration_existing_task_ids(self, roadmap: dict[str, Any]) -> set[str]:
+        task_ids: set[str] = set()
+        milestones = roadmap.get("milestones", [])
+        if isinstance(milestones, list):
+            for milestone in milestones:
+                if not isinstance(milestone, dict):
+                    continue
+                tasks = milestone.get("tasks", [])
+                if isinstance(tasks, list):
+                    task_ids.update(
+                        str(task.get("id", "")).strip()
+                        for task in tasks
+                        if isinstance(task, dict) and str(task.get("id", "")).strip()
+                    )
+        continuation = roadmap.get("continuation", {})
+        stages = continuation.get("stages", []) if isinstance(continuation, dict) else []
+        if isinstance(stages, list):
+            for stage in stages:
+                if not isinstance(stage, dict):
+                    continue
+                tasks = stage.get("tasks", [])
+                if isinstance(tasks, list):
+                    task_ids.update(
+                        str(task.get("id", "")).strip()
+                        for task in tasks
+                        if isinstance(task, dict) and str(task.get("id", "")).strip()
+                    )
+        return task_ids
+
     def _validate_self_iteration_new_stage(
         self,
         stage: dict[str, Any],
@@ -2726,6 +3563,7 @@ class Harness:
         stage_id: str,
         location: str,
         existing_ids: set[str],
+        existing_task_ids: set[str],
         seen_new_ids: set[str],
         errors: list[str],
         warnings: list[str],
@@ -2744,8 +3582,10 @@ class Harness:
             if not task_id:
                 errors.append(f"{task_location}.id is required")
                 task_id = f"{stage_id}-task-{task_index}"
+            elif task_id in existing_task_ids:
+                errors.append(f"new continuation task id duplicates an existing roadmap task id: {task_id}")
             elif task_id in existing_ids:
-                errors.append(f"new continuation task id duplicates an existing id: {task_id}")
+                errors.append(f"new continuation task id duplicates an existing stage id: {task_id}")
             elif task_id in seen_new_ids:
                 errors.append(f"duplicate new continuation task id: {task_id}")
             seen_new_ids.add(task_id)
@@ -3138,7 +3978,7 @@ continuation stage(s) were appended.
             return task
         return None
 
-    def status_summary(self) -> dict[str, Any]:
+    def status_summary(self, *, refresh_approvals: bool = True) -> dict[str, Any]:
         state = self.load_state()
         state_tasks = state.get("tasks", {})
         milestones: dict[str, dict[str, Any]] = {}
@@ -3178,8 +4018,13 @@ continuation stage(s) were appended.
             "continuation": self.continuation_summary(),
             "self_iteration": self.self_iteration_summary(),
             "drive_control": self.drive_control_summary(),
-            "approval_queue": self.approval_queue_summary(status_filter="pending"),
+            "approval_queue": (
+                self.approval_queue_summary(status_filter="pending")
+                if refresh_approvals
+                else self._approval_queue_summary_from_state(state, status_filter="pending")
+            ),
             "manifest_index": self.manifest_index_summary(),
+            "failure_isolation": self.latest_isolated_failures_summary(),
         }
 
     def drive_goal_gap_retrospective(
@@ -3231,6 +4076,7 @@ continuation stage(s) were appended.
                 "latest_reports",
                 "drive_control",
                 "approval_queue",
+                "failure_isolation",
                 "self_iteration_context_packs",
                 "tests",
                 "git",
@@ -3251,6 +4097,7 @@ continuation stage(s) were appended.
                 "next_task": deepcopy(status_summary.get("next_task")),
                 "continuation": deepcopy(status_summary.get("continuation", {})),
                 "self_iteration": deepcopy(status_summary.get("self_iteration", {})),
+                "failure_isolation": deepcopy(status_summary.get("failure_isolation", {})),
             },
             "manifest_index": {
                 "path": manifest_index.get("manifest_index_path"),
@@ -3264,6 +4111,9 @@ continuation stage(s) were appended.
             "drive_control": deepcopy(status_summary.get("drive_control") or self.drive_control_summary()),
             "approval_queue": deepcopy(
                 status_summary.get("approval_queue") or self.approval_queue_summary(status_filter="pending")
+            ),
+            "failure_isolation": deepcopy(
+                status_summary.get("failure_isolation") or self.latest_isolated_failures_summary()
             ),
             "self_iteration_context_packs": self._goal_gap_self_iteration_context_pack_summaries(),
             "tests": self._self_iteration_test_inventory(),
@@ -3338,6 +4188,8 @@ continuation stage(s) were appended.
         message = str(drive_payload.get("message", "")).lower()
         if status == "budget_exhausted":
             return "budget_exhausted"
+        if status == "isolated_failure":
+            return "isolated_failure"
         if status in {"blocked", "failed"}:
             return status
         if status in {"cancelled", "paused", "stale", "stalled", "timeout"}:
@@ -3460,6 +4312,12 @@ continuation stage(s) were appended.
         self_iteration = status_summary.get("self_iteration", {}) if isinstance(status_summary, dict) else {}
         approval_queue = evidence.get("approval_queue", {})
         pending_approvals = int(approval_queue.get("pending_count", 0) or 0) if isinstance(approval_queue, dict) else 0
+        failure_isolation = evidence.get("failure_isolation", {})
+        unresolved_isolated = (
+            int(failure_isolation.get("unresolved_count", 0) or 0)
+            if isinstance(failure_isolation, dict)
+            else 0
+        )
 
         if stop_class == "budget_exhausted":
             add(
@@ -3467,6 +4325,13 @@ continuation stage(s) were appended.
                 "medium",
                 str(drive_payload.get("message", "drive budget was exhausted")),
                 "trigger",
+            )
+        elif stop_class == "isolated_failure":
+            add(
+                "isolated_failure",
+                "high",
+                str(drive_payload.get("message", "drive stopped on an isolated failure")),
+                "failure_isolation",
             )
         elif stop_class == "failed":
             add("failed_task", "high", str(drive_payload.get("message", "drive stopped on failure")), "trigger")
@@ -3507,6 +4372,13 @@ continuation stage(s) were appended.
                 "high",
                 f"{pending_approvals} approval gate(s) are pending",
                 "approval_queue",
+            )
+        if unresolved_isolated > 0:
+            add(
+                "unresolved_isolated_failures",
+                "high",
+                f"{unresolved_isolated} isolated task failure(s) need local recovery",
+                "failure_isolation",
             )
 
         manifest_index = evidence.get("manifest_index", {})
@@ -3583,6 +4455,8 @@ continuation stage(s) were appended.
         risk_ids = {str(risk.get("id")) for risk in risks if isinstance(risk, dict)}
         if "failed_roadmap_tasks" in risk_ids or "blocked_roadmap_tasks" in risk_ids or "pending_approvals" in risk_ids:
             add("resolve-blockers", "Resolve failed, blocked, or approval-gated work", "blocked_or_failed")
+        if "unresolved_isolated_failures" in risk_ids or "isolated_failure" in risk_ids:
+            add("recover-isolated-failure", "Resolve isolated task failure before extending the roadmap", "failure_isolation")
         if task_counts.get("pending", 0) > 0 or stop_class == "budget_exhausted":
             add("drain-queued-tasks", "Drain remaining queued roadmap tasks under a renewed budget", "pending_work")
         if request_self_iteration.get("recommended"):
@@ -3620,12 +4494,21 @@ continuation stage(s) were appended.
         self_iteration = status_summary.get("self_iteration", {}) if isinstance(status_summary, dict) else {}
         approval_queue = evidence.get("approval_queue", {})
         pending_approvals = int(approval_queue.get("pending_count", 0) or 0) if isinstance(approval_queue, dict) else 0
+        failure_isolation = evidence.get("failure_isolation", {})
+        unresolved_isolated = (
+            int(failure_isolation.get("unresolved_count", 0) or 0)
+            if isinstance(failure_isolation, dict)
+            else 0
+        )
         blocked_by: list[str] = []
         recommended = False
 
         if not bool(self_iteration.get("enabled", False)):
             blocked_by.append("self_iteration_disabled")
             reason = "self-iteration is not enabled in the roadmap"
+        elif unresolved_isolated > 0 or stop_class == "isolated_failure":
+            blocked_by.append("unresolved_isolated_failure")
+            reason = "resolve isolated task failure evidence before requesting another self-iteration"
         elif task_counts.get("failed", 0) or task_counts.get("blocked", 0) or stop_class in {"failed", "blocked"}:
             blocked_by.append("unresolved_task_blockers")
             reason = "resolve failed or blocked tasks before requesting another self-iteration"
@@ -4227,6 +5110,7 @@ continuation stage(s) were appended.
             "latest_manifest": index["latest_manifest"],
             "status_counts": index["status_counts"],
             "policy_decision_summary": index.get("policy_decision_summary", {}),
+            "failure_isolation": index.get("failure_isolation", {}),
         }
 
     def rebuild_manifest_index(self) -> dict[str, Any]:
@@ -4266,6 +5150,7 @@ continuation stage(s) were appended.
         latest_manifest = manifests[-1]["manifest_path"] if manifests else None
         latest_finished_at = max((str(item.get("finished_at") or "") for item in manifests), default="") or None
         policy_decision_summary = self._aggregate_policy_decision_summaries(manifests)
+        failure_isolation = self._manifest_index_failure_isolation_summary(manifests)
         return {
             "schema_version": 1,
             "kind": "engineering-harness.task-run-manifest-index",
@@ -4278,6 +5163,7 @@ continuation stage(s) were appended.
             "manifest_count": len(manifests),
             "status_counts": dict(sorted(status_counts.items())),
             "policy_decision_summary": policy_decision_summary,
+            "failure_isolation": failure_isolation,
             "latest_manifest": latest_manifest,
             "latest_by_task": dict(sorted(latest_by_task.items())),
             "manifests": manifests,
@@ -4303,7 +5189,12 @@ continuation stage(s) were appended.
             if isinstance(manifest.get("policy_decision_summary"), dict)
             else self._policy_decision_summary(policy_decisions)
         )
-        return {
+        failure_isolation = (
+            self._compact_failure_isolation(manifest["failure_isolation"])
+            if isinstance(manifest.get("failure_isolation"), dict)
+            else None
+        )
+        entry = {
             "manifest_path": str(manifest.get("manifest_path") or self._project_relative_path(manifest_path)),
             "report_path": str(manifest.get("report_path") or ""),
             "task_id": str(manifest.get("task_id") or task.get("id") or ""),
@@ -4336,6 +5227,9 @@ continuation stage(s) were appended.
                 "head": git.get("head"),
             },
         }
+        if failure_isolation is not None:
+            entry["failure_isolation"] = failure_isolation
+        return entry
 
     def _aggregate_policy_decision_summaries(self, manifests: list[dict[str, Any]]) -> dict[str, Any]:
         by_kind: dict[str, int] = {}
@@ -4374,6 +5268,103 @@ continuation stage(s) were appended.
             "by_severity": dict(sorted(by_severity.items())),
             "blocking": blocking,
             "requires_approval": requires_approval,
+        }
+
+    def _manifest_index_failure_isolation_summary(self, manifests: list[dict[str, Any]]) -> dict[str, Any]:
+        isolated = [
+            deepcopy(item["failure_isolation"])
+            for item in manifests
+            if isinstance(item.get("failure_isolation"), dict)
+        ]
+        isolated.sort(
+            key=lambda item: (
+                str(item.get("finished_at") or ""),
+                str(item.get("task_id") or ""),
+                str(item.get("manifest_path") or ""),
+            ),
+            reverse=True,
+        )
+        return {
+            "schema_version": FAILURE_ISOLATION_SCHEMA_VERSION,
+            "isolated_count": len(isolated),
+            "latest_isolated_failures": isolated[:FAILURE_ISOLATION_SUMMARY_LIMIT],
+        }
+
+    def latest_isolated_failures_summary(self, *, limit: int = FAILURE_ISOLATION_SUMMARY_LIMIT) -> dict[str, Any]:
+        state_tasks = self.load_state().get("tasks", {})
+        index = self.manifest_index()
+        entries_by_path = {
+            str(item.get("manifest_path")): item
+            for item in index.get("manifests", [])
+            if isinstance(item, dict) and item.get("manifest_path")
+        }
+        unresolved: list[dict[str, Any]] = []
+        latest_by_task = index.get("latest_by_task", {})
+        if not isinstance(latest_by_task, dict):
+            latest_by_task = {}
+        for task_id, manifest_path in sorted(latest_by_task.items()):
+            entry = entries_by_path.get(str(manifest_path))
+            if not isinstance(entry, dict):
+                continue
+            isolation = entry.get("failure_isolation")
+            if not isinstance(isolation, dict):
+                continue
+            task_state = state_tasks.get(str(task_id), {}) if isinstance(state_tasks, dict) else {}
+            state_status = (
+                str(task_state.get("status"))
+                if isinstance(task_state, dict) and task_state.get("status") is not None
+                else str(entry.get("status") or isolation.get("status") or "unknown")
+            )
+            if state_status not in ISOLATED_FAILURE_STATUSES:
+                continue
+            compact = deepcopy(isolation)
+            compact["state_status"] = state_status
+            unresolved.append(compact)
+        unresolved.sort(
+            key=lambda item: (
+                str(item.get("finished_at") or ""),
+                str(item.get("task_id") or ""),
+                str(item.get("manifest_path") or ""),
+            ),
+            reverse=True,
+        )
+        return {
+            "schema_version": FAILURE_ISOLATION_SCHEMA_VERSION,
+            "unresolved_count": len(unresolved),
+            "has_unresolved": bool(unresolved),
+            "latest_isolated_failures": unresolved[: max(0, limit)],
+        }
+
+    def drive_failure_isolation_summary(
+        self,
+        drive_payload: dict[str, Any],
+        *,
+        final_status: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        status_summary = final_status or drive_payload.get("final_status") or self.status_summary()
+        latest_summary = (
+            status_summary.get("failure_isolation")
+            if isinstance(status_summary.get("failure_isolation"), dict)
+            else self.latest_isolated_failures_summary()
+        )
+        result_isolations = [
+            deepcopy(result["failure_isolation"])
+            for result in drive_payload.get("results", [])
+            if isinstance(result, dict) and isinstance(result.get("failure_isolation"), dict)
+        ]
+        report_paths = {
+            key: drive_payload[key]
+            for key in ("drive_report", "drive_report_json")
+            if drive_payload.get(key)
+        }
+        return {
+            "schema_version": FAILURE_ISOLATION_SCHEMA_VERSION,
+            "kind": "engineering-harness.drive-failure-isolation",
+            "unresolved_count": int(latest_summary.get("unresolved_count", 0) or 0),
+            "has_unresolved": bool(latest_summary.get("has_unresolved", False)),
+            "latest_isolated_failures": deepcopy(latest_summary.get("latest_isolated_failures", [])),
+            "result_isolations": result_isolations,
+            "report_paths": report_paths,
         }
 
     def _manifest_policy_summary_item(self, manifest: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any]:
@@ -5548,11 +6539,15 @@ continuation stage(s) were appended.
             task,
             decision_kind="manual_approval",
             phase="task",
+            state=state,
+            mutate_stale=not dry_run,
         )
         effective_allow_agent = allow_agent or self._approval_is_approved(
             task,
             decision_kind="agent_approval",
             phase="task",
+            state=state,
+            mutate_stale=not dry_run,
         )
 
         manual_decision = self._manual_approval_decision(
@@ -5825,6 +6820,9 @@ continuation stage(s) were appended.
                 phase=approval_phase,
                 name=command.name,
                 executor=command.executor,
+                command=command,
+                state=state_payload if persist_state else None,
+                mutate_stale=persist_state,
             )
             command_allow_agent = allow_agent or self._approval_is_approved(
                 task,
@@ -5832,6 +6830,9 @@ continuation stage(s) were appended.
                 phase=approval_phase,
                 name=command.name,
                 executor=command.executor,
+                command=command,
+                state=state_payload if persist_state else None,
+                mutate_stale=persist_state,
             )
             executor_metadata = self.executor_registry.metadata_for(command.executor)
             policy_input = self._policy_input(
@@ -6193,10 +7194,33 @@ continuation stage(s) were appended.
             allow_live=allow_live,
             allow_manual=allow_manual,
             allow_agent=allow_agent,
+            approval_state=state if persist else None,
+            mutate_stale=persist,
         )
         policy_decision_summary = self._policy_decision_summary(policy_decisions)
         report_relative = str(report_path.relative_to(self.project_root))
         manifest_relative = str(manifest_path.relative_to(self.project_root))
+        attempt = int(state.get("tasks", {}).get(task.id, {}).get("attempts", 0))
+        failure_isolation = self._failure_isolation_block(
+            task,
+            status=status,
+            message=message,
+            attempt=attempt,
+            started_at=started_at,
+            finished_at=finished_at,
+            report_relative=report_relative,
+            manifest_relative=manifest_relative,
+            runs=runs,
+            safety=safety_payload,
+            policy_decision_summary=policy_decision_summary,
+        )
+        queued_approvals: list[dict[str, Any]] = []
+        if persist:
+            queued_approvals = self._queue_required_approvals(state, task, policy_decisions)
+            if status in COMPLETED_STATUSES:
+                self._consume_task_approvals(state, task, status=status)
+        approval_blocked = status == "blocked" and bool(queued_approvals)
+        approval_queue_summary = self._approval_queue_summary_from_state(state, status_filter=None)
         self._record_phase_state(
             state,
             task,
@@ -6222,6 +7246,8 @@ continuation stage(s) were appended.
             safety=safety_payload,
             policy_decisions=policy_decisions,
             policy_decision_summary=policy_decision_summary,
+            failure_isolation=failure_isolation,
+            approval_queue=approval_queue_summary,
         )
         self._write_task_manifest(
             manifest_path,
@@ -6233,7 +7259,7 @@ continuation stage(s) were appended.
             status,
             message,
             persist,
-            int(state.get("tasks", {}).get(task.id, {}).get("attempts", 0)),
+            attempt,
             safety=safety,
             allow_live=allow_live,
             allow_manual=allow_manual,
@@ -6242,6 +7268,8 @@ continuation stage(s) were appended.
             policy_input=policy_input.as_contract(),
             policy_decisions=policy_decisions,
             policy_decision_summary=policy_decision_summary,
+            failure_isolation=failure_isolation,
+            approval_queue=approval_queue_summary,
         )
         self._record_phase_state(
             state,
@@ -6260,10 +7288,6 @@ continuation stage(s) were appended.
         )
         self.rebuild_manifest_index()
         if persist:
-            queued_approvals = self._queue_required_approvals(state, task, policy_decisions)
-            if status in COMPLETED_STATUSES:
-                self._consume_task_approvals(state, task, status=status)
-            approval_blocked = status == "blocked" and bool(queued_approvals)
             self._record_phase_state(
                 state,
                 task,
@@ -6285,6 +7309,10 @@ continuation stage(s) were appended.
             task_state["last_finished_at"] = finished_at
             task_state["last_report"] = report_relative
             task_state["last_manifest"] = manifest_relative
+            if failure_isolation:
+                task_state["failure_isolation"] = failure_isolation
+            elif status in COMPLETED_STATUSES:
+                task_state.pop("failure_isolation", None)
             self._record_phase_state(
                 state,
                 task,
@@ -6338,6 +7366,8 @@ continuation stage(s) were appended.
                 for run in runs
             ],
             "safety": safety or {},
+            "approval_queue": approval_queue_summary,
+            **({"failure_isolation": failure_isolation} if failure_isolation else {}),
         }
 
     def _write_task_manifest(
@@ -6361,6 +7391,8 @@ continuation stage(s) were appended.
         policy_input: dict[str, Any] | None = None,
         policy_decisions: list[dict[str, Any]] | None = None,
         policy_decision_summary: dict[str, Any] | None = None,
+        failure_isolation: dict[str, Any] | None = None,
+        approval_queue: dict[str, Any] | None = None,
     ) -> None:
         manifest_relative = str(manifest_path.relative_to(self.project_root))
         report_relative = str(report_path.relative_to(self.project_root))
@@ -6420,6 +7452,10 @@ continuation stage(s) were appended.
             "policy_decision_summary": policy_decision_summary_payload,
             "git": git_payload,
         }
+        if approval_queue is not None:
+            payload["approval_queue"] = approval_queue
+        if failure_isolation is not None:
+            payload["failure_isolation"] = failure_isolation
         write_json(manifest_path, payload)
 
     def _command_run_manifest(self, task: HarnessTask, run: CommandRun) -> dict[str, Any]:
@@ -6508,16 +7544,22 @@ continuation stage(s) were appended.
         allow_live: bool,
         allow_manual: bool,
         allow_agent: bool,
+        approval_state: dict[str, Any] | None = None,
+        mutate_stale: bool = True,
     ) -> list[dict[str, Any]]:
         task_allow_manual = allow_manual or self._approval_is_approved(
             task,
             decision_kind="manual_approval",
             phase="task",
+            state=approval_state,
+            mutate_stale=mutate_stale,
         )
         task_allow_agent = allow_agent or self._approval_is_approved(
             task,
             decision_kind="agent_approval",
             phase="task",
+            state=approval_state,
+            mutate_stale=mutate_stale,
         )
         base_input = self._policy_input(
             task,
@@ -6544,6 +7586,9 @@ continuation stage(s) were appended.
                     phase=phase,
                     name=command.name,
                     executor=command.executor,
+                    command=command,
+                    state=approval_state,
+                    mutate_stale=mutate_stale,
                 )
                 command_allow_agent = task_allow_agent or self._approval_is_approved(
                     task,
@@ -6551,6 +7596,9 @@ continuation stage(s) were appended.
                     phase=phase,
                     name=command.name,
                     executor=command.executor,
+                    command=command,
+                    state=approval_state,
+                    mutate_stale=mutate_stale,
                 )
                 executor_metadata = self.executor_registry.metadata_for(command.executor)
                 command_input = self._policy_input(
@@ -6629,6 +7677,208 @@ continuation stage(s) were appended.
         }
         return {key: value for key, value in compact.items() if value is not None}
 
+    def _failure_isolation_block(
+        self,
+        task: HarnessTask,
+        *,
+        status: str,
+        message: str,
+        attempt: int,
+        started_at: str,
+        finished_at: str,
+        report_relative: str,
+        manifest_relative: str,
+        runs: list[CommandRun],
+        safety: dict[str, Any],
+        policy_decision_summary: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if status not in ISOLATED_FAILURE_STATUSES:
+            return None
+        file_scope_guard = safety.get("file_scope_guard", {}) if isinstance(safety, dict) else {}
+        file_scope_violations = [
+            str(path)
+            for path in file_scope_guard.get("violations", [])
+            if str(path).strip()
+        ]
+        blocking = [
+            deepcopy(decision)
+            for decision in policy_decision_summary.get("blocking", [])
+            if isinstance(decision, dict)
+        ]
+        phase = self._failure_isolation_phase(
+            status=status,
+            runs=runs,
+            file_scope_violations=file_scope_violations,
+            blocking_policy_decisions=blocking,
+        )
+        failure_kind = self._failure_isolation_kind(
+            status=status,
+            phase=phase,
+            file_scope_violations=file_scope_violations,
+            blocking_policy_decisions=blocking,
+        )
+        retry_exhaustion = self._failure_isolation_retry_exhaustion(
+            task,
+            status=status,
+            phase=phase,
+            attempt=attempt,
+            runs=runs,
+        )
+        return {
+            "schema_version": FAILURE_ISOLATION_SCHEMA_VERSION,
+            "kind": "engineering-harness.task-failure-isolation",
+            "status": status,
+            "task_id": task.id,
+            "milestone_id": task.milestone_id,
+            "phase": phase,
+            "failure_kind": failure_kind,
+            "message": message,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "attempt": attempt,
+            "retry_exhausted": bool(retry_exhaustion["exhausted"]),
+            "retry_exhaustion": retry_exhaustion,
+            "report_paths": {
+                "task_report": report_relative,
+                "task_manifest": manifest_relative,
+            },
+            "relevant_report_paths": [report_relative, manifest_relative],
+            "blocking_policy_decisions": blocking,
+            "file_scope_violations": file_scope_violations,
+            "local_next_action": self._failure_isolation_next_action(
+                task,
+                phase=phase,
+                failure_kind=failure_kind,
+                report_relative=report_relative,
+                file_scope_violations=file_scope_violations,
+                blocking_policy_decisions=blocking,
+            ),
+            "resolved": False,
+        }
+
+    def _failure_isolation_phase(
+        self,
+        *,
+        status: str,
+        runs: list[CommandRun],
+        file_scope_violations: list[str],
+        blocking_policy_decisions: list[dict[str, Any]],
+    ) -> str:
+        if file_scope_violations:
+            return "file-scope-guard"
+        for run in reversed(runs):
+            if run.status == "blocked":
+                return run.phase
+            if run.returncode not in (None, 0):
+                return run.phase
+        if blocking_policy_decisions:
+            return str(blocking_policy_decisions[0].get("phase") or "task")
+        return "task" if status == "blocked" else "unknown"
+
+    def _failure_isolation_kind(
+        self,
+        *,
+        status: str,
+        phase: str,
+        file_scope_violations: list[str],
+        blocking_policy_decisions: list[dict[str, Any]],
+    ) -> str:
+        if file_scope_violations or phase == "file-scope-guard":
+            return "file_scope_violation"
+        if status == "blocked" and blocking_policy_decisions:
+            return "policy_block"
+        if status == "blocked":
+            return "task_blocked"
+        phase_root = phase.split("-", 1)[0]
+        if phase_root in {"implementation", "acceptance", "repair", "e2e"}:
+            return f"{phase_root}_failure"
+        return "task_failure"
+
+    def _failure_isolation_retry_exhaustion(
+        self,
+        task: HarnessTask,
+        *,
+        status: str,
+        phase: str,
+        attempt: int,
+        runs: list[CommandRun],
+    ) -> dict[str, Any]:
+        acceptance_attempts = sum(1 for run in runs if run.phase.startswith("acceptance-"))
+        repair_attempts = sum(1 for run in runs if run.phase.startswith("repair-"))
+        task_attempt_exhausted = status == "failed" and attempt >= task.max_attempts
+        repair_iteration_exhausted = (
+            status == "failed"
+            and phase.startswith("acceptance-")
+            and acceptance_attempts >= task.max_task_iterations
+        )
+        return {
+            "exhausted": bool(task_attempt_exhausted or repair_iteration_exhausted),
+            "task_attempt_exhausted": bool(task_attempt_exhausted),
+            "repair_iteration_exhausted": bool(repair_iteration_exhausted),
+            "attempt": attempt,
+            "max_attempts": task.max_attempts,
+            "acceptance_attempts": acceptance_attempts,
+            "repair_attempts": repair_attempts,
+            "max_task_iterations": task.max_task_iterations,
+        }
+
+    def _failure_isolation_next_action(
+        self,
+        task: HarnessTask,
+        *,
+        phase: str,
+        failure_kind: str,
+        report_relative: str,
+        file_scope_violations: list[str],
+        blocking_policy_decisions: list[dict[str, Any]],
+    ) -> str:
+        if failure_kind == "file_scope_violation" or file_scope_violations:
+            return (
+                f"Inspect the file-scope violations for task {task.id}, keep changes within file_scope, "
+                "then rerun the task."
+            )
+        if failure_kind == "policy_block" or blocking_policy_decisions:
+            return (
+                f"Review the blocking policy decisions for task {task.id}, approve the required local gate "
+                "or adjust the task command, then rerun the task."
+            )
+        return (
+            f"Inspect phase {phase} in {report_relative}, apply a local fix within the task file_scope, "
+            "then rerun the task."
+        )
+
+    def _compact_failure_isolation(self, failure_isolation: dict[str, Any]) -> dict[str, Any]:
+        retry_exhaustion = (
+            failure_isolation.get("retry_exhaustion")
+            if isinstance(failure_isolation.get("retry_exhaustion"), dict)
+            else {}
+        )
+        report_paths = (
+            failure_isolation.get("report_paths")
+            if isinstance(failure_isolation.get("report_paths"), dict)
+            else {}
+        )
+        blocking = failure_isolation.get("blocking_policy_decisions")
+        violations = failure_isolation.get("file_scope_violations")
+        compact = {
+            "schema_version": failure_isolation.get("schema_version", FAILURE_ISOLATION_SCHEMA_VERSION),
+            "task_id": failure_isolation.get("task_id"),
+            "milestone_id": failure_isolation.get("milestone_id"),
+            "status": failure_isolation.get("status"),
+            "phase": failure_isolation.get("phase"),
+            "failure_kind": failure_isolation.get("failure_kind"),
+            "retry_exhausted": bool(failure_isolation.get("retry_exhausted", False)),
+            "attempt": failure_isolation.get("attempt"),
+            "max_attempts": retry_exhaustion.get("max_attempts"),
+            "finished_at": failure_isolation.get("finished_at"),
+            "report_path": report_paths.get("task_report"),
+            "manifest_path": report_paths.get("task_manifest"),
+            "blocking_policy_decision_count": len(blocking) if isinstance(blocking, list) else 0,
+            "file_scope_violation_count": len(violations) if isinstance(violations, list) else 0,
+            "local_next_action": failure_isolation.get("local_next_action"),
+        }
+        return {key: value for key, value in compact.items() if value is not None}
+
     def _git_context(self, safety: dict[str, Any]) -> dict[str, Any]:
         git_preflight = safety.get("git_preflight", {})
         file_scope_guard = safety.get("file_scope_guard", {})
@@ -6681,6 +7931,8 @@ continuation stage(s) were appended.
         safety: dict[str, Any] | None = None,
         policy_decisions: list[dict[str, Any]] | None = None,
         policy_decision_summary: dict[str, Any] | None = None,
+        failure_isolation: dict[str, Any] | None = None,
+        approval_queue: dict[str, Any] | None = None,
     ) -> None:
         report_path.parent.mkdir(parents=True, exist_ok=True)
         lines = [
@@ -6738,6 +7990,49 @@ continuation stage(s) were appended.
                 lines.extend(["Violations:", ""])
                 lines.extend(f"- `{path}`" for path in violations[:40])
                 lines.append("")
+        if approval_queue is not None:
+            lines.extend(
+                [
+                    "## Approval Leases",
+                    "",
+                    f"- Pending approvals: `{approval_queue.get('pending_count', 0)}`",
+                    f"- Approved leases: `{approval_queue.get('approved_count', 0)}`",
+                    f"- Stale approvals: `{approval_queue.get('stale_count', 0)}`",
+                    f"- Lease TTL seconds: `{approval_queue.get('lease_ttl_seconds')}`",
+                    "",
+                ]
+            )
+            stale_reasons = approval_queue.get("stale_reasons", {})
+            if isinstance(stale_reasons, dict) and stale_reasons:
+                lines.extend(["Stale reasons:", ""])
+                for reason, count in sorted(stale_reasons.items()):
+                    lines.append(f"- `{count}` {reason}")
+                lines.append("")
+            lines.extend(
+                [
+                    "```json",
+                    json.dumps(approval_queue, indent=2, sort_keys=True),
+                    "```",
+                    "",
+                ]
+            )
+        if failure_isolation is not None:
+            lines.extend(
+                [
+                    "## Failure Isolation",
+                    "",
+                    f"- Task: `{failure_isolation.get('task_id')}`",
+                    f"- Phase: `{failure_isolation.get('phase')}`",
+                    f"- Failure kind: `{failure_isolation.get('failure_kind')}`",
+                    f"- Retry exhausted: `{str(bool(failure_isolation.get('retry_exhausted'))).lower()}`",
+                    f"- Local next action: {failure_isolation.get('local_next_action')}",
+                    "",
+                    "```json",
+                    json.dumps(failure_isolation, indent=2, sort_keys=True),
+                    "```",
+                    "",
+                ]
+            )
         if policy_decisions is not None:
             summary = policy_decision_summary or self._policy_decision_summary(policy_decisions)
             lines.extend(

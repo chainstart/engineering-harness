@@ -40,6 +40,10 @@ Decision styles:
 
 The evaluator currently emits decisions for manual approval, task agent approval, executor policy,
 executor approval, command policy, live approval, git preflight, and file-scope guard checks.
+Approval queue records are leases bound to a deterministic fingerprint of the current local decision
+context. A later run treats an approved record as satisfied only when the current fingerprint matches
+and the lease TTL has not expired. Mismatched or expired records become `stale`, and fresh policy
+blocks queue new records instead of reusing the stale lease.
 
 The summary shape is intentionally compact:
 

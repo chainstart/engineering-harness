@@ -2,14 +2,33 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import sys
+import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
-from .core import COMPLETED_STATUSES, Harness, discover_projects, init_project, project_from_root, slug_now, utc_now
+from .core import (
+    COMPLETED_STATUSES,
+    Harness,
+    discover_projects,
+    init_project,
+    parse_utc_timestamp,
+    project_from_root,
+    slug_now,
+    utc_now,
+)
 from .goal_planner import DEFAULT_GOAL_STAGE_COUNT, materialize_goal_roadmap, plan_goal_roadmap
 from .io import write_json
 from .profiles import list_profiles
+
+
+WORKSPACE_DISPATCH_LEASE_SCHEMA_VERSION = 1
+WORKSPACE_DISPATCH_LEASE_DIRNAME = "workspace-dispatch-lease"
+WORKSPACE_DISPATCH_LEASE_STALE_SECONDS_ENV = "ENGINEERING_HARNESS_WORKSPACE_DISPATCH_LEASE_STALE_AFTER_SECONDS"
+DEFAULT_WORKSPACE_DISPATCH_LEASE_STALE_SECONDS = 3600
 
 
 def resolve_project_root(args: argparse.Namespace) -> Path:
@@ -166,6 +185,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         if drive_control.get("last_progress_message"):
             print(f"Drive progress: {drive_control.get('last_progress_message')}")
         print(f"Pending approvals: {approval_queue.get('pending_count', 0)}")
+        print(f"Stale approvals: {approval_queue.get('stale_count', 0)}")
         print("")
         for milestone in summary["milestones"]:
             print(
@@ -326,6 +346,16 @@ def write_drive_report(harness: Harness, payload: dict) -> str:
     json_path = report_path.with_suffix(".json")
     payload["drive_report"] = str(report_path.relative_to(harness.project_root))
     payload["drive_report_json"] = str(json_path.relative_to(harness.project_root))
+    final_status = payload.get("final_status") if isinstance(payload.get("final_status"), dict) else {}
+    payload["approval_queue"] = (
+        final_status.get("approval_queue")
+        if isinstance(final_status.get("approval_queue"), dict)
+        else payload.get("approval_queue", {})
+    )
+    payload["failure_isolation"] = harness.drive_failure_isolation_summary(
+        payload,
+        final_status=final_status if final_status else None,
+    )
     lines = [
         "# Harness Drive Report",
         "",
@@ -421,6 +451,57 @@ def write_drive_report(harness: Harness, payload: dict) -> str:
         )
         if item.get("report"):
             lines.append(f"  - Report: `{item['report']}`")
+    approval_queue = payload.get("approval_queue", {})
+    lines.extend(["", "## Approval Leases", ""])
+    if not approval_queue:
+        lines.append("No approval queue state was recorded.")
+    else:
+        lines.extend(
+            [
+                f"- Pending approvals: `{approval_queue.get('pending_count', 0)}`",
+                f"- Approved leases: `{approval_queue.get('approved_count', 0)}`",
+                f"- Stale approvals: `{approval_queue.get('stale_count', 0)}`",
+                f"- Lease TTL seconds: `{approval_queue.get('lease_ttl_seconds')}`",
+                "",
+            ]
+        )
+        stale_reasons = approval_queue.get("stale_reasons", {})
+        if isinstance(stale_reasons, dict) and stale_reasons:
+            lines.extend(["Stale reasons:", ""])
+            for reason, count in sorted(stale_reasons.items()):
+                lines.append(f"- `{count}` {reason}")
+            lines.append("")
+        lines.extend(
+            [
+                "Machine-readable approval queue:",
+                "",
+                "```json",
+                json.dumps(approval_queue, indent=2, sort_keys=True),
+                "```",
+            ]
+        )
+    failure_isolation = payload.get("failure_isolation", {})
+    lines.extend(["", "## Failure Isolation", ""])
+    if not failure_isolation or int(failure_isolation.get("unresolved_count", 0) or 0) == 0:
+        lines.append("No unresolved isolated task failure was recorded.")
+    else:
+        lines.append(f"Unresolved isolated failures: `{failure_isolation.get('unresolved_count', 0)}`")
+        for item in failure_isolation.get("latest_isolated_failures", []):
+            lines.append(
+                "- "
+                f"`{item.get('task_id')}` `{item.get('phase')}` `{item.get('failure_kind')}` - "
+                f"{item.get('local_next_action')}"
+            )
+    lines.extend(
+        [
+            "",
+            "Machine-readable failure isolation:",
+            "",
+            "```json",
+            json.dumps(failure_isolation, indent=2, sort_keys=True),
+            "```",
+        ]
+    )
     retrospective = payload.get("goal_gap_retrospective")
     lines.extend(["", "## Goal-Gap Retrospective", ""])
     if not retrospective:
@@ -569,12 +650,16 @@ def cmd_approvals(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        print(f"Approvals: {len(payload['items'])} shown, {payload['pending_count']} pending")
+        print(
+            f"Approvals: {len(payload['items'])} shown, {payload['pending_count']} pending, "
+            f"{payload.get('stale_count', 0)} stale"
+        )
         for item in payload["items"]:
             detail = item.get("name") or item.get("phase") or item.get("decision_kind")
+            stale = f" ({item.get('stale_reason')})" if item.get("status") == "stale" else ""
             print(
                 f"- {item['id']}: {item.get('status')} {item.get('approval_kind')} "
-                f"{item.get('task_id')} {detail} - {item.get('reason')}"
+                f"{item.get('task_id')} {detail} - {item.get('reason')}{stale}"
             )
     return 0
 
@@ -595,8 +680,8 @@ def cmd_approve(args: argparse.Namespace) -> int:
     return 0 if payload["status"] in {"approved", "consumed"} else 1
 
 
-def cmd_drive(args: argparse.Namespace) -> int:
-    root = resolve_project_root(args)
+def run_project_drive(root: Path, args: argparse.Namespace) -> tuple[int, dict]:
+    root = root.resolve()
     harness = Harness(root)
     started_at = utc_now()
     start = harness.start_drive()
@@ -616,17 +701,7 @@ def cmd_drive(args: argparse.Namespace) -> int:
         }
         payload["goal_gap_retrospective"] = harness.drive_goal_gap_retrospective(payload, final_status=final_status)
         payload["drive_report"] = write_drive_report(harness, payload)
-        if args.json:
-            print(json.dumps(payload, indent=2, sort_keys=True))
-        else:
-            print(f"Drive status: {payload['status']} - {payload['message']}")
-            print("Tasks run: 0")
-            print("Continuations: 0")
-            print("Self-iterations: 0")
-            print(f"Drive report: {payload['drive_report']}")
-            next_task = final_status.get("next_task")
-            print(f"Next task: {next_task['id'] if next_task else 'none'}")
-        return 0 if start["status"] == "paused" else 1
+        return (0 if start["status"] == "paused" else 1), payload
 
     deadline = time.monotonic() + args.time_budget_seconds if args.time_budget_seconds else None
     harness.drive_heartbeat(activity="drive-loop", message="drive loop started", clear_task=True)
@@ -662,6 +737,11 @@ def cmd_drive(args: argparse.Namespace) -> int:
         harness.drive_heartbeat(activity="task-selection", message="selecting next roadmap task", clear_task=True)
         task = harness.next_task()
         if task is None:
+            isolated_failures = harness.latest_isolated_failures_summary()
+            if int(isolated_failures.get("unresolved_count", 0) or 0) > 0:
+                status = "isolated_failure"
+                message = "Unresolved isolated task failure exists; resolve it before adding continuation work."
+                break
             if not args.rolling and not args.self_iterate:
                 status = "completed"
                 message = "Roadmap queue is empty."
@@ -801,19 +881,954 @@ def cmd_drive(args: argparse.Namespace) -> int:
     }
     payload["goal_gap_retrospective"] = harness.drive_goal_gap_retrospective(payload, final_status=final_status)
     payload["drive_report"] = write_drive_report(harness, payload)
+    return (0 if status in {"completed", "paused", "budget_exhausted"} else 1), payload
 
+
+def print_drive_payload(payload: dict, *, json_output: bool) -> None:
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    print(f"Drive status: {payload['status']} - {payload['message']}")
+    print(f"Tasks run: {len(payload.get('results', []))}")
+    print(f"Continuations: {len(payload.get('continuations', []))}")
+    print(f"Self-iterations: {len(payload.get('self_iterations', []))}")
+    print(f"Drive report: {payload['drive_report']}")
+    final_status = payload.get("final_status") if isinstance(payload.get("final_status"), dict) else {}
+    next_task = final_status.get("next_task") if isinstance(final_status, dict) else None
+    print(f"Next task: {next_task['id'] if next_task else 'none'}")
+
+
+def cmd_drive(args: argparse.Namespace) -> int:
+    root = resolve_project_root(args)
+    exit_code, payload = run_project_drive(root, args)
+    print_drive_payload(payload, json_output=args.json)
+    return exit_code
+
+
+def _workspace_drive_args(args: argparse.Namespace, project_root: Path) -> argparse.Namespace:
+    return argparse.Namespace(
+        project_root=project_root,
+        workspace=args.workspace,
+        project=None,
+        max_depth=args.max_depth,
+        json=False,
+        max_tasks=args.max_tasks,
+        time_budget_seconds=args.time_budget_seconds,
+        rolling=args.rolling,
+        self_iterate=args.self_iterate,
+        max_continuations=args.max_continuations,
+        max_self_iterations=args.max_self_iterations,
+        continuation_batch_size=args.continuation_batch_size,
+        no_progress_limit=args.no_progress_limit,
+        allow_live=args.allow_live,
+        allow_manual=args.allow_manual,
+        allow_agent=args.allow_agent,
+        stop_after_each=False,
+        commit_after_task=False,
+        push_after_task=False,
+        git_remote="origin",
+        git_branch=None,
+        git_message_template="chore(engineering): complete {task_id}",
+    )
+
+
+def _path_within(path: Path, parent: Path) -> bool:
+    try:
+        return path.resolve().is_relative_to(parent.resolve())
+    except OSError:
+        return False
+
+
+def _dispatch_skip(code: str, message: str, **evidence) -> dict:
+    payload = {"code": code, "message": message}
+    payload.update({key: value for key, value in evidence.items() if value is not None})
+    return payload
+
+
+def _add_dispatch_skip(item: dict, code: str, message: str, **evidence) -> None:
+    item.setdefault("skip_reasons", []).append(_dispatch_skip(code, message, **evidence))
+
+
+def _workspace_task_counts(summary: dict) -> dict:
+    counts = {"total": 0, "done": 0, "blocked": 0, "failed": 0, "pending": 0}
+    for milestone in summary.get("milestones", []):
+        if not isinstance(milestone, dict):
+            continue
+        for key in counts:
+            counts[key] += int(milestone.get(key, 0) or 0)
+    return counts
+
+
+def _compact_workspace_status_summary(summary: dict) -> dict:
+    drive_control = summary.get("drive_control") if isinstance(summary.get("drive_control"), dict) else {}
+    watchdog = drive_control.get("watchdog") if isinstance(drive_control.get("watchdog"), dict) else {}
+    approval_queue = summary.get("approval_queue") if isinstance(summary.get("approval_queue"), dict) else {}
+    failure_isolation = summary.get("failure_isolation") if isinstance(summary.get("failure_isolation"), dict) else {}
+    next_task = summary.get("next_task") if isinstance(summary.get("next_task"), dict) else None
+    return {
+        "project": summary.get("project"),
+        "profile": summary.get("profile"),
+        "root": summary.get("root"),
+        "roadmap": summary.get("roadmap"),
+        "task_counts": _workspace_task_counts(summary),
+        "next_task": (
+            {
+                "id": next_task.get("id"),
+                "title": next_task.get("title"),
+                "milestone_id": next_task.get("milestone_id"),
+            }
+            if next_task
+            else None
+        ),
+        "drive_control": {
+            "status": drive_control.get("status", "idle"),
+            "active": bool(drive_control.get("active", False)),
+            "pause_requested": bool(drive_control.get("pause_requested", False)),
+            "cancel_requested": bool(drive_control.get("cancel_requested", False)),
+            "stale": bool(drive_control.get("stale", False)),
+            "stale_reason": drive_control.get("stale_reason") or watchdog.get("reason"),
+            "watchdog_status": watchdog.get("status"),
+            "watchdog_message": watchdog.get("message"),
+        },
+        "approval_queue": {
+            "pending_count": int(approval_queue.get("pending_count", 0) or 0),
+            "stale_count": int(approval_queue.get("stale_count", 0) or 0),
+        },
+        "failure_isolation": {
+            "unresolved_count": int(failure_isolation.get("unresolved_count", 0) or 0),
+            "has_unresolved": bool(failure_isolation.get("has_unresolved", False)),
+            "latest_isolated_failures": failure_isolation.get("latest_isolated_failures", []),
+        },
+    }
+
+
+def _workspace_dispatch_queue_item(workspace: Path, project, args: argparse.Namespace, index: int) -> dict:
+    item = {
+        "index": index,
+        "project": project.name,
+        "root": str(project.root),
+        "roadmap": str(project.roadmap_path) if project.roadmap_path else None,
+        "profile": project.profile,
+        "kind": project.kind,
+        "configured": project.configured,
+        "eligible": False,
+        "selected": False,
+        "dispatch_status": "skipped",
+        "skip_reasons": [],
+    }
+    if not _path_within(project.root, workspace):
+        _add_dispatch_skip(
+            item,
+            "outside_local_scope",
+            "project root resolves outside the requested workspace",
+            workspace=str(workspace),
+        )
+        return item
+    if project.roadmap_path is not None and not _path_within(project.roadmap_path, project.root):
+        _add_dispatch_skip(
+            item,
+            "outside_local_scope",
+            "roadmap path resolves outside the project root",
+            workspace=str(workspace),
+        )
+        return item
+    if not project.configured or project.roadmap_path is None:
+        _add_dispatch_skip(item, "missing_roadmap", "project has no engineering roadmap")
+        return item
+
+    try:
+        harness = Harness(project.root, project.roadmap_path)
+        validation = harness.validate_roadmap()
+    except Exception as exc:
+        _add_dispatch_skip(item, "invalid_roadmap", f"roadmap could not be loaded: {exc}")
+        return item
+    item["roadmap_validation"] = validation
+    if validation.get("status") != "passed":
+        _add_dispatch_skip(
+            item,
+            "invalid_roadmap",
+            "roadmap validation failed",
+            errors=validation.get("errors", []),
+        )
+        return item
+
+    summary = harness.status_summary(refresh_approvals=False)
+    compact_summary = _compact_workspace_status_summary(summary)
+    item["summary"] = compact_summary
+    drive_control = compact_summary["drive_control"]
+    if drive_control.get("pause_requested") or drive_control.get("status") == "paused":
+        _add_dispatch_skip(item, "paused", "drive is paused for this project")
+    if drive_control.get("cancel_requested") or drive_control.get("status") == "cancelled":
+        _add_dispatch_skip(item, "cancelled", "drive is cancelled for this project")
+    if drive_control.get("stale") or drive_control.get("status") == "stale":
+        _add_dispatch_skip(
+            item,
+            "stale_running",
+            "drive control is stale and must be resumed before dispatch",
+            stale_reason=drive_control.get("stale_reason"),
+        )
+    elif drive_control.get("active") or drive_control.get("status") == "running":
+        _add_dispatch_skip(item, "already_running", "a drive is already running for this project")
+
+    pending_approvals = int(compact_summary["approval_queue"].get("pending_count", 0) or 0)
+    if pending_approvals > 0:
+        _add_dispatch_skip(
+            item,
+            "waiting_on_approvals",
+            "project has pending approval gates",
+            pending_count=pending_approvals,
+        )
+
+    unresolved_failures = int(compact_summary["failure_isolation"].get("unresolved_count", 0) or 0)
+    if unresolved_failures > 0:
+        _add_dispatch_skip(
+            item,
+            "unresolved_isolated_failures",
+            "project has unresolved isolated task failures",
+            unresolved_count=unresolved_failures,
+        )
+
+    if compact_summary.get("next_task") is None and not args.rolling and not args.self_iterate:
+        _add_dispatch_skip(item, "no_pending_task", "project has no pending roadmap task")
+
+    item["eligible"] = not item["skip_reasons"]
+    item["dispatch_status"] = "eligible" if item["eligible"] else "skipped"
+    return item
+
+
+def build_workspace_dispatch_queue(workspace: Path, args: argparse.Namespace) -> list[dict]:
+    workspace = workspace.resolve()
+    projects = discover_projects(workspace, max_depth=args.max_depth)
+    return [
+        _workspace_dispatch_queue_item(workspace, project, args, index)
+        for index, project in enumerate(projects)
+    ]
+
+
+def _workspace_dispatch_report_path(workspace: Path) -> Path:
+    report_dir = workspace / ".engineering" / "reports" / "workspace-dispatches"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    base = report_dir / f"{slug_now()}-workspace-dispatch.md"
+    candidate = base
+    counter = 2
+    while candidate.exists() or candidate.with_suffix(".json").exists():
+        candidate = base.with_name(f"{base.stem}_{counter}{base.suffix}")
+        counter += 1
+    return candidate
+
+
+def _workspace_relative(workspace: Path, path: Path) -> str:
+    try:
+        return str(path.relative_to(workspace))
+    except ValueError:
+        return str(path)
+
+
+def _workspace_dispatch_limits(args: argparse.Namespace) -> dict:
+    return {
+        "max_tasks": args.max_tasks,
+        "time_budget_seconds": args.time_budget_seconds,
+        "rolling": bool(args.rolling),
+        "self_iterate": bool(args.self_iterate),
+        "max_continuations": args.max_continuations,
+        "max_self_iterations": args.max_self_iterations,
+        "continuation_batch_size": args.continuation_batch_size,
+        "no_progress_limit": args.no_progress_limit,
+        "allow_live": bool(args.allow_live),
+        "allow_manual": bool(args.allow_manual),
+        "allow_agent": bool(args.allow_agent),
+        "push_after_task": False,
+        "commit_after_task": False,
+    }
+
+
+def _coerce_positive_int(value, default: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return number if number > 0 else default
+
+
+def _workspace_dispatch_lease_stale_after_seconds(args: argparse.Namespace) -> int:
+    cli_value = getattr(args, "lease_stale_after_seconds", None)
+    if cli_value is not None:
+        return _coerce_positive_int(cli_value, DEFAULT_WORKSPACE_DISPATCH_LEASE_STALE_SECONDS)
+    return _coerce_positive_int(
+        os.environ.get(WORKSPACE_DISPATCH_LEASE_STALE_SECONDS_ENV),
+        DEFAULT_WORKSPACE_DISPATCH_LEASE_STALE_SECONDS,
+    )
+
+
+def _workspace_dispatch_lease_dir(workspace: Path) -> Path:
+    return workspace / ".engineering" / "state" / WORKSPACE_DISPATCH_LEASE_DIRNAME
+
+
+def _workspace_dispatch_lease_path(workspace: Path) -> Path:
+    return _workspace_dispatch_lease_dir(workspace) / "lease.json"
+
+
+def _workspace_dispatch_command_options(workspace: Path, args: argparse.Namespace) -> dict:
+    payload = {
+        "workspace": str(workspace),
+        "max_depth": args.max_depth,
+        "lease_stale_after_seconds": _workspace_dispatch_lease_stale_after_seconds(args),
+    }
+    payload.update(_workspace_dispatch_limits(args))
+    return payload
+
+
+def _workspace_dispatch_owner_pid(value) -> int | None:
+    try:
+        pid = int(value)
+    except (TypeError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
+def _workspace_dispatch_process_is_running(pid: int | None) -> bool | None:
+    if pid is None:
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _workspace_dispatch_timestamp_age_seconds(value) -> int | None:
+    parsed = parse_utc_timestamp(value)
+    if parsed is None:
+        return None
+    return max(0, int((datetime.now(timezone.utc) - parsed).total_seconds()))
+
+
+def _write_workspace_dispatch_lease(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(tmp_path, path)
+
+
+def _read_workspace_dispatch_lease(path: Path) -> dict | None:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _workspace_dispatch_lease_snapshot(lease: dict | None) -> dict | None:
+    if not isinstance(lease, dict):
+        return None
+    keys = [
+        "schema_version",
+        "kind",
+        "status",
+        "workspace",
+        "owner_pid",
+        "started_at",
+        "last_heartbeat_at",
+        "heartbeat_count",
+        "selected_project",
+        "command_options",
+        "stale_after_seconds",
+        "current_activity",
+    ]
+    return {key: lease.get(key) for key in keys if key in lease}
+
+
+def _workspace_dispatch_lease_assessment(
+    lease_dir: Path,
+    lease_path: Path,
+    *,
+    stale_after_seconds: int,
+) -> dict:
+    checked_at = utc_now()
+    lease = _read_workspace_dispatch_lease(lease_path)
+    if lease is None:
+        try:
+            age_seconds = max(0, int(time.time() - lease_dir.stat().st_mtime))
+        except OSError:
+            age_seconds = None
+        stale = age_seconds is not None and age_seconds > stale_after_seconds
+        return {
+            "schema_version": WORKSPACE_DISPATCH_LEASE_SCHEMA_VERSION,
+            "status": "stale" if stale else "held",
+            "stale": stale,
+            "reason": "missing_lease_metadata" if stale else None,
+            "message": (
+                "workspace dispatch lease metadata is missing"
+                if stale
+                else "workspace dispatch lease metadata is being created"
+            ),
+            "checked_at": checked_at,
+            "threshold_seconds": stale_after_seconds,
+            "pid": None,
+            "pid_alive": None,
+            "heartbeat_at": None,
+            "heartbeat_age_seconds": age_seconds,
+            "holder": None,
+        }
+
+    threshold = _coerce_positive_int(lease.get("stale_after_seconds"), stale_after_seconds)
+    pid = _workspace_dispatch_owner_pid(lease.get("owner_pid"))
+    pid_alive = _workspace_dispatch_process_is_running(pid)
+    heartbeat_at = lease.get("last_heartbeat_at")
+    heartbeat_age_seconds = _workspace_dispatch_timestamp_age_seconds(heartbeat_at)
+    stale = False
+    reason = None
+    message = "workspace dispatch lease is held by a live process with a fresh heartbeat"
+    if pid is None:
+        stale = True
+        reason = "missing_pid"
+        message = "workspace dispatch lease has no owner pid"
+    elif pid_alive is False:
+        stale = True
+        reason = "pid_gone"
+        message = f"workspace dispatch lease owner pid is not running: {pid}"
+    elif heartbeat_age_seconds is None:
+        stale = True
+        reason = "missing_heartbeat"
+        message = "workspace dispatch lease has no heartbeat"
+    elif heartbeat_age_seconds > threshold:
+        stale = True
+        reason = "heartbeat_stale"
+        message = f"workspace dispatch lease heartbeat is stale after {heartbeat_age_seconds}s"
+    return {
+        "schema_version": WORKSPACE_DISPATCH_LEASE_SCHEMA_VERSION,
+        "status": "stale" if stale else "held",
+        "stale": stale,
+        "reason": reason,
+        "message": message,
+        "checked_at": checked_at,
+        "threshold_seconds": threshold,
+        "pid": pid,
+        "pid_alive": pid_alive,
+        "heartbeat_at": heartbeat_at,
+        "heartbeat_age_seconds": heartbeat_age_seconds,
+        "holder": _workspace_dispatch_lease_snapshot(lease),
+    }
+
+
+def _recover_workspace_dispatch_lease_dir(lease_dir: Path) -> dict:
+    recovered_at = utc_now()
+    recovery_dir = lease_dir.with_name(
+        f"{lease_dir.name}.recovered-{os.getpid()}-{int(time.time() * 1_000_000)}"
+    )
+    try:
+        os.rename(lease_dir, recovery_dir)
+    except FileNotFoundError:
+        return {
+            "recovered": True,
+            "recovered_at": recovered_at,
+            "message": "workspace dispatch lease disappeared before recovery",
+        }
+    except OSError as exc:
+        return {
+            "recovered": False,
+            "recovered_at": recovered_at,
+            "message": f"could not recover stale workspace dispatch lease: {exc}",
+        }
+    shutil.rmtree(recovery_dir, ignore_errors=True)
+    return {
+        "recovered": True,
+        "recovered_at": recovered_at,
+        "message": "stale workspace dispatch lease was recovered",
+    }
+
+
+def _new_workspace_dispatch_lease(
+    workspace: Path,
+    args: argparse.Namespace,
+    *,
+    stale_after_seconds: int,
+    recovery: dict | None,
+) -> dict:
+    now = utc_now()
+    payload = {
+        "schema_version": WORKSPACE_DISPATCH_LEASE_SCHEMA_VERSION,
+        "kind": "engineering-harness.workspace-dispatch-lease",
+        "status": "running",
+        "workspace": str(workspace),
+        "owner_pid": os.getpid(),
+        "started_at": now,
+        "last_heartbeat_at": now,
+        "heartbeat_count": 1,
+        "selected_project": None,
+        "command_options": _workspace_dispatch_command_options(workspace, args),
+        "stale_after_seconds": stale_after_seconds,
+        "current_activity": "workspace-dispatch-starting",
+    }
+    if recovery:
+        payload["recovered_from"] = recovery
+    return payload
+
+
+def acquire_workspace_dispatch_lease(workspace: Path, args: argparse.Namespace) -> dict:
+    lease_dir = _workspace_dispatch_lease_dir(workspace)
+    lease_path = _workspace_dispatch_lease_path(workspace)
+    lease_dir.parent.mkdir(parents=True, exist_ok=True)
+    stale_after_seconds = _workspace_dispatch_lease_stale_after_seconds(args)
+    recovery: dict | None = None
+    for _attempt in range(10):
+        try:
+            os.mkdir(lease_dir)
+        except FileExistsError:
+            assessment = _workspace_dispatch_lease_assessment(
+                lease_dir,
+                lease_path,
+                stale_after_seconds=stale_after_seconds,
+            )
+            if not assessment.get("stale"):
+                return {
+                    "acquired": False,
+                    "status": "held",
+                    "lease_dir": lease_dir,
+                    "lease_path": lease_path,
+                    "assessment": assessment,
+                }
+            recovered = _recover_workspace_dispatch_lease_dir(lease_dir)
+            recovery = {
+                "reason": assessment.get("reason"),
+                "message": assessment.get("message"),
+                "assessment": assessment,
+                "recovery": recovered,
+            }
+            if recovered.get("recovered"):
+                continue
+            return {
+                "acquired": False,
+                "status": "recovery_failed",
+                "lease_dir": lease_dir,
+                "lease_path": lease_path,
+                "assessment": assessment,
+                "recovery": recovery,
+            }
+        else:
+            lease = _new_workspace_dispatch_lease(
+                workspace,
+                args,
+                stale_after_seconds=stale_after_seconds,
+                recovery=recovery,
+            )
+            _write_workspace_dispatch_lease(lease_path, lease)
+            return {
+                "acquired": True,
+                "status": "acquired",
+                "lease_dir": lease_dir,
+                "lease_path": lease_path,
+                "lease": lease,
+                "recovery": recovery,
+                "_lock": threading.Lock(),
+            }
+    return {
+        "acquired": False,
+        "status": "acquire_raced",
+        "lease_dir": lease_dir,
+        "lease_path": lease_path,
+        "assessment": _workspace_dispatch_lease_assessment(
+            lease_dir,
+            lease_path,
+            stale_after_seconds=stale_after_seconds,
+        ),
+    }
+
+
+def _workspace_dispatch_lease_matches(lease: dict | None, acquisition: dict) -> bool:
+    expected = acquisition.get("lease") if isinstance(acquisition.get("lease"), dict) else {}
+    return (
+        isinstance(lease, dict)
+        and lease.get("owner_pid") == expected.get("owner_pid")
+        and lease.get("started_at") == expected.get("started_at")
+    )
+
+
+def heartbeat_workspace_dispatch_lease(
+    acquisition: dict,
+    *,
+    activity: str,
+    selected_project: dict | None = None,
+) -> dict | None:
+    if not acquisition.get("acquired"):
+        return None
+    lock = acquisition.get("_lock")
+    if lock is None:
+        lock = threading.Lock()
+        acquisition["_lock"] = lock
+    with lock:
+        lease_path = acquisition["lease_path"]
+        current = _read_workspace_dispatch_lease(lease_path)
+        if not _workspace_dispatch_lease_matches(current, acquisition):
+            return None
+        now = utc_now()
+        current["last_heartbeat_at"] = now
+        current["heartbeat_count"] = int(current.get("heartbeat_count", 0) or 0) + 1
+        current["current_activity"] = activity
+        if selected_project is not None:
+            current["selected_project"] = selected_project
+        _write_workspace_dispatch_lease(lease_path, current)
+        acquisition["lease"] = current
+        return current
+
+
+def start_workspace_dispatch_lease_heartbeat(acquisition: dict) -> tuple[threading.Event, threading.Thread] | None:
+    if not acquisition.get("acquired"):
+        return None
+    lease = acquisition.get("lease") if isinstance(acquisition.get("lease"), dict) else {}
+    stale_after_seconds = _coerce_positive_int(
+        lease.get("stale_after_seconds"),
+        DEFAULT_WORKSPACE_DISPATCH_LEASE_STALE_SECONDS,
+    )
+    interval = max(1, min(30, stale_after_seconds // 3 if stale_after_seconds > 3 else 1))
+    stop_event = threading.Event()
+
+    def run_heartbeat() -> None:
+        while not stop_event.wait(interval):
+            heartbeat_workspace_dispatch_lease(acquisition, activity="workspace-dispatch-running")
+
+    thread = threading.Thread(target=run_heartbeat, name="workspace-dispatch-lease-heartbeat", daemon=True)
+    thread.start()
+    return stop_event, thread
+
+
+def release_workspace_dispatch_lease(acquisition: dict) -> dict:
+    released_at = utc_now()
+    if not acquisition.get("acquired"):
+        return {
+            "status": "not_acquired",
+            "released_at": released_at,
+            "message": "workspace dispatch lease was not acquired by this process",
+        }
+    lock = acquisition.get("_lock")
+    if lock is None:
+        lock = threading.Lock()
+        acquisition["_lock"] = lock
+    with lock:
+        lease_dir = acquisition["lease_dir"]
+        lease_path = acquisition["lease_path"]
+        current = _read_workspace_dispatch_lease(lease_path)
+        if current is None:
+            if not lease_dir.exists():
+                return {
+                    "status": "already_released",
+                    "released_at": released_at,
+                    "message": "workspace dispatch lease was already released",
+                }
+            return {
+                "status": "missing_metadata",
+                "released_at": released_at,
+                "message": "workspace dispatch lease metadata is missing; release left directory in place",
+            }
+        if not _workspace_dispatch_lease_matches(current, acquisition):
+            return {
+                "status": "not_owner",
+                "released_at": released_at,
+                "message": "workspace dispatch lease is now owned by another process",
+                "current_holder": _workspace_dispatch_lease_snapshot(current),
+            }
+        shutil.rmtree(lease_dir, ignore_errors=True)
+        return {
+            "status": "released",
+            "released_at": released_at,
+            "message": "workspace dispatch lease released",
+        }
+
+
+def workspace_dispatch_lease_payload(
+    workspace: Path,
+    acquisition: dict,
+    *,
+    release: dict | None = None,
+) -> dict:
+    lease_path = acquisition.get("lease_path")
+    path = _workspace_relative(workspace, lease_path) if isinstance(lease_path, Path) else None
+    if not acquisition.get("acquired"):
+        return {
+            "schema_version": WORKSPACE_DISPATCH_LEASE_SCHEMA_VERSION,
+            "status": acquisition.get("status", "held"),
+            "acquired": False,
+            "path": path,
+            "assessment": acquisition.get("assessment"),
+            "recovery": acquisition.get("recovery"),
+        }
+    lease = acquisition.get("lease") if isinstance(acquisition.get("lease"), dict) else {}
+    return {
+        "schema_version": WORKSPACE_DISPATCH_LEASE_SCHEMA_VERSION,
+        "status": (release or {}).get("status") or acquisition.get("status", "acquired"),
+        "acquired": True,
+        "path": path,
+        "owner_pid": lease.get("owner_pid"),
+        "started_at": lease.get("started_at"),
+        "last_heartbeat_at": lease.get("last_heartbeat_at"),
+        "heartbeat_count": lease.get("heartbeat_count"),
+        "selected_project": lease.get("selected_project"),
+        "command_options": lease.get("command_options"),
+        "stale_after_seconds": lease.get("stale_after_seconds"),
+        "current_activity": lease.get("current_activity"),
+        "recovered": bool(acquisition.get("recovery")),
+        "recovery": acquisition.get("recovery"),
+        "release": release,
+    }
+
+
+def write_workspace_dispatch_report(workspace: Path, payload: dict) -> str:
+    report_path = _workspace_dispatch_report_path(workspace)
+    json_path = report_path.with_suffix(".json")
+    payload["dispatch_report"] = _workspace_relative(workspace, report_path)
+    payload["dispatch_report_json"] = _workspace_relative(workspace, json_path)
+    lines = [
+        "# Workspace Drive Dispatch Report",
+        "",
+        f"- Workspace: `{payload['workspace']}`",
+        f"- Status: `{payload['status']}`",
+        f"- Started: {payload['started_at']}",
+        f"- Finished: {payload['finished_at']}",
+        f"- Projects scanned: `{len(payload.get('queue', []))}`",
+        f"- Eligible projects: `{payload.get('eligible_count', 0)}`",
+        f"- Selected project: `{(payload.get('selected') or {}).get('project') or 'none'}`",
+        f"- Message: {payload['message']}",
+        "",
+        "## Workspace Dispatch Lease",
+        "",
+    ]
+    lease = payload.get("lease") if isinstance(payload.get("lease"), dict) else {}
+    if not lease:
+        lines.append("No workspace dispatch lease evidence was recorded.")
+    else:
+        lines.extend(
+            [
+                f"- Status: `{lease.get('status')}`",
+                f"- Acquired: `{str(bool(lease.get('acquired'))).lower()}`",
+                f"- Path: `{lease.get('path')}`",
+                f"- Owner pid: `{lease.get('owner_pid') or 'unknown'}`",
+                f"- Stale after seconds: `{lease.get('stale_after_seconds') or 'unknown'}`",
+            ]
+        )
+        selected_project = lease.get("selected_project")
+        if isinstance(selected_project, dict):
+            lines.append(f"- Lease selected project: `{selected_project.get('project')}`")
+        assessment = lease.get("assessment") if isinstance(lease.get("assessment"), dict) else {}
+        if assessment.get("reason"):
+            lines.append(f"- Lease reason: `{assessment.get('reason')}`")
+        release = lease.get("release") if isinstance(lease.get("release"), dict) else {}
+        if release.get("released_at"):
+            lines.append(f"- Released: {release.get('released_at')}")
+        lines.extend(
+            [
+                "",
+                "Machine-readable lease:",
+                "",
+                "```json",
+                json.dumps(lease, indent=2, sort_keys=True),
+                "```",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+        "## Dispatch Queue",
+        "",
+        ]
+    )
+    if not payload.get("queue"):
+        lines.append("No projects were discovered.")
+    for item in payload.get("queue", []):
+        lines.append(
+            f"- `{item.get('index')}` `{item.get('project')}` `{item.get('dispatch_status')}` "
+            f"eligible=`{str(bool(item.get('eligible'))).lower()}` root=`{item.get('root')}`"
+        )
+        summary = item.get("summary") if isinstance(item.get("summary"), dict) else {}
+        next_task = summary.get("next_task") if isinstance(summary.get("next_task"), dict) else None
+        if next_task:
+            lines.append(f"  - Next task: `{next_task.get('id')}` {next_task.get('title')}")
+        for reason in item.get("skip_reasons", []):
+            lines.append(f"  - Skip `{reason.get('code')}`: {reason.get('message')}")
+
+    drive = payload.get("drive") if isinstance(payload.get("drive"), dict) else None
+    lines.extend(["", "## Selected Drive", ""])
+    if not drive:
+        lines.append("No project drive was started.")
+    else:
+        lines.extend(
+            [
+                f"- Status: `{drive.get('status')}`",
+                f"- Tasks run: `{len(drive.get('results', []))}`",
+                f"- Continuations: `{len(drive.get('continuations', []))}`",
+                f"- Drive report: `{drive.get('drive_report')}`",
+            ]
+        )
+
+    machine_payload = {key: value for key, value in payload.items() if key != "drive"}
+    if drive:
+        machine_payload["drive"] = {
+            "project": drive.get("project"),
+            "root": drive.get("root"),
+            "status": drive.get("status"),
+            "message": drive.get("message"),
+            "drive_report": drive.get("drive_report"),
+            "drive_report_json": drive.get("drive_report_json"),
+            "result_count": len(drive.get("results", [])),
+            "continuation_count": len(drive.get("continuations", [])),
+        }
+    lines.extend(
+        [
+            "",
+            "## Machine-Readable Dispatch",
+            "",
+            "```json",
+            json.dumps(machine_payload, indent=2, sort_keys=True),
+            "```",
+            "",
+        ]
+    )
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+    write_json(json_path, payload)
+    return payload["dispatch_report"]
+
+
+def workspace_drive_dispatch(args: argparse.Namespace) -> tuple[int, dict]:
+    workspace = Path(args.workspace).resolve()
+    started_at = utc_now()
+    acquisition = acquire_workspace_dispatch_lease(workspace, args)
+    if not acquisition.get("acquired"):
+        status = "lease_held" if acquisition.get("status") == "held" else "lease_unavailable"
+        assessment = acquisition.get("assessment") if isinstance(acquisition.get("assessment"), dict) else {}
+        message = assessment.get("message") or "workspace dispatch lease is not available"
+        payload = {
+            "schema_version": 1,
+            "kind": "engineering-harness.workspace-drive-dispatch",
+            "workspace": str(workspace),
+            "status": status,
+            "message": message,
+            "started_at": started_at,
+            "finished_at": utc_now(),
+            "limits": _workspace_dispatch_limits(args),
+            "queue": [],
+            "eligible_count": 0,
+            "skipped_count": 0,
+            "selected": None,
+            "drive": None,
+            "lease": workspace_dispatch_lease_payload(workspace, acquisition),
+        }
+        write_workspace_dispatch_report(workspace, payload)
+        return 1, payload
+
+    heartbeat = start_workspace_dispatch_lease_heartbeat(acquisition)
+    payload: dict | None = None
+    drive_exit_code = 0
+    try:
+        heartbeat_workspace_dispatch_lease(acquisition, activity="workspace-dispatch-scanning")
+        queue = build_workspace_dispatch_queue(workspace, args)
+        heartbeat_workspace_dispatch_lease(acquisition, activity="workspace-dispatch-queue-built")
+        selected = next((item for item in queue if item.get("eligible")), None)
+        drive_payload = None
+        if selected is None:
+            status = "no_eligible_project"
+            message = "No eligible project drive was found."
+        else:
+            selected["selected"] = True
+            selected["dispatch_status"] = "dispatched"
+            selected_project = {
+                "project": selected.get("project"),
+                "root": selected.get("root"),
+                "queue_index": selected.get("index"),
+            }
+            heartbeat_workspace_dispatch_lease(
+                acquisition,
+                activity="workspace-dispatch-selected",
+                selected_project=selected_project,
+            )
+            for item in queue:
+                if item is selected or not item.get("eligible"):
+                    continue
+                item["dispatch_status"] = "skipped"
+                _add_dispatch_skip(
+                    item,
+                    "one_project_per_invocation",
+                    "another eligible project was selected first in deterministic queue order",
+                    selected_project=selected.get("project"),
+                    selected_root=selected.get("root"),
+                )
+            drive_args = _workspace_drive_args(args, Path(str(selected["root"])))
+            heartbeat_workspace_dispatch_lease(acquisition, activity="workspace-dispatch-driving")
+            drive_exit_code, drive_payload = run_project_drive(Path(str(selected["root"])), drive_args)
+            heartbeat_workspace_dispatch_lease(acquisition, activity="workspace-dispatch-drive-finished")
+            selected["drive_exit_code"] = drive_exit_code
+            selected["drive_status"] = drive_payload.get("status")
+            selected["drive_report"] = drive_payload.get("drive_report")
+            selected["drive_report_json"] = drive_payload.get("drive_report_json")
+            status = "dispatched" if drive_exit_code == 0 else "drive_failed"
+            message = f"Dispatched project {selected['project']}: {drive_payload.get('status')}"
+
+        eligible_count = sum(1 for item in queue if item.get("eligible"))
+        skipped_count = sum(1 for item in queue if item.get("dispatch_status") == "skipped")
+        payload = {
+            "schema_version": 1,
+            "kind": "engineering-harness.workspace-drive-dispatch",
+            "workspace": str(workspace),
+            "status": status,
+            "message": message,
+            "started_at": started_at,
+            "finished_at": utc_now(),
+            "limits": _workspace_dispatch_limits(args),
+            "queue": queue,
+            "eligible_count": eligible_count,
+            "skipped_count": skipped_count,
+            "selected": (
+                {
+                    "project": selected.get("project"),
+                    "root": selected.get("root"),
+                    "queue_index": selected.get("index"),
+                    "drive_status": selected.get("drive_status"),
+                    "drive_exit_code": selected.get("drive_exit_code"),
+                    "drive_report": selected.get("drive_report"),
+                    "drive_report_json": selected.get("drive_report_json"),
+                }
+                if selected
+                else None
+            ),
+            "drive": drive_payload,
+        }
+        return drive_exit_code, payload
+    finally:
+        if heartbeat is not None:
+            stop_event, thread = heartbeat
+            stop_event.set()
+            thread.join(timeout=1)
+        release = release_workspace_dispatch_lease(acquisition)
+        if payload is not None:
+            payload["finished_at"] = utc_now()
+            payload["lease"] = workspace_dispatch_lease_payload(workspace, acquisition, release=release)
+            write_workspace_dispatch_report(workspace, payload)
+
+
+def cmd_workspace_drive(args: argparse.Namespace) -> int:
+    if args.max_tasks < 1:
+        raise ValueError("--max-tasks must be at least 1")
+    if args.max_continuations < 0 or args.max_self_iterations < 0:
+        raise ValueError("--max-continuations and --max-self-iterations must be non-negative")
+    if args.lease_stale_after_seconds is not None and args.lease_stale_after_seconds < 1:
+        raise ValueError("--lease-stale-after-seconds must be at least 1")
+    exit_code, payload = workspace_drive_dispatch(args)
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        print(f"Drive status: {status} - {message}")
-        print(f"Tasks run: {len(results)}")
-        print(f"Continuations: {len(continuations)}")
-        print(f"Self-iterations: {len(self_iterations)}")
-        print(f"Drive report: {payload['drive_report']}")
-        next_task = final_status.get("next_task")
-        print(f"Next task: {next_task['id'] if next_task else 'none'}")
-
-    return 0 if status in {"completed", "paused", "budget_exhausted"} else 1
+        print(f"Workspace dispatch: {payload['status']} - {payload['message']}")
+        print(f"Projects scanned: {len(payload.get('queue', []))}")
+        print(f"Eligible projects: {payload.get('eligible_count', 0)}")
+        selected = payload.get("selected") or {}
+        print(f"Selected project: {selected.get('project') or 'none'}")
+        print(f"Dispatch report: {payload['dispatch_report']}")
+    return exit_code
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -853,6 +1868,27 @@ def build_parser() -> argparse.ArgumentParser:
     plan_goal.add_argument("--force", action="store_true")
     plan_goal.add_argument("--json", action="store_true")
     plan_goal.set_defaults(func=cmd_plan_goal)
+
+    workspace_drive = subparsers.add_parser(
+        "workspace-drive",
+        help="Dispatch at most one eligible project drive from a workspace queue",
+    )
+    workspace_drive.add_argument("--workspace", type=Path, default=Path.cwd())
+    workspace_drive.add_argument("--max-depth", type=int, default=3)
+    workspace_drive.add_argument("--max-tasks", type=int, default=1)
+    workspace_drive.add_argument("--time-budget-seconds", type=int, default=0)
+    workspace_drive.add_argument("--rolling", action="store_true")
+    workspace_drive.add_argument("--self-iterate", action="store_true")
+    workspace_drive.add_argument("--max-continuations", type=int, default=1)
+    workspace_drive.add_argument("--max-self-iterations", type=int, default=1)
+    workspace_drive.add_argument("--continuation-batch-size", type=int, default=1)
+    workspace_drive.add_argument("--no-progress-limit", type=int, default=2)
+    workspace_drive.add_argument("--lease-stale-after-seconds", type=int, default=None)
+    workspace_drive.add_argument("--allow-live", action="store_true")
+    workspace_drive.add_argument("--allow-manual", action="store_true")
+    workspace_drive.add_argument("--allow-agent", action="store_true")
+    workspace_drive.add_argument("--json", action="store_true")
+    workspace_drive.set_defaults(func=cmd_workspace_drive)
 
     for name, help_text, func in [
         ("status", "Show project or workspace status", cmd_status),

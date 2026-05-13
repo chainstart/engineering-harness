@@ -76,6 +76,10 @@ planner exits, the harness reloads `.engineering/roadmap.yaml` and accepts the o
   `continuation.stages` entries;
 - leaves existing roadmap fields, milestones, tasks, task statuses, and continuation stages unchanged;
 - avoids duplicate stage or task ids;
+- avoids duplicate continuation plans by comparing deterministic semantic fingerprints of stable
+  local fields such as titles, objectives, task titles, file scope, acceptance commands, and E2E
+  commands while ignoring ids, generated timestamps, and status fields; the context pack also
+  includes an identity fingerprint with task ids for auditability;
 - gives every new task non-empty `file_scope` and local acceptance commands;
 - includes `codex` implementation and `codex` repair entries for tasks that require implementation
   work;
@@ -98,10 +102,12 @@ Planners should read the context pack first and use the roadmap file only for th
 context pack is local-only, redacted with the harness secret redaction helper, and capped by count and
 excerpt size. Its top-level fields are:
 
-- `summary`: compact counts for continuation stages, manifests, reports, docs, tests, source files,
-  git status lines, and recent commits.
+- `summary`: compact counts for continuation stages, duplicate-plan fingerprints, manifests,
+  reports, docs, tests, source files, git status lines, and recent commits.
 - `roadmap`: project/profile/goal metadata, task status counts, next task, continuation summary, and
   capped continuation stage summaries.
+- `duplicate_plan`: a bounded list of existing continuation-stage fingerprints and task-id/title
+  hints so planners can avoid re-appending the same local plan under new ids.
 - `manifests`: latest manifest-index summary plus the most recent task-run manifest summaries.
 - `reports`: recent task report and drive report metadata.
 - `docs`: blueprint metadata and capped excerpts from relevant local docs.

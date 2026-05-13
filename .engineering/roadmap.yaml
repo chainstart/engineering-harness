@@ -1709,6 +1709,390 @@
           "generated_at": "2026-05-13T07:26:31Z"
         }
       ]
+    },
+    {
+      "id": "failure-isolation-recovery",
+      "title": "Failure Isolation and Recovery Evidence",
+      "status": "planned",
+      "objective": "Make failed or blocked unattended drive tasks produce structured local isolation evidence and deterministic next-action signals before the drive attempts more autonomous planning.",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-13T08:39:48Z",
+      "tasks": [
+        {
+          "id": "failed-task-isolation-records",
+          "title": "Record isolated task failures in manifests, status, and drive reports",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 2,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 2400,
+              "sandbox": "workspace-write",
+              "prompt": "Implement structured local failure isolation for tasks that end failed or blocked after implementation, acceptance, repair, E2E, policy, or file-scope handling. Add a deterministic `failure_isolation` block to task manifests and drive reports with task id, phase, failure kind, retry exhaustion, relevant report paths, blocking policy decisions, file-scope violations, and a local next action. Expose a compact latest-isolated-failures summary in `status --json`, and make rolling self-iteration stop before adding another continuation stage while an unresolved isolated failure exists. Add focused tests for acceptance failure after repair, policy or file-scope blocking, status JSON, and rolling drive stop behavior. Update docs for the recovery contract."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 1200,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing failure-isolation tests while preserving task manifests, drive reports, status JSON compatibility, file-scope guard behavior, and local-only unattended recovery semantics."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "failure isolation tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"failure_isolation or isolated_failure or failed_task\"",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 120
+            }
+          ],
+          "e2e": [
+            {
+              "name": "status remains machine-readable after failure isolation",
+              "command": "bin/engh status --project-root . --json",
+              "required": true,
+              "timeout_seconds": 120
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T08:39:48Z"
+        }
+      ]
+    },
+    {
+      "id": "duplicate-plan-detection",
+      "title": "Duplicate Plan Detection",
+      "status": "planned",
+      "objective": "Prevent unattended self-iteration from appending semantically redundant continuation stages when the remaining goal gap has not changed.",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-13T09:13:59Z",
+      "tasks": [
+        {
+          "id": "semantic-duplicate-stage-guard",
+          "title": "Reject duplicate self-iteration continuation stages",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 2,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 2400,
+              "sandbox": "workspace-write",
+              "prompt": "Add deterministic duplicate-plan detection to the self-iteration path. Compute normalized fingerprints for existing continuation stages from stable local fields such as title, objective, task ids, task titles, file_scope, acceptance commands, and E2E commands while ignoring generated timestamps and status fields. Include a bounded duplicate-plan summary in the self-iteration planner context pack. After the planner edits the roadmap, reject and roll back any newly appended stage whose fingerprint matches an existing continuation stage or whose tasks duplicate existing roadmap task ids, and write clear validation errors into the self-iteration report. Add focused tests for exact duplicate stages under new ids, duplicate task ids across roadmap tasks, valid distinct stages, and planner context duplicate summaries. Update docs for the duplicate-plan guard. Keep all behavior local-only and do not edit `.engineering/state` or `.engineering/reports` except through harness-generated temporary test artifacts."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 1200,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing duplicate-plan detection tests while preserving bounded self-iteration diffs, rollback on invalid planner output, planner context pack generation, roadmap validation, and local-only safety semantics."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "duplicate plan guard tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"duplicate_plan or duplicate_stage or self_iteration_output_guard\"",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 120
+            }
+          ],
+          "e2e": [
+            {
+              "name": "duplicate plan rejection smoke",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q -k duplicate_plan_guard",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "status remains machine-readable after duplicate guard",
+              "command": "bin/engh status --project-root . --json",
+              "required": true,
+              "timeout_seconds": 120
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T09:13:59Z"
+        }
+      ]
+    },
+    {
+      "id": "approval-lease-safety",
+      "title": "Approval Lease Safety",
+      "status": "planned",
+      "objective": "Prevent unattended drives from reusing stale human or operator approvals after the approved task, phase, command, executor, prompt, or policy decision changes.",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-13T09:39:26Z",
+      "tasks": [
+        {
+          "id": "approval-fingerprint-leases",
+          "title": "Bind approval queue records to current policy decision fingerprints",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 2,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 2400,
+              "sandbox": "workspace-write",
+              "prompt": "Harden approval queue semantics for unattended drives by turning approvals into bounded leases tied to the current policy decision. Add a deterministic approval fingerprint from local fields such as project root, task id, phase, command name, command text or prompt digest, executor id, decision kind, approval kind, approval flag, file scope, and relevant policy metadata. Persist the fingerprint and timestamps on queued approval records, require `_approval_is_approved` and command/task preflight paths to match the current fingerprint before treating an approval as satisfied, and mark mismatched or expired approvals stale with a clear reason while queuing a fresh approval. Add an optional local roadmap setting for approval lease TTL with a safe default that preserves existing short local test flows. Expose stale approval counts and reasons in `approvals --json`, `status --json`, task manifests, and drive reports without mutating `.engineering/reports` fixtures outside test temp projects. Add focused tests for manual, agent, and live approvals; command text change after approval; executor/prompt change after approval; expired lease; consumed approval behavior; and status/report visibility. Update docs for the approval lease contract. Keep behavior local-only and do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or killing processes."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 1200,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing approval lease safety tests while preserving existing approval queue UX, durable drive controls, policy decision summaries, manifest/report compatibility, stale approval visibility, and the local-only safety boundary."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "approval lease safety tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"approval and (lease or fingerprint or stale or expired)\"",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 120
+            }
+          ],
+          "e2e": [
+            {
+              "name": "stale approval requeue smoke",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q -k approval_lease_requeues_changed_command",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "approval queue remains machine-readable",
+              "command": "bin/engh approvals --project-root . --json",
+              "required": true,
+              "timeout_seconds": 120
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T09:39:26Z"
+        }
+      ]
+    },
+    {
+      "id": "workspace-dispatch-queue",
+      "title": "Workspace Dispatch Queue",
+      "status": "planned",
+      "objective": "Let one unattended harness process safely choose the next eligible project in a local workspace and run a bounded drive without corrupting other project state.",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-13T10:08:21Z",
+      "tasks": [
+        {
+          "id": "workspace-drive-dispatcher",
+          "title": "Add deterministic local workspace drive dispatch",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 2,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 2400,
+              "sandbox": "workspace-write",
+              "prompt": "Implement a deterministic local workspace drive dispatcher for unattended multi-project operation. Add a CLI/API path that scans a workspace, builds a dispatch queue from project status summaries, and runs at most one eligible project drive per invocation with bounded task and continuation budgets. Eligibility must skip projects that are paused, cancelled, stale-running, waiting on approvals, carrying unresolved isolated failures, missing a valid roadmap, or outside local filesystem scope, and it must explain every skip in JSON output and a local dispatch report. Preserve existing single-project drive behavior, do not push or deploy, and do not require external accounts. Add focused tests with temporary workspaces covering deterministic ordering, safety skips, one-project-at-a-time dispatch, JSON/report evidence, and no mutation of skipped projects. Update docs for operating a long unattended workspace dispatcher."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 1200,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing workspace dispatch tests while preserving single-project drive semantics, durable drive controls, approval leases, failure isolation safety, deterministic scan ordering, local-only execution, and machine-readable dispatch evidence."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "workspace dispatch tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"workspace_dispatch or dispatch_queue or workspace_drive\"",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 120
+            }
+          ],
+          "e2e": [
+            {
+              "name": "workspace scan remains machine-readable",
+              "command": "bin/engh scan --workspace . --json",
+              "required": true,
+              "timeout_seconds": 120
+            },
+            {
+              "name": "workspace dispatcher smoke",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q -k workspace_dispatch_runs_one_project",
+              "required": true,
+              "timeout_seconds": 600
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T10:08:21Z"
+        }
+      ]
+    },
+    {
+      "id": "workspace-dispatch-lease",
+      "title": "Workspace Dispatch Lease",
+      "status": "planned",
+      "objective": "Prevent overlapping unattended workspace dispatcher invocations from racing each other or mutating multiple projects concurrently.",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-13T10:24:32Z",
+      "tasks": [
+        {
+          "id": "workspace-dispatch-lock-leases",
+          "title": "Add local lease and stale recovery for workspace dispatch",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 2,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 2400,
+              "sandbox": "workspace-write",
+              "prompt": "Add a durable local workspace dispatch lease for `workspace-drive` so overlapping cron or supervisor ticks cannot race. Acquire the lease atomically before workspace scanning or dispatch, record workspace root, owner pid, started_at, last_heartbeat_at, selected project when known, command options, and a stale-after threshold. Refuse a fresh lease held by a live process with machine-readable JSON and dispatch report evidence; recover stale leases when the owner pid is gone or the heartbeat is too old; heartbeat while running and release the lease on normal or failed completion. Preserve existing single-project drive semantics, skip behavior, approval/failure isolation safety, and no-mutation guarantees for skipped projects. Add focused temporary-workspace tests for fresh lease rejection, stale pid recovery, stale heartbeat recovery, release on completion, JSON/report evidence, and no external accounts or live operations. Update docs for running `workspace-drive` from cron or a local supervisor with the lease contract."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 1200,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing workspace dispatch lease tests while preserving deterministic dispatch ordering, one-project-per-invocation behavior, stale drive detection, failure isolation skips, approval lease safety, local-only execution, and machine-readable dispatch evidence."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "workspace dispatch lease tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"workspace_dispatch and (lease or lock or heartbeat or stale)\"",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 120
+            }
+          ],
+          "e2e": [
+            {
+              "name": "fresh workspace lease rejection smoke",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q -k workspace_dispatch_rejects_fresh_lease",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "workspace scan remains machine-readable",
+              "command": "bin/engh scan --workspace . --json",
+              "required": true,
+              "timeout_seconds": 120
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T10:24:32Z"
+        }
+      ]
     }
   ],
   "continuation": {
@@ -3141,6 +3525,380 @@
               {
                 "name": "drive report smoke after retrospective changes",
                 "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 120
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "failure-isolation-recovery",
+        "title": "Failure Isolation and Recovery Evidence",
+        "objective": "Make failed or blocked unattended drive tasks produce structured local isolation evidence and deterministic next-action signals before the drive attempts more autonomous planning.",
+        "status": "planned",
+        "generated_by": "engineering-harness-self-iteration",
+        "generated_at": "2026-05-13T08:37:32Z",
+        "tasks": [
+          {
+            "id": "failed-task-isolation-records",
+            "title": "Record isolated task failures in manifests, status, and drive reports",
+            "status": "pending",
+            "max_attempts": 2,
+            "max_task_iterations": 2,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 2400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement structured local failure isolation for tasks that end failed or blocked after implementation, acceptance, repair, E2E, policy, or file-scope handling. Add a deterministic `failure_isolation` block to task manifests and drive reports with task id, phase, failure kind, retry exhaustion, relevant report paths, blocking policy decisions, file-scope violations, and a local next action. Expose a compact latest-isolated-failures summary in `status --json`, and make rolling self-iteration stop before adding another continuation stage while an unresolved isolated failure exists. Add focused tests for acceptance failure after repair, policy or file-scope blocking, status JSON, and rolling drive stop behavior. Update docs for the recovery contract."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 1200,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing failure-isolation tests while preserving task manifests, drive reports, status JSON compatibility, file-scope guard behavior, and local-only unattended recovery semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "failure isolation tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"failure_isolation or isolated_failure or failed_task\"",
+                "required": true,
+                "timeout_seconds": 600
+              },
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 600
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 120
+              }
+            ],
+            "e2e": [
+              {
+                "name": "status remains machine-readable after failure isolation",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 120
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "duplicate-plan-detection",
+        "title": "Duplicate Plan Detection",
+        "objective": "Prevent unattended self-iteration from appending semantically redundant continuation stages when the remaining goal gap has not changed.",
+        "status": "planned",
+        "generated_by": "engineering-harness-self-iteration",
+        "generated_at": "2026-05-13T09:11:15Z",
+        "tasks": [
+          {
+            "id": "semantic-duplicate-stage-guard",
+            "title": "Reject duplicate self-iteration continuation stages",
+            "status": "pending",
+            "max_attempts": 2,
+            "max_task_iterations": 2,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 2400,
+                "sandbox": "workspace-write",
+                "prompt": "Add deterministic duplicate-plan detection to the self-iteration path. Compute normalized fingerprints for existing continuation stages from stable local fields such as title, objective, task ids, task titles, file_scope, acceptance commands, and E2E commands while ignoring generated timestamps and status fields. Include a bounded duplicate-plan summary in the self-iteration planner context pack. After the planner edits the roadmap, reject and roll back any newly appended stage whose fingerprint matches an existing continuation stage or whose tasks duplicate existing roadmap task ids, and write clear validation errors into the self-iteration report. Add focused tests for exact duplicate stages under new ids, duplicate task ids across roadmap tasks, valid distinct stages, and planner context duplicate summaries. Update docs for the duplicate-plan guard. Keep all behavior local-only and do not edit `.engineering/state` or `.engineering/reports` except through harness-generated temporary test artifacts."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 1200,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing duplicate-plan detection tests while preserving bounded self-iteration diffs, rollback on invalid planner output, planner context pack generation, roadmap validation, and local-only safety semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "duplicate plan guard tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"duplicate_plan or duplicate_stage or self_iteration_output_guard\"",
+                "required": true,
+                "timeout_seconds": 600
+              },
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 600
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 120
+              }
+            ],
+            "e2e": [
+              {
+                "name": "duplicate plan rejection smoke",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k duplicate_plan_guard",
+                "required": true,
+                "timeout_seconds": 600
+              },
+              {
+                "name": "status remains machine-readable after duplicate guard",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 120
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "approval-lease-safety",
+        "title": "Approval Lease Safety",
+        "objective": "Prevent unattended drives from reusing stale human or operator approvals after the approved task, phase, command, executor, prompt, or policy decision changes.",
+        "status": "planned",
+        "generated_by": "engineering-harness-self-iteration",
+        "generated_at": "2026-05-13T09:40:00Z",
+        "tasks": [
+          {
+            "id": "approval-fingerprint-leases",
+            "title": "Bind approval queue records to current policy decision fingerprints",
+            "status": "pending",
+            "max_attempts": 2,
+            "max_task_iterations": 2,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 2400,
+                "sandbox": "workspace-write",
+                "prompt": "Harden approval queue semantics for unattended drives by turning approvals into bounded leases tied to the current policy decision. Add a deterministic approval fingerprint from local fields such as project root, task id, phase, command name, command text or prompt digest, executor id, decision kind, approval kind, approval flag, file scope, and relevant policy metadata. Persist the fingerprint and timestamps on queued approval records, require `_approval_is_approved` and command/task preflight paths to match the current fingerprint before treating an approval as satisfied, and mark mismatched or expired approvals stale with a clear reason while queuing a fresh approval. Add an optional local roadmap setting for approval lease TTL with a safe default that preserves existing short local test flows. Expose stale approval counts and reasons in `approvals --json`, `status --json`, task manifests, and drive reports without mutating `.engineering/reports` fixtures outside test temp projects. Add focused tests for manual, agent, and live approvals; command text change after approval; executor/prompt change after approval; expired lease; consumed approval behavior; and status/report visibility. Update docs for the approval lease contract. Keep behavior local-only and do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or killing processes."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 1200,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing approval lease safety tests while preserving existing approval queue UX, durable drive controls, policy decision summaries, manifest/report compatibility, stale approval visibility, and the local-only safety boundary."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "approval lease safety tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"approval and (lease or fingerprint or stale or expired)\"",
+                "required": true,
+                "timeout_seconds": 600
+              },
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 600
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 120
+              }
+            ],
+            "e2e": [
+              {
+                "name": "stale approval requeue smoke",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k approval_lease_requeues_changed_command",
+                "required": true,
+                "timeout_seconds": 600
+              },
+              {
+                "name": "approval queue remains machine-readable",
+                "command": "bin/engh approvals --project-root . --json",
+                "required": true,
+                "timeout_seconds": 120
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "workspace-dispatch-queue",
+        "title": "Workspace Dispatch Queue",
+        "objective": "Let one unattended harness process safely choose the next eligible project in a local workspace and run a bounded drive without corrupting other project state.",
+        "status": "planned",
+        "generated_by": "engineering-harness-self-iteration",
+        "generated_at": "2026-05-13T10:03:52Z",
+        "tasks": [
+          {
+            "id": "workspace-drive-dispatcher",
+            "title": "Add deterministic local workspace drive dispatch",
+            "status": "pending",
+            "max_attempts": 2,
+            "max_task_iterations": 2,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 2400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement a deterministic local workspace drive dispatcher for unattended multi-project operation. Add a CLI/API path that scans a workspace, builds a dispatch queue from project status summaries, and runs at most one eligible project drive per invocation with bounded task and continuation budgets. Eligibility must skip projects that are paused, cancelled, stale-running, waiting on approvals, carrying unresolved isolated failures, missing a valid roadmap, or outside local filesystem scope, and it must explain every skip in JSON output and a local dispatch report. Preserve existing single-project drive behavior, do not push or deploy, and do not require external accounts. Add focused tests with temporary workspaces covering deterministic ordering, safety skips, one-project-at-a-time dispatch, JSON/report evidence, and no mutation of skipped projects. Update docs for operating a long unattended workspace dispatcher."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 1200,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing workspace dispatch tests while preserving single-project drive semantics, durable drive controls, approval leases, failure isolation safety, deterministic scan ordering, local-only execution, and machine-readable dispatch evidence."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "workspace dispatch tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"workspace_dispatch or dispatch_queue or workspace_drive\"",
+                "required": true,
+                "timeout_seconds": 600
+              },
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 600
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 120
+              }
+            ],
+            "e2e": [
+              {
+                "name": "workspace scan remains machine-readable",
+                "command": "bin/engh scan --workspace . --json",
+                "required": true,
+                "timeout_seconds": 120
+              },
+              {
+                "name": "workspace dispatcher smoke",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k workspace_dispatch_runs_one_project",
+                "required": true,
+                "timeout_seconds": 600
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "workspace-dispatch-lease",
+        "title": "Workspace Dispatch Lease",
+        "objective": "Prevent overlapping unattended workspace dispatcher invocations from racing each other or mutating multiple projects concurrently.",
+        "status": "planned",
+        "generated_by": "engineering-harness-self-iteration",
+        "generated_at": "2026-05-13T10:22:30Z",
+        "tasks": [
+          {
+            "id": "workspace-dispatch-lock-leases",
+            "title": "Add local lease and stale recovery for workspace dispatch",
+            "status": "pending",
+            "max_attempts": 2,
+            "max_task_iterations": 2,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 2400,
+                "sandbox": "workspace-write",
+                "prompt": "Add a durable local workspace dispatch lease for `workspace-drive` so overlapping cron or supervisor ticks cannot race. Acquire the lease atomically before workspace scanning or dispatch, record workspace root, owner pid, started_at, last_heartbeat_at, selected project when known, command options, and a stale-after threshold. Refuse a fresh lease held by a live process with machine-readable JSON and dispatch report evidence; recover stale leases when the owner pid is gone or the heartbeat is too old; heartbeat while running and release the lease on normal or failed completion. Preserve existing single-project drive semantics, skip behavior, approval/failure isolation safety, and no-mutation guarantees for skipped projects. Add focused temporary-workspace tests for fresh lease rejection, stale pid recovery, stale heartbeat recovery, release on completion, JSON/report evidence, and no external accounts or live operations. Update docs for running `workspace-drive` from cron or a local supervisor with the lease contract."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 1200,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing workspace dispatch lease tests while preserving deterministic dispatch ordering, one-project-per-invocation behavior, stale drive detection, failure isolation skips, approval lease safety, local-only execution, and machine-readable dispatch evidence."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "workspace dispatch lease tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"workspace_dispatch and (lease or lock or heartbeat or stale)\"",
+                "required": true,
+                "timeout_seconds": 600
+              },
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 600
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 120
+              }
+            ],
+            "e2e": [
+              {
+                "name": "fresh workspace lease rejection smoke",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k workspace_dispatch_rejects_fresh_lease",
+                "required": true,
+                "timeout_seconds": 600
+              },
+              {
+                "name": "workspace scan remains machine-readable",
+                "command": "bin/engh scan --workspace . --json",
                 "required": true,
                 "timeout_seconds": 120
               }
