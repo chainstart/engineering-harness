@@ -36,6 +36,16 @@ from .domain_frontend import (
     derive_domain_frontend_decision,
     keyword_matches as domain_frontend_keyword_matches,
 )
+from .browser_e2e import (
+    BROWSER_E2E_EVIDENCE_DIR,
+    BROWSER_USER_EXPERIENCE_FAILURE_MARKER,
+    BROWSER_USER_EXPERIENCE_GATE_KIND,
+    BROWSER_USER_EXPERIENCE_SCHEMA_VERSION,
+    browser_user_experience_command,
+    browser_user_experience_gate,
+    detect_playwright_support,
+    is_browser_experience_kind,
+)
 from .io import append_jsonl, load_mapping, write_json, write_mapping
 from .profiles import command_policy, default_roadmap
 
@@ -606,6 +616,7 @@ class AcceptanceCommand:
     sandbox: str = "workspace-write"
     no_progress_timeout_seconds: int | None = None
     requested_capabilities: tuple[str, ...] = ()
+    user_experience_gate: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1931,6 +1942,7 @@ class Harness:
             sandbox = command.sandbox
             executor = command.executor
             requested_capabilities = list(command.requested_capabilities)
+            user_experience_gate = deepcopy(command.user_experience_gate)
         else:
             name = str(command.get("name") or "")
             command_text = command.get("command")
@@ -1942,6 +1954,11 @@ class Harness:
             sandbox = command.get("sandbox")
             executor = str(command.get("executor") or "")
             requested_capabilities = self._normalize_requested_capabilities(command.get("requested_capabilities"))
+            user_experience_gate = (
+                deepcopy(command.get("user_experience_gate"))
+                if isinstance(command.get("user_experience_gate"), dict)
+                else {}
+            )
         return {
             "name": name,
             "executor": executor,
@@ -1951,6 +1968,7 @@ class Harness:
             "model": model,
             "sandbox": sandbox,
             "requested_capabilities": list(requested_capabilities),
+            "user_experience_gate": user_experience_gate,
             "command_sha256": self._approval_text_digest(command_text),
             "prompt_sha256": self._approval_text_digest(prompt),
             "has_command": command_text is not None,
@@ -2959,6 +2977,7 @@ class Harness:
                 "model",
                 "sandbox",
                 "requested_capabilities",
+                "user_experience_gate",
             ],
             "commands": [
                 {
@@ -2974,6 +2993,7 @@ class Harness:
                     "model": command.model,
                     "sandbox": command.sandbox,
                     "requested_capabilities": list(command.requested_capabilities),
+                    "user_experience_gate": deepcopy(command.user_experience_gate),
                 }
                 for index, command in enumerate(commands)
             ],
@@ -2992,6 +3012,7 @@ class Harness:
                 "model": command.model,
                 "sandbox": command.sandbox,
                 "requested_capabilities": list(command.requested_capabilities),
+                "user_experience_gate": deepcopy(command.user_experience_gate),
             }
             for command in commands
         ]
@@ -4240,6 +4261,9 @@ class Harness:
                     "executor": str(run.get("executor", "")),
                     "status": str(run.get("status", "")),
                     "returncode": run.get("returncode"),
+                    "user_experience_gate": deepcopy(run.get("user_experience_gate"))
+                    if isinstance(run.get("user_experience_gate"), dict)
+                    else {},
                 }
                 for run in runs[: SELF_ITERATION_CONTEXT_LIMITS["manifest_run_count"]]
                 if isinstance(run, dict)
@@ -5938,6 +5962,11 @@ continuation stage(s) were appended.
                 if capability_field is not None
                 else ()
             )
+            user_experience_gate = item.get("user_experience_gate")
+            if not isinstance(user_experience_gate, dict):
+                user_experience_gate = item.get("browser_user_experience")
+            if not isinstance(user_experience_gate, dict):
+                user_experience_gate = {}
             commands.append(
                 AcceptanceCommand(
                     name=str(name),
@@ -5950,6 +5979,7 @@ continuation stage(s) were appended.
                     sandbox=str(item.get("sandbox", "workspace-write")),
                     no_progress_timeout_seconds=no_progress_timeout,
                     requested_capabilities=requested_capabilities,
+                    user_experience_gate=deepcopy(user_experience_gate),
                 )
             )
         return commands
@@ -5973,6 +6003,180 @@ continuation stage(s) were appended.
                 continue
             return task
         return None
+
+    def browser_user_experience_summary(self) -> dict[str, Any]:
+        experience = self.frontend_experience_plan()
+        experience_kind = str(experience.get("kind") or "")
+        browser_required = is_browser_experience_kind(experience_kind)
+        journeys = [item for item in experience.get("e2e_journeys", []) if isinstance(item, dict)]
+        command_gates: list[dict[str, Any]] = []
+        for task in self.iter_tasks():
+            for command in task.e2e:
+                if not self._command_is_user_experience_gate(command):
+                    continue
+                gate = deepcopy(command.user_experience_gate)
+                command_gates.append(
+                    {
+                        "task_id": task.id,
+                        "milestone_id": task.milestone_id,
+                        "name": command.name,
+                        "command": self._display_command(command, task),
+                        "required": command.required,
+                        "gate": gate,
+                        "journey_id": str((gate.get("journey") or {}).get("id") or ""),
+                    }
+                )
+
+        latest_runs_by_journey: dict[str, dict[str, Any]] = {}
+        latest_failures: list[dict[str, Any]] = []
+        index = self._build_manifest_index()
+        manifests = index.get("manifests", []) if isinstance(index.get("manifests"), list) else []
+        for manifest in reversed(manifests):
+            runs = manifest.get("runs", []) if isinstance(manifest.get("runs"), list) else []
+            for run in reversed(runs):
+                if not isinstance(run, dict) or str(run.get("phase")) != "e2e":
+                    continue
+                gate = run.get("user_experience_gate") if isinstance(run.get("user_experience_gate"), dict) else {}
+                if str(gate.get("kind") or "") != BROWSER_USER_EXPERIENCE_GATE_KIND:
+                    continue
+                journey = gate.get("journey") if isinstance(gate.get("journey"), dict) else {}
+                journey_id = str(journey.get("id") or "")
+                if not journey_id:
+                    continue
+                run_payload = {
+                    "journey_id": journey_id,
+                    "task_id": manifest.get("task_id"),
+                    "manifest_path": manifest.get("manifest_path"),
+                    "report_path": manifest.get("report_path"),
+                    "name": run.get("name"),
+                    "status": run.get("status"),
+                    "returncode": run.get("returncode"),
+                    "finished_at": manifest.get("finished_at"),
+                }
+                latest_runs_by_journey.setdefault(journey_id, run_payload)
+                if str(run.get("status")) != "passed":
+                    latest_failures.append(run_payload)
+
+        journey_summaries: list[dict[str, Any]] = []
+        for journey in journeys:
+            journey_id = str(journey.get("id") or "primary-browser-journey")
+            gates_for_journey = [gate for gate in command_gates if gate.get("journey_id") == journey_id]
+            gate_payload = (
+                deepcopy((gates_for_journey[0].get("gate") or {}))
+                if gates_for_journey
+                else browser_user_experience_gate(self.project_root, experience=experience, journey=journey)
+                if browser_required
+                else {}
+            )
+            declaration_paths = (
+                gate_payload.get("route_form_role_declarations")
+                if isinstance(gate_payload.get("route_form_role_declarations"), list)
+                else []
+            )
+            evidence_paths = gate_payload.get("evidence_paths") if isinstance(gate_payload.get("evidence_paths"), dict) else {}
+            latest_run = latest_runs_by_journey.get(journey_id)
+            journey_summaries.append(
+                {
+                    "id": journey_id,
+                    "persona": str(journey.get("persona") or ""),
+                    "goal": str(journey.get("goal") or ""),
+                    "gate_configured": bool(gates_for_journey),
+                    "command_count": len(gates_for_journey),
+                    "commands": [
+                        {
+                            "task_id": item.get("task_id"),
+                            "milestone_id": item.get("milestone_id"),
+                            "name": item.get("name"),
+                            "command": item.get("command"),
+                            "required": item.get("required"),
+                        }
+                        for item in gates_for_journey
+                    ],
+                    "declaration_paths": self._browser_path_statuses(declaration_paths),
+                    "declaration_summary": self._browser_declaration_summary(declaration_paths),
+                    "evidence_paths": self._browser_evidence_statuses(evidence_paths),
+                    "latest_run": latest_run,
+                    "latest_status": latest_run.get("status") if isinstance(latest_run, dict) else "not_run",
+                }
+            )
+
+        if not browser_required:
+            status = "not_applicable"
+        elif latest_failures:
+            status = "failed"
+        elif journey_summaries and all(item.get("latest_status") == "passed" for item in journey_summaries):
+            status = "passed"
+        elif command_gates:
+            status = "configured"
+        else:
+            status = "planned"
+
+        return {
+            "schema_version": BROWSER_USER_EXPERIENCE_SCHEMA_VERSION,
+            "kind": "engineering-harness.browser-user-experience-summary",
+            "status": status,
+            "browser_required": browser_required,
+            "experience_kind": experience_kind,
+            "journey_count": len(journey_summaries),
+            "configured_gate_count": len(command_gates),
+            "playwright": detect_playwright_support(self.project_root),
+            "fallback": {
+                "kind": "static-html-smoke",
+                "requires_external_services": False,
+                "evidence_dir": BROWSER_E2E_EVIDENCE_DIR,
+            },
+            "journeys": journey_summaries,
+            "latest_failures": latest_failures[:FAILURE_ISOLATION_SUMMARY_LIMIT],
+        }
+
+    def _browser_path_statuses(self, paths: list[Any]) -> list[dict[str, Any]]:
+        statuses: list[dict[str, Any]] = []
+        for path in paths:
+            text = str(path)
+            if not text.strip():
+                continue
+            candidate = self.project_root / text
+            statuses.append({"path": text, "exists": candidate.exists()})
+        return statuses
+
+    def _browser_evidence_statuses(self, paths: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: {"path": str(value), "exists": (self.project_root / str(value)).exists()}
+            for key, value in sorted(paths.items())
+            if str(value).strip()
+        }
+
+    def _browser_declaration_summary(self, paths: list[Any]) -> dict[str, Any]:
+        for path in paths:
+            candidate = self.project_root / str(path)
+            if not candidate.exists():
+                continue
+            try:
+                payload = load_mapping(candidate)
+            except Exception as exc:
+                return {"path": str(path), "status": "invalid", "error": self._truncate_text(str(exc), 200)}
+            routes = payload.get("routes") if isinstance(payload, dict) and isinstance(payload.get("routes"), list) else []
+            form_count = 0
+            role_count = 0
+            for route in routes:
+                if not isinstance(route, dict):
+                    continue
+                forms = route.get("expect_forms", route.get("forms", []))
+                if isinstance(forms, dict):
+                    form_count += 1
+                elif isinstance(forms, list):
+                    form_count += sum(1 for item in forms if isinstance(item, dict))
+                roles = route.get("expect_roles", route.get("roles", []))
+                if isinstance(roles, list):
+                    role_count += len([item for item in roles if str(item).strip()])
+            return {
+                "path": str(path),
+                "status": "loaded",
+                "route_count": len([route for route in routes if isinstance(route, dict)]),
+                "form_count": form_count,
+                "role_count": role_count,
+            }
+        return {"status": "missing", "route_count": 0, "form_count": 0, "role_count": 0}
 
     def runtime_dashboard_summary(self, status_summary: dict[str, Any] | None = None) -> dict[str, Any]:
         summary = status_summary or self.status_summary()
@@ -6015,6 +6219,11 @@ continuation stage(s) were appended.
             if isinstance(summary.get("experience"), dict)
             else self.frontend_experience_plan()
         )
+        browser_user_experience = (
+            deepcopy(summary.get("browser_user_experience"))
+            if isinstance(summary.get("browser_user_experience"), dict)
+            else self.browser_user_experience_summary()
+        )
         return {
             "schema_version": RUNTIME_DASHBOARD_SCHEMA_VERSION,
             "kind": "engineering-harness.runtime-dashboard",
@@ -6024,6 +6233,7 @@ continuation stage(s) were appended.
             "status_source": "engh status --json",
             "frontend_experience": frontend_experience,
             "domain_frontend": self._runtime_domain_frontend_payload(frontend_experience),
+            "browser_user_experience": browser_user_experience,
             "drive_control": self._runtime_drive_control_payload(drive_control),
             "drive_watchdog": deepcopy(drive_control.get("watchdog") if isinstance(drive_control.get("watchdog"), dict) else {}),
             "current_task": current_task,
@@ -6714,12 +6924,20 @@ continuation stage(s) were appended.
                     e2e_manifest_paths.append(manifest_path)
         passed_e2e = any(str(run.get("status")) == "passed" for run in e2e_runs)
         roadmap_e2e_count = sum(1 for task in self.iter_tasks() if task.e2e)
+        browser_ux = summary.get("browser_user_experience") if isinstance(summary.get("browser_user_experience"), dict) else {}
+        browser_ux_status = str(browser_ux.get("status") or "")
         test_count = int(tests.get("total_count", 0) or 0)
         source_count = int(source_inventory.get("total_count", 0) or 0)
-        if passed_e2e:
+        if browser_ux_status == "failed":
+            e2e_status, e2e_risk = "blocked", 84
+            e2e_rationale = "A browser user-experience gate has a recent unresolved failure."
+        elif browser_ux_status == "passed":
+            e2e_status, e2e_risk = "complete", 6
+            e2e_rationale = "Browser user-experience gates have passing local evidence."
+        elif passed_e2e:
             e2e_status, e2e_risk = "complete", 8
             e2e_rationale = "Recent manifests include a passing E2E run."
-        elif e2e_runs or roadmap_e2e_count > 0:
+        elif e2e_runs or roadmap_e2e_count > 0 or browser_ux_status == "configured":
             e2e_status, e2e_risk = "partial", 52
             e2e_rationale = "E2E gates are defined or have run, but no recent passing E2E evidence was found."
         elif test_count > 0 and source_count > 0:
@@ -6833,7 +7051,14 @@ continuation stage(s) were appended.
                 "Real E2E evidence",
                 e2e_status,
                 e2e_risk,
-                [*e2e_manifest_paths, "test_inventory", "source_inventory", "roadmap.tasks.e2e"],
+                [
+                    *e2e_manifest_paths,
+                    "browser_user_experience",
+                    "runtime_dashboard.browser_user_experience",
+                    "test_inventory",
+                    "source_inventory",
+                    "roadmap.tasks.e2e",
+                ],
                 e2e_rationale,
                 ["add-real-e2e-evidence"] if e2e_status != "complete" else [],
             ),
@@ -7055,6 +7280,7 @@ continuation stage(s) were appended.
         checkpoint_readiness = self.checkpoint_readiness(self._checkpoint_readiness_task(next_task, drive_control))
         daemon_supervisor_runtime = self._runtime_daemon_supervisor_summary()
         experience = self.frontend_experience_plan()
+        browser_user_experience = self.browser_user_experience_summary()
         summary = {
             "project": self.roadmap.get("project", self.project_root.name),
             "profile": self.roadmap.get("profile"),
@@ -7066,6 +7292,7 @@ continuation stage(s) were appended.
             "checkpoint_readiness": checkpoint_readiness,
             "experience": experience,
             "domain_frontend": deepcopy(experience.get("decision_contract", {})),
+            "browser_user_experience": browser_user_experience,
             "continuation": self.continuation_summary(),
             "self_iteration": self.self_iteration_summary(),
             "drive_control": drive_control,
@@ -7999,6 +8226,35 @@ continuation stage(s) were appended.
             *self._string_items(guidance.get("acceptance_terms")),
         ]
         candidates = [str(pattern).format(slug=journey_slug) for pattern in guidance["journey_candidates"]]
+        browser_gate = (
+            browser_user_experience_gate(self.project_root, experience=experience, journey=journey)
+            if is_browser_experience_kind(kind)
+            else None
+        )
+        if browser_gate is not None:
+            declaration_paths = browser_gate.get("route_form_role_declarations", [])
+            if isinstance(declaration_paths, list):
+                candidates = [*declaration_paths, *candidates]
+            e2e_gate = {
+                "name": f"{journey_id} browser user-experience gate passes",
+                "command": browser_user_experience_command(journey_id),
+                "guidance": (
+                    "Declare the journey's local routes, expected forms, and expected accessibility roles, "
+                    "then capture DOM or screenshot evidence under the configured browser E2E artifact path."
+                ),
+                "timeout_seconds": 1200,
+                "user_experience_gate": browser_gate,
+            }
+        else:
+            e2e_gate = {
+                "name": f"{journey_id} e2e journey check exists",
+                "command": self._candidate_content_check_command(
+                    candidates,
+                    [journey_id, persona],
+                    missing_label="missing e2e journey check",
+                ),
+                "timeout_seconds": 120,
+            }
         return {
             "id": task_id,
             "title": f"Add {label} journey check for {journey_id}",
@@ -8034,17 +8290,7 @@ continuation stage(s) were appended.
                     "timeout_seconds": 60,
                 }
             ],
-            "e2e": [
-                {
-                    "name": f"{journey_id} e2e journey check exists",
-                    "command": self._candidate_content_check_command(
-                        candidates,
-                        [journey_id, persona],
-                        missing_label="missing e2e journey check",
-                    ),
-                    "timeout_seconds": 120,
-                }
-            ],
+            "e2e": [e2e_gate],
             "frontend": self._frontend_task_metadata(
                 experience,
                 task_kind="journey-check",
@@ -8084,8 +8330,11 @@ continuation stage(s) were appended.
             f"Experience kind: {experience.get('kind')}.\n"
             f"Guidance: {guidance}\n"
             "Keep the work local and deterministic. Browser projects may use their existing browser test framework; "
-            "API-only and CLI-only projects may use documented examples, API tests, CLI tests, or shell/Python checks.\n"
+            "when no local Playwright runner is installed, declare static HTML routes, expected forms, and roles for "
+            "the harness browser smoke. API-only and CLI-only projects may use documented examples, API tests, CLI "
+            "tests, or shell/Python checks.\n"
             f"Place journey evidence or executable checks in one of: {', '.join(candidates)}.\n"
+            "For browser journeys, capture screenshot or DOM evidence under `artifacts/browser-e2e/`.\n"
             "Update `docs/frontend-experience.md` with the acceptance criteria and the selected E2E command. "
             "Do not require private services, live deployments, paid accounts, or a specific frontend framework."
         )
@@ -8117,6 +8366,12 @@ continuation stage(s) were appended.
                 "persona": str(journey.get("persona", "")),
                 "goal": str(journey.get("goal", "")),
             }
+            if is_browser_experience_kind(str(experience.get("kind", ""))):
+                payload["browser_user_experience_gate"] = browser_user_experience_gate(
+                    self.project_root,
+                    experience=experience,
+                    journey=journey,
+                )
         if candidate_paths is not None:
             payload["candidate_check_paths"] = candidate_paths
         return payload
@@ -8303,6 +8558,9 @@ continuation stage(s) were appended.
                     "requested_capabilities": run.get("requested_capabilities", [])
                     if isinstance(run.get("requested_capabilities"), list)
                     else [],
+                    "user_experience_gate": run.get("user_experience_gate")
+                    if isinstance(run.get("user_experience_gate"), dict)
+                    else {},
                     "executor_capabilities": run.get("executor_capabilities", [])
                     if isinstance(run.get("executor_capabilities"), list)
                     else [],
@@ -8815,6 +9073,17 @@ continuation stage(s) were appended.
         if not isinstance(item, dict):
             errors.append(f"{location} must be a mapping")
             return
+        user_experience_gate = item.get("user_experience_gate")
+        if user_experience_gate is not None:
+            if not isinstance(user_experience_gate, dict):
+                errors.append(f"{location}.user_experience_gate must be a mapping")
+            else:
+                gate_kind = str(user_experience_gate.get("kind", "")).strip()
+                if gate_kind and gate_kind != BROWSER_USER_EXPERIENCE_GATE_KIND:
+                    errors.append(
+                        f"{location}.user_experience_gate.kind `{gate_kind}` is not supported; "
+                        f"expected {BROWSER_USER_EXPERIENCE_GATE_KIND}"
+                    )
         self._validate_requested_capabilities(item, location=location, errors=errors)
         executor = str(item.get("executor", "shell"))
         executor_adapter = self.executor_registry.get(executor)
@@ -8865,6 +9134,8 @@ continuation stage(s) were appended.
                 payload["no_progress_timeout_seconds"] = command.no_progress_timeout_seconds
             if command.requested_capabilities:
                 payload["requested_capabilities"] = list(command.requested_capabilities)
+            if command.user_experience_gate:
+                payload["user_experience_gate"] = deepcopy(command.user_experience_gate)
             return payload
 
         return {
@@ -8916,6 +9187,7 @@ continuation stage(s) were appended.
                 "sandbox": command.sandbox,
                 "executor": command.executor,
                 "requested_capabilities": list(command.requested_capabilities),
+                "user_experience_gate": deepcopy(command.user_experience_gate),
             }
         roadmap_path = (
             str(self.roadmap_path.relative_to(self.project_root))
@@ -10534,8 +10806,24 @@ continuation stage(s) were appended.
             if command.required and run.status in EXECUTOR_WATCHDOG_FAILURE_STATUSES:
                 return finish("failed", f"Required {phase} command {run.status}: {command.name}")
             if command.required and run.returncode != 0:
+                if self._command_is_user_experience_gate(command) or self._run_has_user_experience_marker(run):
+                    return finish("failed", f"Required user-experience gate failed: {command.name}")
                 return finish("failed", f"Required {phase} command failed: {command.name}")
         return finish("passed", f"All required {phase} commands passed.")
+
+    def _command_is_user_experience_gate(self, command: AcceptanceCommand) -> bool:
+        gate = command.user_experience_gate if isinstance(command.user_experience_gate, dict) else {}
+        if str(gate.get("kind") or "").strip() == BROWSER_USER_EXPERIENCE_GATE_KIND:
+            return True
+        command_text = str(command.command or "")
+        return "engineering_harness.browser_e2e" in command_text
+
+    def _run_has_user_experience_marker(self, run: CommandRun) -> bool:
+        text = f"{run.stdout}\n{run.stderr}"
+        return (
+            BROWSER_USER_EXPERIENCE_FAILURE_MARKER in text
+            or "BROWSER_USER_EXPERIENCE_GATE_FAILED" in text
+        )
 
     def git_checkpoint(
         self,
@@ -11200,6 +11488,7 @@ continuation stage(s) were appended.
             "model": metadata.get("model"),
             "sandbox": metadata.get("sandbox"),
             "requested_capabilities": metadata.get("requested_capabilities", []),
+            "user_experience_gate": deepcopy(metadata.get("user_experience_gate", {})),
             "executor_capabilities": executor_metadata.get("capabilities", []) if isinstance(executor_metadata, dict) else [],
             "stdout": stdout_summary,
             "stderr": stderr_summary,
@@ -11221,6 +11510,7 @@ continuation stage(s) were appended.
             "returncode": manifest_payload["returncode"],
             "executor": manifest_payload["executor"],
             "requested_capabilities": manifest_payload.get("requested_capabilities", []),
+            "user_experience_gate": manifest_payload.get("user_experience_gate", {}),
             "executor_capabilities": manifest_payload.get("executor_capabilities", []),
             "executor_metadata": manifest_payload.get("executor_metadata", {}),
             "executor_result": manifest_payload.get("executor_result", {}),
@@ -11274,6 +11564,7 @@ continuation stage(s) were appended.
                     "model": command.model,
                     "sandbox": command.sandbox,
                     "requested_capabilities": list(command.requested_capabilities),
+                    "user_experience_gate": deepcopy(command.user_experience_gate),
                     "executor_metadata": self.executor_registry.metadata_for(command.executor),
                 }
         return {
@@ -11284,6 +11575,7 @@ continuation stage(s) were appended.
             "model": None,
             "sandbox": None,
             "requested_capabilities": [],
+            "user_experience_gate": {},
             "executor_metadata": run.executor_metadata
             or self.executor_registry.metadata_for(
                 run.executor or ("codex" if run.command.startswith("codex exec ") else "shell")
@@ -11570,6 +11862,8 @@ continuation stage(s) were appended.
                 return "executor_no_progress"
             if run.phase == phase and run.status == "timeout":
                 return "executor_timeout"
+            if run.phase == phase and self._run_has_user_experience_marker(run):
+                return "user_experience_gate_failure"
         phase_root = phase.split("-", 1)[0]
         if phase_root in {"implementation", "acceptance", "repair", "e2e"}:
             return f"{phase_root}_failure"
@@ -11665,6 +11959,11 @@ continuation stage(s) were appended.
             return (
                 f"Inspect the executor timeout evidence for phase {phase} in {report_relative}, "
                 "shorten, repair, or raise the local timeout for the command, then rerun the task."
+            )
+        if failure_kind == "user_experience_gate_failure":
+            return (
+                f"Inspect the browser user-experience gate evidence for phase {phase} in {report_relative}, "
+                "repair the declared routes/forms/roles or frontend behavior locally, then rerun the task."
             )
         return (
             f"Inspect phase {phase} in {report_relative}, apply a local fix within the task file_scope, "
@@ -11804,6 +12103,7 @@ continuation stage(s) were appended.
                 or self.executor_registry.metadata_for(run_metadata["executor"])
             )
             requested_capabilities = run_metadata.get("requested_capabilities", [])
+            user_experience_gate = run_metadata.get("user_experience_gate", {})
             executor_capabilities = executor_metadata.get("capabilities", []) if isinstance(executor_metadata, dict) else []
             lines.extend(
                 [
@@ -11813,6 +12113,7 @@ continuation stage(s) were appended.
                     f"- Return code: `{run.returncode}`",
                     f"- Executor: `{run_metadata.get('executor')}`",
                     f"- Requested capabilities: `{json.dumps(requested_capabilities)}`",
+                    f"- User-experience gate: `{str(bool(user_experience_gate)).lower()}`",
                     f"- Executor capabilities: `{json.dumps(executor_capabilities)}`",
                     "",
                     "```bash",

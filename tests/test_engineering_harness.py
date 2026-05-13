@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from engineering_harness.browser_e2e import browser_user_experience_command
 from engineering_harness.goal_intake import GoalIntakeValidationError, normalize_goal_intake, validate_goal_intake
 from engineering_harness.goal_planner import plan_goal_roadmap
 from engineering_harness.core import Harness, discover_projects, init_project, utc_now
@@ -658,8 +659,10 @@ def test_goal_planner_generates_node_frontend_npm_gates(tmp_path):
 
     assert task["acceptance"][0]["name"] == "frontend unit and integration tests pass"
     assert task["acceptance"][0]["command"] == "npm test"
-    assert task["e2e"][0]["command"] == "npm run e2e"
-    assert "local npm `e2e` script" in task["implementation"][0]["prompt"]
+    assert task["e2e"][0]["command"] == "python3 -m engineering_harness.browser_e2e --project-root . --journey-id operator-observes-run"
+    assert task["e2e"][0]["user_experience_gate"]["runner"]["fallback"]["kind"] == "static-html-smoke"
+    assert any(item["command"] == "npm run e2e" for item in task["e2e"])
+    assert "engineering_harness.browser_e2e" in task["implementation"][0]["prompt"]
     assert "roadmap task contract smoke" == task["acceptance"][-1]["name"]
     assert validate_roadmap_payload(tmp_path, proposal["roadmap"])["status"] == "passed"
 
@@ -2222,6 +2225,197 @@ def test_harness_fails_task_when_e2e_fails(tmp_path):
     assert "Required e2e command failed" in result["message"]
 
 
+def test_browser_user_experience_e2e_static_smoke_captures_dom_evidence_and_status(tmp_path, capsys):
+    project = tmp_path / "browser-ux-project"
+    project.mkdir()
+    init_project(project, "node-frontend", name="browser-ux-project")
+    (project / "docs").mkdir()
+    (project / "tests/e2e").mkdir(parents=True)
+    (project / "index.html").write_text(
+        """
+        <!doctype html>
+        <html>
+          <head><title>Feedback</title></head>
+          <body>
+            <main>
+              <h1>Feedback workspace</h1>
+              <form id="feedback-form">
+                <label>Email <input name="email" type="email" required></label>
+                <label>Message <textarea name="message" required></textarea></label>
+                <button type="submit">Send feedback</button>
+              </form>
+            </main>
+          </body>
+        </html>
+        """,
+        encoding="utf-8",
+    )
+    (project / "docs/frontend-experience.md").write_text(
+        "dashboard operator feedback-workflow acceptance evidence\n",
+        encoding="utf-8",
+    )
+    (project / "tests/e2e/feedback-workflow.journey.json").write_text(
+        json.dumps(
+            {
+                "journey_id": "feedback-workflow",
+                "persona": "operator",
+                "routes": [
+                    {
+                        "path": "/",
+                        "expect_text": ["Feedback workspace"],
+                        "expect_roles": ["main", "form", "button", "textbox"],
+                        "expect_forms": [
+                            {
+                                "selector": "#feedback-form",
+                                "fields": ["email", "message"],
+                                "submit_text": "Send feedback",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["experience"] = {
+        "kind": "dashboard",
+        "personas": ["operator"],
+        "primary_surfaces": ["feedback workspace"],
+        "auth": {"required": False, "roles": []},
+        "e2e_journeys": [
+            {
+                "id": "feedback-workflow",
+                "persona": "operator",
+                "goal": "Submit local feedback and see the form state.",
+            }
+        ],
+    }
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["file_scope"] = ["**"]
+    task["acceptance"][0] = {"name": "acceptance ok", "command": "python3 -c \"print('accepted')\""}
+    task["e2e"] = [
+        {
+            "name": "feedback-workflow browser user-experience gate passes",
+            "command": browser_user_experience_command("feedback-workflow"),
+            "user_experience_gate": {
+                "kind": "engineering-harness.browser-user-experience",
+                "journey": {"id": "feedback-workflow", "persona": "operator"},
+                "route_form_role_declarations": ["tests/e2e/feedback-workflow.journey.json"],
+                "evidence_paths": {
+                    "dom": "artifacts/browser-e2e/feedback-workflow/dom-evidence.json",
+                    "dom_snapshot": "artifacts/browser-e2e/feedback-workflow/dom-snapshot.txt",
+                    "screenshot": "artifacts/browser-e2e/feedback-workflow/screenshot.png",
+                },
+            },
+        }
+    ]
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    result = harness.run_task(harness.next_task())
+    dom_evidence = project / "artifacts/browser-e2e/feedback-workflow/dom-evidence.json"
+    status = Harness(project).status_summary()
+    assert cli_main(["status", "--project-root", str(project), "--json"]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+
+    assert result["status"] == "passed"
+    assert result["runs"][-1]["phase"] == "e2e"
+    assert result["runs"][-1]["user_experience_gate"]["kind"] == "engineering-harness.browser-user-experience"
+    evidence = json.loads(dom_evidence.read_text(encoding="utf-8"))
+    assert evidence["status"] == "passed"
+    assert evidence["runner"] == "static-html-smoke"
+    assert evidence["routes"][0]["forms"][0]["id"] == "feedback-form"
+    browser_ux = status["browser_user_experience"]
+    assert browser_ux["status"] == "passed"
+    assert browser_ux["configured_gate_count"] == 1
+    assert browser_ux["journeys"][0]["declaration_summary"]["form_count"] == 1
+    assert browser_ux["journeys"][0]["evidence_paths"]["dom"]["exists"] is True
+    assert status_payload["runtime_dashboard"]["browser_user_experience"]["status"] == "passed"
+
+
+def test_browser_user_experience_e2e_failure_is_reported_as_user_experience_gate(tmp_path):
+    project = tmp_path / "browser-ux-failure-project"
+    project.mkdir()
+    init_project(project, "node-frontend", name="browser-ux-failure-project")
+    (project / "tests/e2e").mkdir(parents=True)
+    (project / "index.html").write_text(
+        "<main><h1>Feedback workspace</h1><form id='feedback-form'><input name='email'></form></main>",
+        encoding="utf-8",
+    )
+    (project / "tests/e2e/feedback-workflow.journey.json").write_text(
+        json.dumps(
+            {
+                "journey_id": "feedback-workflow",
+                "persona": "operator",
+                "routes": [
+                    {
+                        "path": "/",
+                        "expect_text": ["Feedback workspace"],
+                        "expect_roles": ["main", "button"],
+                        "expect_forms": [
+                            {
+                                "selector": "#feedback-form",
+                                "fields": ["email", "message"],
+                                "submit_text": "Send feedback",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["experience"] = {
+        "kind": "dashboard",
+        "personas": ["operator"],
+        "primary_surfaces": ["feedback workspace"],
+        "auth": {"required": False, "roles": []},
+        "e2e_journeys": [
+            {
+                "id": "feedback-workflow",
+                "persona": "operator",
+                "goal": "Submit local feedback and see the form state.",
+            }
+        ],
+    }
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["acceptance"][0] = {"name": "acceptance ok", "command": "python3 -c \"print('accepted')\""}
+    task["e2e"] = [
+        {
+            "name": "feedback-workflow browser user-experience gate passes",
+            "command": browser_user_experience_command("feedback-workflow"),
+            "user_experience_gate": {
+                "kind": "engineering-harness.browser-user-experience",
+                "journey": {"id": "feedback-workflow", "persona": "operator"},
+                "route_form_role_declarations": ["tests/e2e/feedback-workflow.journey.json"],
+                "evidence_paths": {
+                    "dom": "artifacts/browser-e2e/feedback-workflow/dom-evidence.json",
+                    "dom_snapshot": "artifacts/browser-e2e/feedback-workflow/dom-snapshot.txt",
+                },
+            },
+        }
+    ]
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    result = harness.run_task(harness.next_task())
+    manifest = task_manifest(project, result)
+    status = Harness(project).status_summary()
+
+    assert result["status"] == "failed"
+    assert "Required user-experience gate failed" in result["message"]
+    assert "Required e2e command failed" not in result["message"]
+    assert manifest["failure_isolation"]["failure_kind"] == "user_experience_gate_failure"
+    assert manifest["failure_isolation"]["phase"] == "e2e"
+    assert "browser user-experience gate evidence" in manifest["failure_isolation"]["local_next_action"]
+    assert status["browser_user_experience"]["status"] == "failed"
+    assert status["browser_user_experience"]["latest_failures"][0]["journey_id"] == "feedback-workflow"
+
+
 def test_file_scope_guard_allows_in_scope_changes(tmp_path):
     project = tmp_path / "agent-project"
     project.mkdir()
@@ -2742,6 +2936,15 @@ def test_frontend_task_generator_proposes_kind_specific_tasks(
     assert journey_task["e2e"][0]["command"].startswith("python3 ")
     assert expected_term in json.dumps(journey_task).lower()
     assert "use existing project conventions" in journey_task["frontend"]["stack_policy"]
+    if expected_kind in {"app-specific", "dashboard", "multi-role-app", "submission-review"}:
+        gate = journey_task["e2e"][0]["user_experience_gate"]
+        assert gate["kind"] == "engineering-harness.browser-user-experience"
+        assert gate["route_form_role_declarations"]
+        assert gate["evidence_paths"]["dom"].startswith("artifacts/browser-e2e/")
+        assert "playwright_template" in gate["commands"]
+        assert journey_task["frontend"]["browser_user_experience_gate"]["runner"]["fallback"]["kind"] == "static-html-smoke"
+    else:
+        assert "user_experience_gate" not in journey_task["e2e"][0]
 
 
 def test_frontend_task_generator_materializes_derived_plan_and_validates(tmp_path):

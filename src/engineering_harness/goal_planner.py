@@ -7,6 +7,11 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from .browser_e2e import (
+    browser_user_experience_command,
+    browser_user_experience_gate,
+    is_browser_experience_kind,
+)
 from .domain_frontend import (
     DOMAIN_FRONTEND_GENERATOR_ID,
     build_domain_frontend_plan,
@@ -170,6 +175,7 @@ def _starter_roadmap(
         explicit_kind=goal_intake["experience"]["kind"],
     )
     continuation_stages = _continuation_stages(
+        project_root=project_root,
         project_name=project_name,
         project_slug=project_slug,
         profile=profile,
@@ -284,6 +290,7 @@ def _baseline_task(*, profile: str) -> dict[str, Any]:
 
 def _continuation_stages(
     *,
+    project_root: Path,
     project_name: str,
     project_slug: str,
     profile: str,
@@ -304,6 +311,7 @@ def _continuation_stages(
             "objective": f"Deliver the first local, testable slice of {project_name}.{blueprint_note}",
             "tasks": [
                 _continuation_task(
+                    project_root=project_root,
                     stage_id="stage-1-local-slice",
                     task_id=f"{project_slug}-first-slice",
                     title="Implement the first locally testable goal slice",
@@ -330,6 +338,7 @@ def _continuation_stages(
             ),
             "tasks": [
                 _continuation_task(
+                    project_root=project_root,
                     stage_id="stage-2-experience-validation",
                     task_id=f"{project_slug}-experience-validation",
                     title="Validate the primary user or operator journey",
@@ -358,6 +367,7 @@ def _continuation_stages(
             ),
             "tasks": [
                 _continuation_task(
+                    project_root=project_root,
                     stage_id="stage-3-policy-evidence-observability",
                     task_id=f"{project_slug}-policy-evidence-observability",
                     title="Harden policy, evidence, and observability paths",
@@ -386,6 +396,7 @@ def _continuation_stages(
             ),
             "tasks": [
                 _continuation_task(
+                    project_root=project_root,
                     stage_id="stage-4-unattended-drive-readiness",
                     task_id=f"{project_slug}-unattended-drive-readiness",
                     title="Prepare bounded unattended drive readiness",
@@ -412,6 +423,7 @@ def _continuation_stages(
 
 def _continuation_task(
     *,
+    project_root: Path,
     stage_id: str,
     task_id: str,
     title: str,
@@ -426,6 +438,7 @@ def _continuation_task(
     stage_objective: str,
 ) -> dict[str, Any]:
     gates = _quality_gates(
+        project_root=project_root,
         stage_id=stage_id,
         task_id=task_id,
         profile=profile,
@@ -489,6 +502,7 @@ def _primary_journey(experience: dict[str, Any]) -> dict[str, Any]:
 
 def _quality_gates(
     *,
+    project_root: Path,
     stage_id: str,
     task_id: str,
     profile: str,
@@ -509,7 +523,13 @@ def _quality_gates(
             "timeout_seconds": 30,
         },
     ]
-    e2e = _experience_e2e_gates(profile=profile, experience_kind=experience_kind, task_id=task_id, journey=journey)
+    e2e = _experience_e2e_gates(
+        project_root=project_root,
+        profile=profile,
+        experience_kind=experience_kind,
+        task_id=task_id,
+        journey=journey,
+    )
     return {
         "acceptance": acceptance,
         "e2e": e2e,
@@ -618,6 +638,7 @@ def _experience_acceptance_gates(
 
 def _experience_e2e_gates(
     *,
+    project_root: Path,
     profile: str,
     experience_kind: str,
     task_id: str,
@@ -625,6 +646,24 @@ def _experience_e2e_gates(
 ) -> list[dict[str, Any]]:
     journey_id = _journey_id(journey)
     gates: list[dict[str, Any]] = []
+    if is_browser_experience_kind(experience_kind):
+        gate = browser_user_experience_gate(
+            project_root,
+            experience={"kind": experience_kind},
+            journey=journey,
+        )
+        gates.append(
+            {
+                "name": f"{journey_id} browser user-experience gate passes",
+                "command": browser_user_experience_command(journey_id),
+                "guidance": (
+                    "Use local Playwright specs when they are already installed, or add a static HTML journey "
+                    "declaration with expected routes, forms, roles, and DOM/screenshot evidence."
+                ),
+                "timeout_seconds": 1200,
+                "user_experience_gate": gate,
+            }
+        )
     if profile in {"python-agent", "agent-monorepo"}:
         gates.append(
             {

@@ -180,8 +180,11 @@ Continuation tasks now put behavioral checks before the small roadmap contract s
 
 - `python-agent` and `agent-monorepo` tasks start with `python3 -m pytest tests -q` and require a
   local `tests/e2e` pytest journey check.
-- `node-frontend` tasks use npm-oriented gates such as `npm test` and `npm run e2e`, leaving the
-  generated implementation prompt to create or wire the local scripts.
+- Browser-facing experience plans add a `python3 -m engineering_harness.browser_e2e ...` user
+  experience gate. It uses local Playwright specs when installed and falls back to a static HTML
+  route/form/role smoke that writes DOM evidence under `artifacts/browser-e2e/`.
+- `node-frontend` tasks still use npm-oriented gates such as `npm test` and, when relevant,
+  `npm run e2e`, leaving the generated implementation prompt to create or wire the local scripts.
 - `cli-only` and `api-only` experience plans add deterministic documented-example or local command
   checks under `examples/`, `docs/examples/`, `tests/cli/`, `tests/api/`, or `tests/e2e/`.
 - Every generated task also requires local journey evidence or an executable journey check tied to

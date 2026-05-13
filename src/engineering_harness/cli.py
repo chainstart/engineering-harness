@@ -235,6 +235,18 @@ def cmd_status(args: argparse.Namespace) -> int:
                     f"domain={frontend.get('domain', 'unknown')} "
                     f"status={frontend.get('status', 'unknown')}"
                 )
+            browser_ux = (
+                runtime_dashboard.get("browser_user_experience")
+                if isinstance(runtime_dashboard.get("browser_user_experience"), dict)
+                else {}
+            )
+            if browser_ux:
+                print(
+                    "Browser UX gates: "
+                    f"{browser_ux.get('status', 'unknown')} "
+                    f"configured={browser_ux.get('configured_gate_count', 0)} "
+                    f"journeys={browser_ux.get('journey_count', 0)}"
+                )
             current_task = runtime_dashboard.get("current_task") if isinstance(runtime_dashboard.get("current_task"), dict) else None
             if current_task:
                 phase = current_task.get("phase") or "none"
