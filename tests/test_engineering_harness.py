@@ -314,6 +314,25 @@ def run_workspace_drive_json(capsys, workspace: Path, *extra_args: str) -> tuple
     return exit_code, payload
 
 
+def daemon_supervisor_state_path(workspace: Path) -> Path:
+    return workspace / ".engineering/state/daemon-supervisor-runtime.json"
+
+
+def daemon_supervisor_state(workspace: Path) -> dict:
+    return json.loads(daemon_supervisor_state_path(workspace).read_text(encoding="utf-8"))
+
+
+def write_daemon_supervisor_state(workspace: Path, state: dict) -> None:
+    daemon_supervisor_state_path(workspace).write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def run_daemon_supervisor_json(capsys, workspace: Path, *extra_args: str) -> tuple[int, dict]:
+    capsys.readouterr()
+    exit_code = cli_main(["daemon-supervisor", "--workspace", str(workspace), *extra_args, "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    return exit_code, payload
+
+
 def project_text_snapshot(project: Path) -> dict[str, str]:
     return {
         str(path.relative_to(project)): path.read_text(encoding="utf-8")
@@ -3781,6 +3800,149 @@ def test_workspace_drive_skips_without_mutating_skipped_project(tmp_path, capsys
     paused_item = next(item for item in payload["queue"] if item["project"] == "aa-paused-project")
     assert paused_item["dispatch_status"] == "skipped"
     assert {reason["code"] for reason in paused_item["skip_reasons"]} == {"paused"}
+
+
+def test_daemon_supervisor_runtime_smoke_restartable_loop_continues_without_duplicate_work(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    project = init_workspace_project(workspace, "restartable-loop-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    first_task = roadmap["milestones"][0]["tasks"][0]
+    first_task["id"] = "daemon-first-task"
+    first_task["title"] = "Daemon first task"
+    first_task["acceptance"][0]["command"] = (
+        "python3 -c \"from pathlib import Path; "
+        "Path('daemon.log').open('a', encoding='utf-8').write('first\\n')\""
+    )
+    roadmap["milestones"][0]["tasks"].append(
+        {
+            "id": "daemon-second-task",
+            "title": "Daemon second task",
+            "file_scope": ["**"],
+            "acceptance": [
+                {
+                    "name": "write daemon second marker",
+                    "command": (
+                        "python3 -c \"from pathlib import Path; "
+                        "Path('daemon.log').open('a', encoding='utf-8').write('second\\n')\""
+                    ),
+                }
+            ],
+        }
+    )
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    first_exit, first = run_daemon_supervisor_json(
+        capsys,
+        workspace,
+        "--scheduler-policy",
+        "path-order",
+        "--max-ticks",
+        "1",
+        "--max-tasks",
+        "1",
+        "--idle-sleep-seconds",
+        "0",
+    )
+
+    assert first_exit == 0
+    assert first["status"] == "stopped"
+    assert first["stop_reason"]["code"] == "max_ticks"
+    assert first["run_window"]["tick_count"] == 1
+    assert first["ticks"][0]["dispatch_status"] == "dispatched"
+    assert first["ticks"][0]["drive_status"] == "budget_exhausted"
+    assert (project / "daemon.log").read_text(encoding="utf-8").splitlines() == ["first"]
+
+    interrupted = daemon_supervisor_state(workspace)
+    interrupted_loop_id = interrupted["loop_id"]
+    interrupted["status"] = "running"
+    interrupted["active"] = True
+    interrupted["owner_pid"] = unused_pid()
+    interrupted["last_heartbeat_at"] = "2000-01-01T00:00:00Z"
+    write_daemon_supervisor_state(workspace, interrupted)
+
+    second_exit, second = run_daemon_supervisor_json(
+        capsys,
+        workspace,
+        "--scheduler-policy",
+        "path-order",
+        "--max-ticks",
+        "2",
+        "--max-tasks",
+        "1",
+        "--idle-sleep-seconds",
+        "0",
+    )
+
+    assert second_exit == 0
+    assert second["status"] == "stopped"
+    assert second["restartable_loop"]["resumed_from"]["loop_id"] == interrupted_loop_id
+    assert second["restartable_loop"]["recovered_previous"]["reason"] == "pid_gone"
+    assert second["restartable_loop"]["completed_dispatch_reports"][0]["dispatch_report_json"] == first["ticks"][0]["dispatch_report_json"]
+    assert [tick["dispatch_status"] for tick in second["ticks"]] == ["dispatched", "no_eligible_project"]
+    assert second["ticks"][0]["drive_status"] == "budget_exhausted"
+    assert second["ticks"][1]["decision"]["reason"] == "no_eligible_project"
+    assert second["stop_reason"]["code"] == "idle_limit"
+    assert (project / "daemon.log").read_text(encoding="utf-8").splitlines() == ["first", "second"]
+
+    state = harness_state(project)
+    assert state["tasks"]["daemon-first-task"]["status"] == "passed"
+    assert state["tasks"]["daemon-second-task"]["status"] == "passed"
+    assert len(list((project / ".engineering/reports/tasks").glob("*daemon-first-task.json"))) == 1
+    assert len(list((project / ".engineering/reports/tasks").glob("*daemon-second-task.json"))) == 1
+
+    runtime_report = workspace / second["runtime_report"]
+    runtime_sidecar = workspace / second["runtime_report_json"]
+    assert runtime_report.exists()
+    assert runtime_sidecar.exists()
+    assert "Daemon Supervisor Runtime Report" in runtime_report.read_text(encoding="utf-8")
+    sidecar = json.loads(runtime_sidecar.read_text(encoding="utf-8"))
+    assert sidecar["restartable_loop"]["recovered_previous"]["reason"] == "pid_gone"
+
+    assert cli_main(["status", "--project-root", str(project), "--json"]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    supervisor = status_payload["runtime_dashboard"]["daemon_supervisor_runtime"]
+    assert supervisor["status"] == "stopped"
+    assert supervisor["stop_reason"]["code"] == "idle_limit"
+    assert supervisor["restartable_loop"]["recovered_previous"]["reason"] == "pid_gone"
+    assert supervisor["restartable_loop"]["completed_dispatch_report_count"] >= 3
+    assert supervisor["latest_report"]["json_path"] == second["runtime_report_json"]
+    assert status_payload["daemon_supervisor_runtime"]["state"]["latest_report_json"] == second["runtime_report_json"]
+
+
+def test_supervisor_runtime_run_window_records_idle_sleep_decision(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    exit_code, payload = run_daemon_supervisor_json(
+        capsys,
+        workspace,
+        "--max-ticks",
+        "3",
+        "--run-window-seconds",
+        "60",
+        "--idle-sleep-seconds",
+        "7",
+        "--idle-stop-count",
+        "1",
+    )
+
+    assert exit_code == 0
+    assert payload["status"] == "stopped"
+    assert payload["run_window"]["window_seconds"] == 60
+    assert payload["run_window"]["deadline_at"]
+    assert payload["run_window"]["tick_count"] == 1
+    assert payload["ticks"][0]["dispatch_status"] == "no_eligible_project"
+    assert payload["ticks"][0]["decision"]["action"] == "stop"
+    assert payload["ticks"][0]["decision"]["reason"] == "no_eligible_project"
+    assert payload["ticks"][0]["decision"]["sleep_seconds"] == 7
+    assert payload["stop_reason"]["code"] == "idle_limit"
+
+    state = daemon_supervisor_state(workspace)
+    assert state["run_window"]["deadline_at"] == payload["run_window"]["deadline_at"]
+    assert state["last_decision"]["sleep_seconds"] == 7
+    assert state["stop_reason"]["code"] == "idle_limit"
 
 
 def test_workspace_supervisor_multi_tick_e2e_loop_preserves_skips_and_reports(tmp_path, capsys):

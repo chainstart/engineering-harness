@@ -246,6 +246,10 @@ RUNTIME_DASHBOARD_SCHEMA_VERSION = 1
 WORKSPACE_DISPATCH_LEASE_SCHEMA_VERSION = 1
 WORKSPACE_DISPATCH_LEASE_DIRNAME = "workspace-dispatch-lease"
 WORKSPACE_DISPATCH_REPORT_LIMIT = 5
+DAEMON_SUPERVISOR_RUNTIME_SCHEMA_VERSION = 1
+DAEMON_SUPERVISOR_RUNTIME_STATE_FILENAME = "daemon-supervisor-runtime.json"
+DAEMON_SUPERVISOR_RUNTIME_REPORT_DIRNAME = "daemon-supervisor-runtime"
+DAEMON_SUPERVISOR_RUNTIME_REPORT_LIMIT = 5
 UNATTENDED_RELIABILITY_GOAL = (
     "Run unattended engineering drives that drain or safely extend the roadmap, preserve local audit "
     "evidence, surface blockers deterministically, and avoid unsafe external dependencies."
@@ -4652,6 +4656,196 @@ class Harness:
             "holder": {key: deepcopy(lease.get(key)) for key in holder_keys if key in lease},
         }
 
+    def _runtime_daemon_supervisor_root(self) -> Path | None:
+        for candidate in self._runtime_workspace_dispatch_candidate_roots():
+            engineering = candidate / ".engineering"
+            if (engineering / "state" / DAEMON_SUPERVISOR_RUNTIME_STATE_FILENAME).exists():
+                return candidate
+            if (engineering / "reports" / DAEMON_SUPERVISOR_RUNTIME_REPORT_DIRNAME).exists():
+                return candidate
+        return None
+
+    def _runtime_daemon_supervisor_summary(self) -> dict[str, Any]:
+        workspace = self._runtime_daemon_supervisor_root()
+        if workspace is None:
+            return {
+                "schema_version": DAEMON_SUPERVISOR_RUNTIME_SCHEMA_VERSION,
+                "kind": "engineering-harness.daemon-supervisor-runtime-summary",
+                "status": "not_found",
+                "workspace_root": None,
+                "state_path": None,
+                "state": None,
+                "active": False,
+                "run_window": None,
+                "restartable_loop": None,
+                "last_tick": None,
+                "last_decision": None,
+                "stop_reason": None,
+                "latest_reports": {"total_count": 0, "included_count": 0, "files": []},
+                "latest_report": None,
+            }
+
+        state_path = workspace / ".engineering" / "state" / DAEMON_SUPERVISOR_RUNTIME_STATE_FILENAME
+        state = self._runtime_load_daemon_supervisor_state(state_path)
+        reports = self._runtime_daemon_supervisor_reports(workspace)
+        latest_report = reports["files"][0] if reports.get("files") else None
+        latest_payload = self._runtime_load_daemon_supervisor_payload(workspace, latest_report)
+        source = state if isinstance(state, dict) else latest_payload if isinstance(latest_payload, dict) else {}
+        active = bool(source.get("active", False)) or str(source.get("status") or "") == "running"
+        status = "running" if active else str(source.get("status") or ("reported" if latest_report else "missing"))
+        return {
+            "schema_version": DAEMON_SUPERVISOR_RUNTIME_SCHEMA_VERSION,
+            "kind": "engineering-harness.daemon-supervisor-runtime-summary",
+            "status": status,
+            "workspace_root": str(workspace),
+            "state_path": self._runtime_path_relative_to(workspace, state_path),
+            "state": self._runtime_compact_daemon_supervisor_state(state),
+            "active": active,
+            "run_window": deepcopy(source.get("run_window")) if isinstance(source.get("run_window"), dict) else None,
+            "restartable_loop": self._runtime_compact_daemon_supervisor_restartable_loop(
+                source.get("restartable_loop") if isinstance(source.get("restartable_loop"), dict) else None
+            ),
+            "last_tick": deepcopy(source.get("last_tick")) if isinstance(source.get("last_tick"), dict) else None,
+            "last_decision": deepcopy(source.get("last_decision")) if isinstance(source.get("last_decision"), dict) else None,
+            "stop_reason": deepcopy(source.get("stop_reason")) if isinstance(source.get("stop_reason"), dict) else None,
+            "latest_reports": reports,
+            "latest_report": latest_report,
+            "latest_report_payload": self._runtime_compact_daemon_supervisor_payload(latest_payload),
+        }
+
+    def _runtime_load_daemon_supervisor_state(self, state_path: Path) -> dict[str, Any] | None:
+        if not state_path.exists():
+            return None
+        try:
+            payload = load_mapping(state_path)
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _runtime_daemon_supervisor_reports(self, workspace: Path) -> dict[str, Any]:
+        report_dir = workspace / ".engineering" / "reports" / DAEMON_SUPERVISOR_RUNTIME_REPORT_DIRNAME
+        paths = sorted(
+            [path for path in report_dir.glob("*.md") if path.is_file()] if report_dir.exists() else [],
+            key=lambda path: self._runtime_path_relative_to(workspace, path),
+        )
+        recent = list(reversed(paths))[:DAEMON_SUPERVISOR_RUNTIME_REPORT_LIMIT]
+        return {
+            "total_count": len(paths),
+            "included_count": len(recent),
+            "files": [self._runtime_report_file_summary(path, root=workspace) for path in recent],
+        }
+
+    def _runtime_load_daemon_supervisor_payload(
+        self,
+        workspace: Path,
+        latest_report: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(latest_report, dict):
+            return None
+        json_path = latest_report.get("json_path")
+        if not json_path:
+            return None
+        candidate = Path(str(json_path))
+        path = candidate if candidate.is_absolute() else workspace / candidate
+        try:
+            payload = load_mapping(path)
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _runtime_compact_daemon_supervisor_state(self, state: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(state, dict):
+            return None
+        keys = (
+            "schema_version",
+            "kind",
+            "workspace",
+            "status",
+            "active",
+            "owner_pid",
+            "loop_id",
+            "generation",
+            "started_at",
+            "finished_at",
+            "last_heartbeat_at",
+            "heartbeat_count",
+            "current_activity",
+            "latest_report",
+            "latest_report_json",
+        )
+        compact = {key: deepcopy(state.get(key)) for key in keys if key in state}
+        if isinstance(state.get("run_window"), dict):
+            compact["run_window"] = deepcopy(state.get("run_window"))
+        if isinstance(state.get("last_decision"), dict):
+            compact["last_decision"] = deepcopy(state.get("last_decision"))
+        if isinstance(state.get("stop_reason"), dict):
+            compact["stop_reason"] = deepcopy(state.get("stop_reason"))
+        if isinstance(state.get("last_tick"), dict):
+            last_tick = deepcopy(state.get("last_tick"))
+            compact["last_tick"] = {
+                key: last_tick.get(key)
+                for key in (
+                    "tick_index",
+                    "dispatch_status",
+                    "dispatch_exit_code",
+                    "dispatch_report",
+                    "dispatch_report_json",
+                    "drive_status",
+                    "drive_report",
+                    "drive_report_json",
+                )
+                if last_tick.get(key) is not None
+            }
+        return compact
+
+    def _runtime_compact_daemon_supervisor_restartable_loop(
+        self,
+        restartable: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(restartable, dict):
+            return None
+        completed = restartable.get("completed_dispatch_reports")
+        if not isinstance(completed, list):
+            completed = []
+        return {
+            "schema_version": restartable.get("schema_version"),
+            "generation": restartable.get("generation"),
+            "resume_count": restartable.get("resume_count"),
+            "resumed_from": deepcopy(restartable.get("resumed_from"))
+            if isinstance(restartable.get("resumed_from"), dict)
+            else None,
+            "recovered_previous": deepcopy(restartable.get("recovered_previous"))
+            if isinstance(restartable.get("recovered_previous"), dict)
+            else None,
+            "completed_dispatch_report_count": len(completed),
+            "completed_dispatch_reports": [
+                deepcopy(item) for item in completed[-DAEMON_SUPERVISOR_RUNTIME_REPORT_LIMIT:] if isinstance(item, dict)
+            ],
+        }
+
+    def _runtime_compact_daemon_supervisor_payload(
+        self,
+        payload: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        ticks = payload.get("ticks") if isinstance(payload.get("ticks"), list) else []
+        return {
+            "status": payload.get("status"),
+            "started_at": payload.get("started_at"),
+            "finished_at": payload.get("finished_at"),
+            "runtime_report": payload.get("runtime_report"),
+            "runtime_report_json": payload.get("runtime_report_json"),
+            "tick_count": len(ticks),
+            "run_window": deepcopy(payload.get("run_window")) if isinstance(payload.get("run_window"), dict) else None,
+            "last_decision": deepcopy(payload.get("last_decision"))
+            if isinstance(payload.get("last_decision"), dict)
+            else None,
+            "stop_reason": deepcopy(payload.get("stop_reason"))
+            if isinstance(payload.get("stop_reason"), dict)
+            else None,
+        }
+
     def _self_iteration_docs_context(self) -> dict[str, Any]:
         blueprint = self._self_iteration_blueprint_context()
         blueprint_path = str(blueprint.get("path") or "")
@@ -5739,7 +5933,13 @@ continuation stage(s) were appended.
         )
         latest_reports = self._runtime_enriched_report_context()
         workspace_dispatch = self._runtime_workspace_dispatch_summary()
+        daemon_supervisor = (
+            summary.get("daemon_supervisor_runtime")
+            if isinstance(summary.get("daemon_supervisor_runtime"), dict)
+            else self._runtime_daemon_supervisor_summary()
+        )
         latest_reports["workspace_dispatch_reports"] = deepcopy(workspace_dispatch.get("latest_reports", {}))
+        latest_reports["daemon_supervisor_reports"] = deepcopy(daemon_supervisor.get("latest_reports", {}))
         current_task = self._runtime_current_task(summary, drive_control)
         current_phase = (current_task or {}).get("phase")
         if current_phase is None and bool(drive_control.get("active", False)):
@@ -5772,6 +5972,7 @@ continuation stage(s) were appended.
             "checkpoint_readiness": deepcopy(checkpoint_readiness),
             "self_iteration": deepcopy(summary.get("self_iteration", {})),
             "workspace_dispatch": workspace_dispatch,
+            "daemon_supervisor_runtime": daemon_supervisor,
             "latest_reports": latest_reports,
             "goal_gap_scorecard": goal_gap_scorecard,
             "goal_gap": self._runtime_goal_gap_payload(summary, latest_reports),
@@ -6757,6 +6958,7 @@ continuation stage(s) were appended.
         replay_guard = self.replay_guard_summary()
         next_task = self.next_task()
         checkpoint_readiness = self.checkpoint_readiness(self._checkpoint_readiness_task(next_task, drive_control))
+        daemon_supervisor_runtime = self._runtime_daemon_supervisor_summary()
         summary = {
             "project": self.roadmap.get("project", self.project_root.name),
             "profile": self.roadmap.get("profile"),
@@ -6776,6 +6978,7 @@ continuation stage(s) were appended.
             "capability_policy": capability_policy,
             "failure_isolation": failure_isolation,
             "replay_guard": replay_guard,
+            "daemon_supervisor_runtime": daemon_supervisor_runtime,
         }
         summary["goal_gap_scorecard"] = self.goal_gap_scorecard(status_summary=summary)
         summary["runtime_dashboard"] = self.runtime_dashboard_summary(summary)

@@ -91,6 +91,8 @@ Inspect these fields first:
   checkpoint-gate result, including compact checkpoint readiness evidence when a gate blocked.
 - `runtime_dashboard.workspace_dispatch`: nearest workspace dispatch queue, latest dispatch report,
   and active or latest lease status.
+- `runtime_dashboard.daemon_supervisor_runtime`: nearest durable daemon supervisor run window,
+  restartable-loop metadata, tick decisions, latest stop reason, and supervisor report sidecar.
 - `runtime_dashboard.latest_reports`: latest task, drive, and workspace dispatch report metadata with
   JSON sidecar paths.
 - `runtime_dashboard.goal_gap_scorecard`: bounded deterministic scorecard for unattended-reliability

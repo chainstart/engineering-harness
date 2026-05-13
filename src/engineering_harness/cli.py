@@ -46,6 +46,13 @@ WORKSPACE_DISPATCH_NONPRODUCTIVE_BACKOFF_SECONDS_ENV = (
 DEFAULT_WORKSPACE_DISPATCH_NONPRODUCTIVE_BACKOFF_SECONDS = 3600
 MAX_WORKSPACE_DISPATCH_NONPRODUCTIVE_BACKOFF_SECONDS = 86400
 WORKSPACE_DISPATCH_NONPRODUCTIVE_BACKOFF_PENALTY = -10000
+DAEMON_SUPERVISOR_RUNTIME_SCHEMA_VERSION = 1
+DAEMON_SUPERVISOR_RUNTIME_KIND = "engineering-harness.daemon-supervisor-runtime"
+DAEMON_SUPERVISOR_RUNTIME_STATE_FILENAME = "daemon-supervisor-runtime.json"
+DAEMON_SUPERVISOR_RUNTIME_REPORT_DIRNAME = "daemon-supervisor-runtime"
+DAEMON_SUPERVISOR_RUNTIME_STALE_SECONDS_ENV = "ENGINEERING_HARNESS_DAEMON_SUPERVISOR_STALE_AFTER_SECONDS"
+DEFAULT_DAEMON_SUPERVISOR_RUNTIME_STALE_SECONDS = 3600
+DAEMON_SUPERVISOR_RUNTIME_HISTORY_LIMIT = 100
 
 
 def resolve_project_root(args: argparse.Namespace) -> Path:
@@ -232,6 +239,22 @@ def cmd_status(args: argparse.Namespace) -> int:
                 else {}
             )
             print(f"Workspace dispatch: {workspace_dispatch.get('status', 'not_found')}")
+            daemon_supervisor = (
+                runtime_dashboard.get("daemon_supervisor_runtime")
+                if isinstance(runtime_dashboard.get("daemon_supervisor_runtime"), dict)
+                else {}
+            )
+            if daemon_supervisor:
+                stop_reason = (
+                    daemon_supervisor.get("stop_reason")
+                    if isinstance(daemon_supervisor.get("stop_reason"), dict)
+                    else {}
+                )
+                print(
+                    "Daemon supervisor: "
+                    f"{daemon_supervisor.get('status', 'not_found')} "
+                    f"stop={stop_reason.get('code', 'none')}"
+                )
             goal_gap = runtime_dashboard.get("goal_gap") if isinstance(runtime_dashboard.get("goal_gap"), dict) else {}
             actions = goal_gap.get("next_actions") if isinstance(goal_gap.get("next_actions"), list) else []
             if actions and isinstance(actions[0], dict):
@@ -2844,6 +2867,739 @@ def workspace_drive_dispatch(args: argparse.Namespace) -> tuple[int, dict]:
             write_workspace_dispatch_report(workspace, payload)
 
 
+def _daemon_supervisor_runtime_state_path(workspace: Path) -> Path:
+    return workspace / ".engineering" / "state" / DAEMON_SUPERVISOR_RUNTIME_STATE_FILENAME
+
+
+def _daemon_supervisor_runtime_report_dir(workspace: Path) -> Path:
+    return workspace / ".engineering" / "reports" / DAEMON_SUPERVISOR_RUNTIME_REPORT_DIRNAME
+
+
+def _daemon_supervisor_runtime_report_path(workspace: Path) -> Path:
+    report_dir = _daemon_supervisor_runtime_report_dir(workspace)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    base = report_dir / f"{slug_now()}-daemon-supervisor-runtime.md"
+    candidate = base
+    counter = 2
+    while candidate.exists() or candidate.with_suffix(".json").exists():
+        candidate = base.with_name(f"{base.stem}_{counter}{base.suffix}")
+        counter += 1
+    return candidate
+
+
+def _read_daemon_supervisor_runtime_state(workspace: Path) -> dict | None:
+    return _read_json_mapping(_daemon_supervisor_runtime_state_path(workspace))
+
+
+def _write_daemon_supervisor_runtime_state(workspace: Path, state: dict) -> None:
+    write_json(_daemon_supervisor_runtime_state_path(workspace), state)
+
+
+def _daemon_supervisor_runtime_stale_after_seconds(args: argparse.Namespace) -> int:
+    cli_value = getattr(args, "runtime_stale_after_seconds", None)
+    if cli_value is not None:
+        return _coerce_positive_int(cli_value, DEFAULT_DAEMON_SUPERVISOR_RUNTIME_STALE_SECONDS)
+    return _coerce_positive_int(
+        os.environ.get(DAEMON_SUPERVISOR_RUNTIME_STALE_SECONDS_ENV),
+        DEFAULT_DAEMON_SUPERVISOR_RUNTIME_STALE_SECONDS,
+    )
+
+
+def _daemon_supervisor_deadline(started_at: str, run_window_seconds: int) -> str | None:
+    if run_window_seconds <= 0:
+        return None
+    started = parse_utc_timestamp(started_at) or datetime.now(timezone.utc)
+    return _workspace_format_utc(started + timedelta(seconds=run_window_seconds))
+
+
+def _daemon_supervisor_runtime_options(args: argparse.Namespace, workspace: Path) -> dict:
+    return {
+        "workspace": str(workspace),
+        "max_depth": args.max_depth,
+        "max_ticks": args.max_ticks,
+        "run_window_seconds": args.run_window_seconds,
+        "sleep_seconds": args.sleep_seconds,
+        "idle_sleep_seconds": args.idle_sleep_seconds,
+        "idle_stop_count": args.idle_stop_count,
+        "nonproductive_backoff_seconds": _workspace_dispatch_nonproductive_backoff_seconds(args),
+        "runtime_stale_after_seconds": _daemon_supervisor_runtime_stale_after_seconds(args),
+        "workspace_drive": _workspace_dispatch_limits(args),
+    }
+
+
+def _daemon_supervisor_previous_snapshot(state: dict | None) -> dict | None:
+    if not isinstance(state, dict):
+        return None
+    return {
+        "schema_version": state.get("schema_version"),
+        "kind": state.get("kind"),
+        "loop_id": state.get("loop_id"),
+        "generation": state.get("generation"),
+        "status": state.get("status"),
+        "active": bool(state.get("active", False)),
+        "owner_pid": state.get("owner_pid"),
+        "started_at": state.get("started_at"),
+        "last_heartbeat_at": state.get("last_heartbeat_at"),
+        "heartbeat_count": state.get("heartbeat_count"),
+        "run_window": deepcopy(state.get("run_window")) if isinstance(state.get("run_window"), dict) else None,
+        "last_tick": deepcopy(state.get("last_tick")) if isinstance(state.get("last_tick"), dict) else None,
+        "last_decision": deepcopy(state.get("last_decision")) if isinstance(state.get("last_decision"), dict) else None,
+        "stop_reason": deepcopy(state.get("stop_reason")) if isinstance(state.get("stop_reason"), dict) else None,
+        "latest_report": state.get("latest_report"),
+        "latest_report_json": state.get("latest_report_json"),
+    }
+
+
+def _daemon_supervisor_completed_dispatch_reports(previous: dict | None) -> list[dict]:
+    if not isinstance(previous, dict):
+        return []
+    restartable = previous.get("restartable_loop") if isinstance(previous.get("restartable_loop"), dict) else {}
+    completed = restartable.get("completed_dispatch_reports") if isinstance(restartable.get("completed_dispatch_reports"), list) else []
+    reports = [deepcopy(item) for item in completed if isinstance(item, dict)]
+    last_tick = previous.get("last_tick") if isinstance(previous.get("last_tick"), dict) else {}
+    report_json = last_tick.get("dispatch_report_json")
+    if report_json and not any(item.get("dispatch_report_json") == report_json for item in reports):
+        reports.append(
+            {
+                "tick_index": last_tick.get("tick_index"),
+                "dispatch_status": last_tick.get("dispatch_status"),
+                "drive_status": last_tick.get("drive_status"),
+                "dispatch_report": last_tick.get("dispatch_report"),
+                "dispatch_report_json": report_json,
+                "recorded_at": last_tick.get("finished_at") or last_tick.get("started_at"),
+            }
+        )
+    return reports[-DAEMON_SUPERVISOR_RUNTIME_HISTORY_LIMIT:]
+
+
+def _daemon_supervisor_runtime_assessment(
+    state: dict | None,
+    *,
+    stale_after_seconds: int,
+) -> dict:
+    checked_at = utc_now()
+    if not isinstance(state, dict) or not state:
+        return {
+            "schema_version": DAEMON_SUPERVISOR_RUNTIME_SCHEMA_VERSION,
+            "status": "not_found",
+            "active": False,
+            "recoverable": False,
+            "blocking": False,
+            "checked_at": checked_at,
+        }
+    status = str(state.get("status", "idle"))
+    active = bool(state.get("active", False)) or status == "running"
+    pid = _workspace_dispatch_owner_pid(state.get("owner_pid"))
+    pid_alive = _workspace_dispatch_process_is_running(pid)
+    heartbeat_at = state.get("last_heartbeat_at")
+    heartbeat_age_seconds = _workspace_dispatch_timestamp_age_seconds(heartbeat_at)
+    heartbeat_stale = heartbeat_age_seconds is None or heartbeat_age_seconds > stale_after_seconds
+    if not active:
+        return {
+            "schema_version": DAEMON_SUPERVISOR_RUNTIME_SCHEMA_VERSION,
+            "status": "not_needed",
+            "active": False,
+            "recoverable": False,
+            "blocking": False,
+            "checked_at": checked_at,
+            "previous_status": status,
+            "previous_pid": pid,
+            "pid_alive": pid_alive,
+            "heartbeat_at": heartbeat_at,
+            "heartbeat_age_seconds": heartbeat_age_seconds,
+            "threshold_seconds": stale_after_seconds,
+        }
+
+    if pid is None:
+        reason = "missing_pid"
+    elif pid_alive is False:
+        reason = "pid_gone"
+    elif heartbeat_stale:
+        reason = "heartbeat_stale"
+    else:
+        reason = "runtime_in_progress"
+
+    recoverable = reason in {"missing_pid", "pid_gone", "heartbeat_stale"}
+    return {
+        "schema_version": DAEMON_SUPERVISOR_RUNTIME_SCHEMA_VERSION,
+        "status": "recoverable" if recoverable else "in_progress",
+        "active": True,
+        "recoverable": recoverable,
+        "blocking": not recoverable,
+        "reason": reason,
+        "message": (
+            "previous daemon supervisor runtime can be resumed from durable state"
+            if recoverable
+            else "daemon supervisor runtime is already active"
+        ),
+        "checked_at": checked_at,
+        "previous_status": status,
+        "previous_pid": pid,
+        "pid_alive": pid_alive,
+        "heartbeat_at": heartbeat_at,
+        "heartbeat_age_seconds": heartbeat_age_seconds,
+        "threshold_seconds": stale_after_seconds,
+    }
+
+
+def _daemon_supervisor_recovery_payload(previous: dict, assessment: dict) -> dict:
+    recovered_at = utc_now()
+    return {
+        "schema_version": DAEMON_SUPERVISOR_RUNTIME_SCHEMA_VERSION,
+        "kind": "engineering-harness.daemon-supervisor-runtime-recovery",
+        "status": "recovered",
+        "reason": assessment.get("reason"),
+        "message": "stale daemon supervisor runtime recovered before starting a new loop window",
+        "recovered_at": recovered_at,
+        "previous_loop": _daemon_supervisor_previous_snapshot(previous),
+        "assessment": deepcopy(assessment),
+    }
+
+
+def _daemon_supervisor_new_state(
+    workspace: Path,
+    args: argparse.Namespace,
+    *,
+    previous: dict | None,
+    recovery: dict | None,
+) -> dict:
+    started_at = utc_now()
+    previous_restartable = previous.get("restartable_loop") if isinstance(previous, dict) and isinstance(previous.get("restartable_loop"), dict) else {}
+    generation = int((previous or {}).get("generation", 0) or previous_restartable.get("generation", 0) or 0) + 1
+    resume_count = int(previous_restartable.get("resume_count", 0) or 0) + (1 if previous else 0)
+    completed_reports = _daemon_supervisor_completed_dispatch_reports(previous)
+    loop_id = f"{slug_now()}-{os.getpid()}-{int(time.time() * 1_000_000)}"
+    return {
+        "schema_version": DAEMON_SUPERVISOR_RUNTIME_SCHEMA_VERSION,
+        "kind": DAEMON_SUPERVISOR_RUNTIME_KIND,
+        "workspace": str(workspace),
+        "state_path": _workspace_relative(workspace, _daemon_supervisor_runtime_state_path(workspace)),
+        "status": "running",
+        "active": True,
+        "owner_pid": os.getpid(),
+        "loop_id": loop_id,
+        "generation": generation,
+        "started_at": started_at,
+        "finished_at": None,
+        "last_heartbeat_at": started_at,
+        "heartbeat_count": 1,
+        "current_activity": "daemon-supervisor-starting",
+        "run_window": {
+            "schema_version": DAEMON_SUPERVISOR_RUNTIME_SCHEMA_VERSION,
+            "started_at": started_at,
+            "deadline_at": _daemon_supervisor_deadline(started_at, args.run_window_seconds),
+            "window_seconds": args.run_window_seconds,
+            "max_ticks": args.max_ticks,
+            "tick_count": 0,
+            "remaining_ticks": args.max_ticks,
+        },
+        "restartable_loop": {
+            "schema_version": DAEMON_SUPERVISOR_RUNTIME_SCHEMA_VERSION,
+            "generation": generation,
+            "resume_count": resume_count,
+            "resumed_from": _daemon_supervisor_previous_snapshot(previous),
+            "recovered_previous": recovery,
+            "completed_dispatch_reports": completed_reports,
+        },
+        "command_options": _daemon_supervisor_runtime_options(args, workspace),
+        "ticks": [],
+        "last_tick": None,
+        "last_decision": None,
+        "stop_reason": None,
+        "history": [
+            {
+                "at": started_at,
+                "event": "start",
+                "loop_id": loop_id,
+                "generation": generation,
+                "recovered_previous": bool(recovery),
+            }
+        ],
+        "latest_report": None,
+        "latest_report_json": None,
+    }
+
+
+def _daemon_supervisor_heartbeat(
+    workspace: Path,
+    state: dict,
+    *,
+    activity: str,
+    message: str | None = None,
+) -> None:
+    now = utc_now()
+    state["owner_pid"] = os.getpid()
+    state["last_heartbeat_at"] = now
+    state["heartbeat_count"] = int(state.get("heartbeat_count", 0) or 0) + 1
+    state["current_activity"] = activity
+    if message is not None:
+        state["last_progress_message"] = message
+    _write_daemon_supervisor_runtime_state(workspace, state)
+
+
+def _daemon_supervisor_window_expired(state: dict) -> bool:
+    run_window = state.get("run_window") if isinstance(state.get("run_window"), dict) else {}
+    deadline_at = run_window.get("deadline_at")
+    if not deadline_at:
+        return False
+    deadline = parse_utc_timestamp(deadline_at)
+    return deadline is not None and datetime.now(timezone.utc) >= deadline
+
+
+def _daemon_supervisor_stop_reason(code: str, message: str, **evidence) -> dict:
+    payload = {
+        "schema_version": DAEMON_SUPERVISOR_RUNTIME_SCHEMA_VERSION,
+        "code": code,
+        "message": message,
+        "stopped_at": utc_now(),
+    }
+    payload.update({key: value for key, value in evidence.items() if value is not None})
+    return payload
+
+
+def _daemon_supervisor_progress(dispatch_payload: dict | None) -> dict:
+    dispatch_payload = dispatch_payload if isinstance(dispatch_payload, dict) else {}
+    drive = dispatch_payload.get("drive") if isinstance(dispatch_payload.get("drive"), dict) else None
+    return _workspace_drive_progress_evidence(drive)
+
+
+def _daemon_supervisor_tick_decision(
+    dispatch_exit_code: int,
+    dispatch_payload: dict,
+    *,
+    idle_count: int,
+    args: argparse.Namespace,
+) -> dict:
+    status = str(dispatch_payload.get("status") or "unknown")
+    progress = _daemon_supervisor_progress(dispatch_payload)
+    selected = dispatch_payload.get("selected") if isinstance(dispatch_payload.get("selected"), dict) else {}
+    drive_status = selected.get("drive_status") or (
+        dispatch_payload.get("drive", {}).get("status") if isinstance(dispatch_payload.get("drive"), dict) else None
+    )
+    decision = {
+        "schema_version": DAEMON_SUPERVISOR_RUNTIME_SCHEMA_VERSION,
+        "decided_at": utc_now(),
+        "dispatch_status": status,
+        "dispatch_exit_code": dispatch_exit_code,
+        "drive_status": drive_status,
+        "idle_count": idle_count,
+        "sleep_seconds": 0,
+        "backoff_seconds": 0,
+        "progress": progress,
+        "action": "continue",
+        "reason": "productive_dispatch" if progress.get("useful_progress") else "dispatch_completed",
+        "message": "continue supervisor loop",
+    }
+    if status == "no_eligible_project":
+        decision.update(
+            {
+                "action": "stop" if idle_count >= args.idle_stop_count else "sleep",
+                "reason": "no_eligible_project",
+                "message": "no eligible project was available in the workspace queue",
+                "sleep_seconds": args.idle_sleep_seconds,
+            }
+        )
+        return decision
+    if status == "lease_held":
+        decision.update(
+            {
+                "action": "sleep",
+                "reason": "workspace_dispatch_lease_held",
+                "message": "workspace dispatch lease is held by another local process",
+                "sleep_seconds": args.idle_sleep_seconds,
+            }
+        )
+        return decision
+    if dispatch_exit_code != 0 or status == "drive_failed":
+        decision.update(
+            {
+                "action": "stop",
+                "reason": "dispatch_failed",
+                "message": str(dispatch_payload.get("message") or "workspace dispatch failed"),
+                "backoff_seconds": _workspace_dispatch_nonproductive_backoff_seconds(args),
+            }
+        )
+        return decision
+    if not progress.get("useful_progress") and status == "dispatched":
+        decision.update(
+            {
+                "action": "sleep",
+                "reason": "nonproductive_dispatch",
+                "message": "selected dispatch did not complete a task or materialize useful work",
+                "sleep_seconds": args.idle_sleep_seconds,
+                "backoff_seconds": _workspace_dispatch_nonproductive_backoff_seconds(args),
+            }
+        )
+        return decision
+    decision["sleep_seconds"] = args.sleep_seconds
+    return decision
+
+
+def _daemon_supervisor_tick_payload(
+    tick_index: int,
+    dispatch_exit_code: int,
+    dispatch_payload: dict,
+    decision: dict,
+) -> dict:
+    selected = dispatch_payload.get("selected") if isinstance(dispatch_payload.get("selected"), dict) else {}
+    return {
+        "schema_version": DAEMON_SUPERVISOR_RUNTIME_SCHEMA_VERSION,
+        "tick_index": tick_index,
+        "started_at": dispatch_payload.get("started_at"),
+        "finished_at": dispatch_payload.get("finished_at"),
+        "dispatch_status": dispatch_payload.get("status"),
+        "dispatch_message": dispatch_payload.get("message"),
+        "dispatch_exit_code": dispatch_exit_code,
+        "dispatch_report": dispatch_payload.get("dispatch_report"),
+        "dispatch_report_json": dispatch_payload.get("dispatch_report_json"),
+        "selected": deepcopy(selected) if selected else None,
+        "drive_status": selected.get("drive_status"),
+        "drive_report": selected.get("drive_report"),
+        "drive_report_json": selected.get("drive_report_json"),
+        "eligible_count": dispatch_payload.get("eligible_count"),
+        "skipped_count": dispatch_payload.get("skipped_count"),
+        "decision": deepcopy(decision),
+    }
+
+
+def _daemon_supervisor_record_tick(workspace: Path, state: dict, tick: dict) -> None:
+    ticks = state.setdefault("ticks", [])
+    if not isinstance(ticks, list):
+        ticks = []
+        state["ticks"] = ticks
+    ticks.append(deepcopy(tick))
+    state["ticks"] = ticks[-DAEMON_SUPERVISOR_RUNTIME_HISTORY_LIMIT:]
+    state["last_tick"] = deepcopy(tick)
+    state["last_decision"] = deepcopy(tick.get("decision"))
+    run_window = state.get("run_window") if isinstance(state.get("run_window"), dict) else {}
+    run_window["tick_count"] = int(run_window.get("tick_count", 0) or 0) + 1
+    max_ticks = int(run_window.get("max_ticks", 0) or 0)
+    run_window["remaining_ticks"] = max(0, max_ticks - int(run_window.get("tick_count", 0) or 0))
+    state["run_window"] = run_window
+    completed = state.setdefault("restartable_loop", {}).setdefault("completed_dispatch_reports", [])
+    if isinstance(completed, list) and tick.get("dispatch_report_json"):
+        if not any(item.get("dispatch_report_json") == tick.get("dispatch_report_json") for item in completed):
+            completed.append(
+                {
+                    "tick_index": tick.get("tick_index"),
+                    "dispatch_status": tick.get("dispatch_status"),
+                    "drive_status": tick.get("drive_status"),
+                    "dispatch_report": tick.get("dispatch_report"),
+                    "dispatch_report_json": tick.get("dispatch_report_json"),
+                    "recorded_at": tick.get("finished_at") or utc_now(),
+                }
+            )
+            state["restartable_loop"]["completed_dispatch_reports"] = completed[
+                -DAEMON_SUPERVISOR_RUNTIME_HISTORY_LIMIT:
+            ]
+    _daemon_supervisor_heartbeat(
+        workspace,
+        state,
+        activity="daemon-supervisor-tick-recorded",
+        message=f"recorded supervisor tick {tick.get('tick_index')}: {tick.get('dispatch_status')}",
+    )
+
+
+def _daemon_supervisor_finalize_state(
+    workspace: Path,
+    state: dict,
+    *,
+    status: str,
+    stop_reason: dict,
+) -> dict:
+    now = utc_now()
+    state.update(
+        {
+            "status": status,
+            "active": False,
+            "owner_pid": None,
+            "finished_at": now,
+            "last_heartbeat_at": now,
+            "current_activity": "daemon-supervisor-stopped",
+            "stop_reason": stop_reason,
+        }
+    )
+    history = state.setdefault("history", [])
+    if isinstance(history, list):
+        history.append(
+            {
+                "at": now,
+                "event": "stop",
+                "status": status,
+                "stop_reason": stop_reason.get("code"),
+                "message": stop_reason.get("message"),
+            }
+        )
+        state["history"] = history[-DAEMON_SUPERVISOR_RUNTIME_HISTORY_LIMIT:]
+    _write_daemon_supervisor_runtime_state(workspace, state)
+    return state
+
+
+def _daemon_supervisor_report_tick_lines(ticks: list[dict]) -> list[str]:
+    lines: list[str] = []
+    if not ticks:
+        return ["No supervisor ticks ran."]
+    for tick in ticks:
+        decision = tick.get("decision") if isinstance(tick.get("decision"), dict) else {}
+        selected = tick.get("selected") if isinstance(tick.get("selected"), dict) else {}
+        lines.append(
+            f"- Tick `{tick.get('tick_index')}`: dispatch=`{tick.get('dispatch_status')}` "
+            f"drive=`{tick.get('drive_status') or 'none'}` action=`{decision.get('action')}` "
+            f"reason=`{decision.get('reason')}`"
+        )
+        if selected:
+            lines.append(f"  - Selected: `{selected.get('project')}`")
+        if tick.get("dispatch_report_json"):
+            lines.append(f"  - Dispatch sidecar: `{tick.get('dispatch_report_json')}`")
+        if tick.get("drive_report_json"):
+            lines.append(f"  - Drive sidecar: `{tick.get('drive_report_json')}`")
+        if decision.get("sleep_seconds"):
+            lines.append(f"  - Sleep seconds: `{decision.get('sleep_seconds')}`")
+        if decision.get("backoff_seconds"):
+            lines.append(f"  - Backoff seconds: `{decision.get('backoff_seconds')}`")
+    return lines
+
+
+def write_daemon_supervisor_runtime_report(workspace: Path, payload: dict) -> str:
+    report_path = _daemon_supervisor_runtime_report_path(workspace)
+    json_path = report_path.with_suffix(".json")
+    payload["runtime_report"] = _workspace_relative(workspace, report_path)
+    payload["runtime_report_json"] = _workspace_relative(workspace, json_path)
+    stop_reason = payload.get("stop_reason") if isinstance(payload.get("stop_reason"), dict) else {}
+    run_window = payload.get("run_window") if isinstance(payload.get("run_window"), dict) else {}
+    restartable = payload.get("restartable_loop") if isinstance(payload.get("restartable_loop"), dict) else {}
+    lines = [
+        "# Daemon Supervisor Runtime Report",
+        "",
+        f"- Workspace: `{payload.get('workspace')}`",
+        f"- Status: `{payload.get('status')}`",
+        f"- Started: {payload.get('started_at')}",
+        f"- Finished: {payload.get('finished_at')}",
+        f"- Stop reason: `{stop_reason.get('code')}` - {stop_reason.get('message')}",
+        f"- Runtime state: `{payload.get('state_path')}`",
+        "",
+        "## Run Window",
+        "",
+        f"- Started: {run_window.get('started_at')}",
+        f"- Deadline: {run_window.get('deadline_at') or 'none'}",
+        f"- Window seconds: `{run_window.get('window_seconds')}`",
+        f"- Tick count: `{run_window.get('tick_count')}`",
+        f"- Max ticks: `{run_window.get('max_ticks')}`",
+        "",
+        "## Restartable Loop",
+        "",
+        f"- Generation: `{restartable.get('generation')}`",
+        f"- Resume count: `{restartable.get('resume_count')}`",
+        f"- Completed dispatch reports: `{len(restartable.get('completed_dispatch_reports', []))}`",
+    ]
+    if isinstance(restartable.get("recovered_previous"), dict):
+        recovery = restartable["recovered_previous"]
+        lines.append(f"- Recovered previous loop: `{recovery.get('reason')}` at {recovery.get('recovered_at')}")
+    if isinstance(restartable.get("resumed_from"), dict):
+        resumed = restartable["resumed_from"]
+        lines.append(f"- Resumed from loop: `{resumed.get('loop_id')}` status=`{resumed.get('status')}`")
+    lines.extend(
+        [
+            "",
+            "## Tick Decisions",
+            "",
+            *_daemon_supervisor_report_tick_lines(payload.get("ticks", [])),
+            "",
+            "## Machine-Readable Runtime",
+            "",
+            "```json",
+            json.dumps(payload, indent=2, sort_keys=True),
+            "```",
+            "",
+        ]
+    )
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+    write_json(json_path, payload)
+    return payload["runtime_report"]
+
+
+def daemon_supervisor_runtime(args: argparse.Namespace) -> tuple[int, dict]:
+    workspace = Path(args.workspace).resolve()
+    workspace.mkdir(parents=True, exist_ok=True)
+    stale_after_seconds = _daemon_supervisor_runtime_stale_after_seconds(args)
+    previous = _read_daemon_supervisor_runtime_state(workspace)
+    assessment = _daemon_supervisor_runtime_assessment(previous, stale_after_seconds=stale_after_seconds)
+    if assessment.get("blocking"):
+        payload = {
+            "schema_version": DAEMON_SUPERVISOR_RUNTIME_SCHEMA_VERSION,
+            "kind": DAEMON_SUPERVISOR_RUNTIME_KIND,
+            "workspace": str(workspace),
+            "state_path": _workspace_relative(workspace, _daemon_supervisor_runtime_state_path(workspace)),
+            "status": "already_running",
+            "started_at": utc_now(),
+            "finished_at": utc_now(),
+            "run_window": {},
+            "restartable_loop": {
+                "schema_version": DAEMON_SUPERVISOR_RUNTIME_SCHEMA_VERSION,
+                "resumed_from": _daemon_supervisor_previous_snapshot(previous),
+                "recovered_previous": None,
+                "completed_dispatch_reports": _daemon_supervisor_completed_dispatch_reports(previous),
+            },
+            "ticks": [],
+            "last_decision": None,
+            "stop_reason": _daemon_supervisor_stop_reason(
+                "runtime_already_running",
+                "daemon supervisor runtime is already active",
+                assessment=assessment,
+            ),
+            "preflight": assessment,
+        }
+        write_daemon_supervisor_runtime_report(workspace, payload)
+        return 1, payload
+
+    recovery = (
+        _daemon_supervisor_recovery_payload(previous, assessment)
+        if isinstance(previous, dict) and assessment.get("recoverable")
+        else None
+    )
+    state = _daemon_supervisor_new_state(workspace, args, previous=previous, recovery=recovery)
+    _write_daemon_supervisor_runtime_state(workspace, state)
+    ticks: list[dict] = []
+    idle_count = 0
+    stop_reason: dict | None = None
+    exit_code = 0
+
+    while True:
+        tick_count = int(state.get("run_window", {}).get("tick_count", 0) or 0)
+        if _daemon_supervisor_window_expired(state):
+            stop_reason = _daemon_supervisor_stop_reason(
+                "run_window_expired",
+                "daemon supervisor run window expired before the next tick",
+                tick_count=tick_count,
+            )
+            break
+        if tick_count >= args.max_ticks:
+            stop_reason = _daemon_supervisor_stop_reason(
+                "max_ticks",
+                f"daemon supervisor stopped after {args.max_ticks} tick(s)",
+                tick_count=tick_count,
+            )
+            break
+
+        _daemon_supervisor_heartbeat(
+            workspace,
+            state,
+            activity="daemon-supervisor-dispatching",
+            message=f"starting supervisor tick {tick_count + 1}",
+        )
+        dispatch_exit_code, dispatch_payload = workspace_drive_dispatch(args)
+        if dispatch_payload.get("status") == "no_eligible_project":
+            idle_count += 1
+        else:
+            idle_count = 0
+        decision = _daemon_supervisor_tick_decision(
+            dispatch_exit_code,
+            dispatch_payload,
+            idle_count=idle_count,
+            args=args,
+        )
+        tick = _daemon_supervisor_tick_payload(tick_count + 1, dispatch_exit_code, dispatch_payload, decision)
+        ticks.append(tick)
+        _daemon_supervisor_record_tick(workspace, state, tick)
+
+        if decision.get("action") == "stop":
+            reason = str(decision.get("reason") or "operator_visible_stop")
+            code = "idle_limit" if reason == "no_eligible_project" else reason
+            stop_reason = _daemon_supervisor_stop_reason(
+                code,
+                str(decision.get("message") or "daemon supervisor stopped"),
+                tick_count=int(state.get("run_window", {}).get("tick_count", 0) or 0),
+                dispatch_status=dispatch_payload.get("status"),
+                dispatch_exit_code=dispatch_exit_code,
+            )
+            if code == "dispatch_failed":
+                exit_code = 1
+            break
+
+        if _daemon_supervisor_window_expired(state):
+            stop_reason = _daemon_supervisor_stop_reason(
+                "run_window_expired",
+                "daemon supervisor run window expired after dispatch tick",
+                tick_count=int(state.get("run_window", {}).get("tick_count", 0) or 0),
+            )
+            break
+        if int(state.get("run_window", {}).get("tick_count", 0) or 0) >= args.max_ticks:
+            stop_reason = _daemon_supervisor_stop_reason(
+                "max_ticks",
+                f"daemon supervisor stopped after {args.max_ticks} tick(s)",
+                tick_count=int(state.get("run_window", {}).get("tick_count", 0) or 0),
+            )
+            break
+
+        sleep_seconds = int(decision.get("sleep_seconds", 0) or 0)
+        if sleep_seconds > 0:
+            _daemon_supervisor_heartbeat(
+                workspace,
+                state,
+                activity="daemon-supervisor-sleeping",
+                message=f"sleeping {sleep_seconds}s before the next supervisor tick",
+            )
+            time.sleep(sleep_seconds)
+
+    if stop_reason is None:
+        stop_reason = _daemon_supervisor_stop_reason("completed", "daemon supervisor runtime completed")
+    state = _daemon_supervisor_finalize_state(workspace, state, status="stopped", stop_reason=stop_reason)
+    payload = {
+        "schema_version": DAEMON_SUPERVISOR_RUNTIME_SCHEMA_VERSION,
+        "kind": DAEMON_SUPERVISOR_RUNTIME_KIND,
+        "workspace": str(workspace),
+        "state_path": state.get("state_path"),
+        "status": state.get("status"),
+        "started_at": state.get("started_at"),
+        "finished_at": state.get("finished_at"),
+        "run_window": deepcopy(state.get("run_window")),
+        "restartable_loop": deepcopy(state.get("restartable_loop")),
+        "ticks": ticks,
+        "last_tick": deepcopy(state.get("last_tick")),
+        "last_decision": deepcopy(state.get("last_decision")),
+        "stop_reason": stop_reason,
+        "preflight": assessment,
+        "command_options": deepcopy(state.get("command_options")),
+        "final_state": deepcopy(state),
+    }
+    write_daemon_supervisor_runtime_report(workspace, payload)
+    state["latest_report"] = payload.get("runtime_report")
+    state["latest_report_json"] = payload.get("runtime_report_json")
+    payload["final_state"] = deepcopy(state)
+    _write_daemon_supervisor_runtime_state(workspace, state)
+    write_json(workspace / str(payload["runtime_report_json"]), payload)
+    return exit_code, payload
+
+
+def cmd_daemon_supervisor(args: argparse.Namespace) -> int:
+    if args.max_ticks < 1:
+        raise ValueError("--max-ticks must be at least 1")
+    if args.max_tasks < 1:
+        raise ValueError("--max-tasks must be at least 1")
+    if args.run_window_seconds < 0:
+        raise ValueError("--run-window-seconds must be non-negative")
+    if args.sleep_seconds < 0 or args.idle_sleep_seconds < 0:
+        raise ValueError("--sleep-seconds and --idle-sleep-seconds must be non-negative")
+    if args.idle_stop_count < 1:
+        raise ValueError("--idle-stop-count must be at least 1")
+    if args.runtime_stale_after_seconds is not None and args.runtime_stale_after_seconds < 1:
+        raise ValueError("--runtime-stale-after-seconds must be at least 1")
+    if args.lease_stale_after_seconds is not None and args.lease_stale_after_seconds < 1:
+        raise ValueError("--lease-stale-after-seconds must be at least 1")
+    if args.nonproductive_backoff_seconds is not None and args.nonproductive_backoff_seconds < 0:
+        raise ValueError("--nonproductive-backoff-seconds must be non-negative")
+    exit_code, payload = daemon_supervisor_runtime(args)
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        stop_reason = payload.get("stop_reason") if isinstance(payload.get("stop_reason"), dict) else {}
+        print(f"Daemon supervisor: {payload['status']} - {stop_reason.get('message')}")
+        print(f"Ticks: {len(payload.get('ticks', []))}")
+        print(f"Stop reason: {stop_reason.get('code')}")
+        print(f"Runtime report: {payload.get('runtime_report')}")
+    return exit_code
+
+
 def cmd_workspace_drive(args: argparse.Namespace) -> int:
     if args.max_tasks < 1:
         raise ValueError("--max-tasks must be at least 1")
@@ -2931,6 +3687,40 @@ def build_parser() -> argparse.ArgumentParser:
     workspace_drive.add_argument("--allow-agent", action="store_true")
     workspace_drive.add_argument("--json", action="store_true")
     workspace_drive.set_defaults(func=cmd_workspace_drive)
+
+    daemon_supervisor = subparsers.add_parser(
+        "daemon-supervisor",
+        help="Run a durable local supervisor loop over workspace-drive ticks",
+    )
+    daemon_supervisor.add_argument("--workspace", type=Path, default=Path.cwd())
+    daemon_supervisor.add_argument("--max-depth", type=int, default=3)
+    daemon_supervisor.add_argument("--max-ticks", type=int, default=1)
+    daemon_supervisor.add_argument("--run-window-seconds", type=int, default=0)
+    daemon_supervisor.add_argument("--sleep-seconds", type=int, default=0)
+    daemon_supervisor.add_argument("--idle-sleep-seconds", type=int, default=300)
+    daemon_supervisor.add_argument("--idle-stop-count", type=int, default=1)
+    daemon_supervisor.add_argument("--runtime-stale-after-seconds", type=int, default=None)
+    daemon_supervisor.add_argument("--max-tasks", type=int, default=1)
+    daemon_supervisor.add_argument("--time-budget-seconds", type=int, default=0)
+    daemon_supervisor.add_argument("--rolling", action="store_true")
+    daemon_supervisor.add_argument("--self-iterate", action="store_true")
+    daemon_supervisor.add_argument("--max-continuations", type=int, default=1)
+    daemon_supervisor.add_argument("--max-self-iterations", type=int, default=1)
+    daemon_supervisor.add_argument("--continuation-batch-size", type=int, default=1)
+    daemon_supervisor.add_argument("--no-progress-limit", type=int, default=2)
+    daemon_supervisor.add_argument("--lease-stale-after-seconds", type=int, default=None)
+    daemon_supervisor.add_argument("--nonproductive-backoff-seconds", type=int, default=None)
+    daemon_supervisor.add_argument(
+        "--scheduler-policy",
+        choices=WORKSPACE_DISPATCH_SCHEDULER_POLICIES,
+        default=WORKSPACE_DISPATCH_DEFAULT_SCHEDULER_POLICY,
+        help="Workspace project ordering policy used by each supervisor dispatch tick",
+    )
+    daemon_supervisor.add_argument("--allow-live", action="store_true")
+    daemon_supervisor.add_argument("--allow-manual", action="store_true")
+    daemon_supervisor.add_argument("--allow-agent", action="store_true")
+    daemon_supervisor.add_argument("--json", action="store_true")
+    daemon_supervisor.set_defaults(func=cmd_daemon_supervisor)
 
     for name, help_text, func in [
         ("status", "Show project or workspace status", cmd_status),

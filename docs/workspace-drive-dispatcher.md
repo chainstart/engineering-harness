@@ -29,6 +29,40 @@ bin/engh workspace-drive \
   --json
 ```
 
+For a local daemon-style loop that persists supervisor metadata between ticks, use
+`daemon-supervisor`. It is still file/CLI based and does not fork into the background; an external
+process manager, cron, or shell can restart it safely because the loop state is durable:
+
+```bash
+bin/engh daemon-supervisor \
+  --workspace /path/to/workspace \
+  --max-ticks 12 \
+  --run-window-seconds 3600 \
+  --max-tasks 1 \
+  --rolling \
+  --max-continuations 1 \
+  --json
+```
+
+The supervisor writes restartable runtime state to:
+
+```text
+<workspace>/.engineering/state/daemon-supervisor-runtime.json
+```
+
+and writes Markdown/JSON reports under:
+
+```text
+<workspace>/.engineering/reports/daemon-supervisor-runtime/
+```
+
+Each supervisor tick delegates to `workspace-drive`, then records the dispatch report, selected
+project, drive status, idle/sleep/backoff decision, run-window tick count, and an operator-visible
+`stop_reason`. If the previous supervisor process disappears while its state still says `running`, a
+later invocation records `restartable_loop.recovered_previous` and resumes from the durable report
+history. Completed project tasks are not rerun because the selected project still uses its normal
+durable task state and replay/manifest evidence.
+
 By default, the dispatcher uses the local fair scheduler. It keeps the safety queue deterministic, but
 eligible projects are ordered by a score instead of always taking the first resolved path. The score is
 computed from local-only evidence:
@@ -212,6 +246,18 @@ The built-in lease is sufficient for overlapping cron or local supervisor ticks.
 produce machine-readable lease evidence instead of racing the active scanner. Supervisors should treat
 `lease_held` as a normal contention outcome and retry on the next interval.
 
+`daemon-supervisor` adds a durable run window around those same ticks. The JSON output and sidecar
+include:
+
+- `run_window`: start time, deadline, configured window seconds, tick count, and remaining ticks.
+- `restartable_loop`: generation, resume count, previous-loop snapshot, recovered stale runtime
+  evidence, and completed dispatch report history.
+- `ticks[]`: one workspace dispatch result per loop tick with the decision that followed it.
+- `last_decision`: the latest `continue`, `sleep`, or `stop` action, including idle sleep and
+  nonproductive backoff seconds when relevant.
+- `stop_reason`: the final operator-facing reason such as `max_ticks`, `idle_limit`,
+  `run_window_expired`, `dispatch_failed`, or `runtime_already_running`.
+
 Resolve safety skips locally before expecting a project to re-enter the queue:
 
 - `bin/engh resume --project-root <project>` clears pause, cancel, or stale drive control after review.
@@ -253,6 +299,11 @@ components, selected reason, scheduler policy, nonproductive backoff evidence, a
 sidecar paths. It is the quickest way to answer whether the project is skipped by workspace
 scheduling, cooling down after a recent selection or nonproductive drive, blocked by a lease, blocked
 by live drive-control protection, or simply waiting behind another eligible project.
+
+The same status payload also carries the nearest daemon supervisor evidence under
+`runtime_dashboard.daemon_supervisor_runtime` and top-level `daemon_supervisor_runtime`. Inspect
+`stop_reason`, `last_decision`, `run_window`, `restartable_loop.completed_dispatch_reports`, and
+`latest_report.json_path` first when diagnosing a long unattended local loop.
 
 The workspace dispatcher does not expose push flags and passes project drives with local checkpointing
 disabled. Roadmap tasks still run under the project policy engine, so live operations and agent or
