@@ -211,6 +211,10 @@ FRONTEND_TASK_MILESTONE_ID = "frontend-visualization"
 FRONTEND_TASK_GENERATOR = "engineering-harness-frontend-task-generator"
 SELF_ITERATION_CONTEXT_SCHEMA_VERSION = 1
 GOAL_GAP_RETROSPECTIVE_SCHEMA_VERSION = 1
+RUNTIME_DASHBOARD_SCHEMA_VERSION = 1
+WORKSPACE_DISPATCH_LEASE_SCHEMA_VERSION = 1
+WORKSPACE_DISPATCH_LEASE_DIRNAME = "workspace-dispatch-lease"
+WORKSPACE_DISPATCH_REPORT_LIMIT = 5
 UNATTENDED_RELIABILITY_GOAL = (
     "Run unattended engineering drives that drain or safely extend the roadmap, preserve local audit "
     "evidence, surface blockers deterministically, and avoid unsafe external dependencies."
@@ -3185,6 +3189,296 @@ class Harness:
             "title": self._markdown_title(path),
         }
 
+    def _runtime_path_relative_to(self, root: Path, path: Path) -> str:
+        try:
+            return str(path.relative_to(root))
+        except ValueError:
+            return str(path)
+
+    def _runtime_enriched_report_context(self) -> dict[str, Any]:
+        return {
+            "task_reports": self._runtime_recent_report_context(self.report_dir.glob("*.md")),
+            "drive_reports": self._runtime_recent_report_context((self.report_dir / "drives").glob("*.md")),
+        }
+
+    def _runtime_recent_report_context(self, paths: Any) -> dict[str, Any]:
+        report_paths = sorted(
+            [path for path in paths if isinstance(path, Path) and path.is_file()],
+            key=self._project_relative_path,
+        )
+        recent = list(reversed(report_paths))[: SELF_ITERATION_CONTEXT_LIMITS["recent_report_count"]]
+        return {
+            "total_count": len(report_paths),
+            "included_count": len(recent),
+            "files": [self._runtime_report_file_summary(path, root=self.project_root) for path in recent],
+        }
+
+    def _runtime_report_file_summary(self, path: Path, *, root: Path) -> dict[str, Any]:
+        item = {
+            "path": self._runtime_path_relative_to(root, path),
+            "bytes": self._file_size(path),
+            "title": self._markdown_title(path),
+        }
+        sidecar_path = path.with_suffix(".json")
+        if not sidecar_path.exists():
+            return item
+        item["json_path"] = self._runtime_path_relative_to(root, sidecar_path)
+        try:
+            sidecar = load_mapping(sidecar_path)
+        except Exception as exc:
+            item["json_error"] = self._truncate_text(str(exc), SELF_ITERATION_CONTEXT_LIMITS["message_chars"])
+            return item
+        compact = self._runtime_compact_report_sidecar(sidecar)
+        if compact:
+            item["sidecar"] = compact
+        return item
+
+    def _runtime_compact_report_sidecar(self, sidecar: dict[str, Any]) -> dict[str, Any]:
+        compact: dict[str, Any] = {}
+        for key in (
+            "kind",
+            "project",
+            "status",
+            "message",
+            "started_at",
+            "finished_at",
+            "drive_report",
+            "drive_report_json",
+            "dispatch_report",
+            "dispatch_report_json",
+        ):
+            if sidecar.get(key) is not None:
+                compact[key] = sidecar.get(key)
+        results = sidecar.get("results")
+        if isinstance(results, list):
+            compact["result_count"] = len(results)
+        continuations = sidecar.get("continuations")
+        if isinstance(continuations, list):
+            compact["continuation_count"] = len(continuations)
+        queue = sidecar.get("queue")
+        if isinstance(queue, list):
+            compact["queue_count"] = len(queue)
+        selected = sidecar.get("selected")
+        if isinstance(selected, dict):
+            compact["selected"] = {
+                key: selected.get(key)
+                for key in ("project", "root", "queue_index", "drive_status", "drive_report", "drive_report_json")
+                if selected.get(key) is not None
+            }
+        retrospective = sidecar.get("goal_gap_retrospective")
+        if isinstance(retrospective, dict):
+            request = retrospective.get("request_self_iteration")
+            trigger = retrospective.get("trigger") if isinstance(retrospective.get("trigger"), dict) else {}
+            compact["goal_gap_retrospective"] = {
+                "stop_class": trigger.get("stop_class"),
+                "remaining_risk_count": len(retrospective.get("remaining_risks", [])),
+                "next_action_count": len(retrospective.get("likely_next_stage_themes", [])),
+                "request_self_iteration": bool(request.get("recommended")) if isinstance(request, dict) else False,
+            }
+        return compact
+
+    def _runtime_workspace_dispatch_candidate_roots(self) -> list[Path]:
+        candidates = [self.project_root, *self.project_root.parents]
+        seen: set[str] = set()
+        roots: list[Path] = []
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            key = str(resolved)
+            if key in seen:
+                continue
+            seen.add(key)
+            roots.append(resolved)
+        return roots
+
+    def _runtime_workspace_dispatch_root(self) -> Path | None:
+        for candidate in self._runtime_workspace_dispatch_candidate_roots():
+            engineering = candidate / ".engineering"
+            if (engineering / "reports" / "workspace-dispatches").exists():
+                return candidate
+            if (engineering / "state" / WORKSPACE_DISPATCH_LEASE_DIRNAME / "lease.json").exists():
+                return candidate
+        return None
+
+    def _runtime_workspace_dispatch_summary(self) -> dict[str, Any]:
+        workspace = self._runtime_workspace_dispatch_root()
+        if workspace is None:
+            return {
+                "schema_version": WORKSPACE_DISPATCH_LEASE_SCHEMA_VERSION,
+                "status": "not_found",
+                "workspace_root": None,
+                "lease": {"status": "missing", "active": False, "path": None},
+                "latest_reports": {"total_count": 0, "included_count": 0, "files": []},
+                "latest_report": None,
+                "queue_count": 0,
+                "queue": [],
+                "latest_report_lease": None,
+            }
+
+        reports = self._runtime_workspace_dispatch_reports(workspace)
+        latest_report = reports["files"][0] if reports.get("files") else None
+        latest_payload = self._runtime_load_workspace_dispatch_payload(workspace, latest_report)
+        queue = self._runtime_compact_workspace_dispatch_queue(latest_payload)
+        latest_report_lease = (
+            deepcopy(latest_payload.get("lease"))
+            if isinstance(latest_payload, dict) and isinstance(latest_payload.get("lease"), dict)
+            else None
+        )
+        lease = self._runtime_workspace_dispatch_lease_summary(workspace)
+        if lease.get("active"):
+            status = "active_lease"
+        elif latest_report is not None:
+            status = "reported"
+        else:
+            status = "no_dispatch_reports"
+        return {
+            "schema_version": WORKSPACE_DISPATCH_LEASE_SCHEMA_VERSION,
+            "status": status,
+            "workspace_root": str(workspace),
+            "lease": lease,
+            "latest_reports": reports,
+            "latest_report": latest_report,
+            "queue_count": len(queue),
+            "queue": queue,
+            "latest_report_lease": latest_report_lease,
+        }
+
+    def _runtime_workspace_dispatch_reports(self, workspace: Path) -> dict[str, Any]:
+        report_dir = workspace / ".engineering" / "reports" / "workspace-dispatches"
+        paths = sorted(
+            [path for path in report_dir.glob("*.md") if path.is_file()] if report_dir.exists() else [],
+            key=lambda path: self._runtime_path_relative_to(workspace, path),
+        )
+        recent = list(reversed(paths))[:WORKSPACE_DISPATCH_REPORT_LIMIT]
+        return {
+            "total_count": len(paths),
+            "included_count": len(recent),
+            "files": [self._runtime_report_file_summary(path, root=workspace) for path in recent],
+        }
+
+    def _runtime_load_workspace_dispatch_payload(
+        self,
+        workspace: Path,
+        latest_report: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(latest_report, dict):
+            return None
+        json_path = latest_report.get("json_path")
+        if not json_path:
+            return None
+        candidate = Path(str(json_path))
+        path = candidate if candidate.is_absolute() else workspace / candidate
+        try:
+            payload = load_mapping(path)
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _runtime_compact_workspace_dispatch_queue(self, payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+        if not isinstance(payload, dict) or not isinstance(payload.get("queue"), list):
+            return []
+        compact: list[dict[str, Any]] = []
+        for item in payload["queue"][:25]:
+            if not isinstance(item, dict):
+                continue
+            summary = item.get("summary") if isinstance(item.get("summary"), dict) else {}
+            next_task = summary.get("next_task") if isinstance(summary.get("next_task"), dict) else None
+            compact.append(
+                {
+                    "index": item.get("index"),
+                    "project": item.get("project"),
+                    "root": item.get("root"),
+                    "eligible": bool(item.get("eligible", False)),
+                    "selected": bool(item.get("selected", False)),
+                    "dispatch_status": item.get("dispatch_status"),
+                    "skip_codes": [
+                        str(reason.get("code"))
+                        for reason in item.get("skip_reasons", [])
+                        if isinstance(reason, dict) and reason.get("code")
+                    ],
+                    "next_task": (
+                        {
+                            "id": next_task.get("id"),
+                            "title": next_task.get("title"),
+                            "milestone_id": next_task.get("milestone_id"),
+                        }
+                        if next_task
+                        else None
+                    ),
+                }
+            )
+        return compact
+
+    def _runtime_workspace_dispatch_lease_summary(self, workspace: Path) -> dict[str, Any]:
+        lease_path = workspace / ".engineering" / "state" / WORKSPACE_DISPATCH_LEASE_DIRNAME / "lease.json"
+        path = self._runtime_path_relative_to(workspace, lease_path)
+        if not lease_path.exists():
+            return {"status": "missing", "active": False, "path": path}
+        try:
+            lease = load_mapping(lease_path)
+        except Exception as exc:
+            return {
+                "status": "invalid",
+                "active": True,
+                "path": path,
+                "error": self._truncate_text(str(exc), SELF_ITERATION_CONTEXT_LIMITS["message_chars"]),
+            }
+        if not isinstance(lease, dict):
+            return {"status": "invalid", "active": True, "path": path}
+
+        threshold = self._coerce_optional_nonnegative_seconds(lease.get("stale_after_seconds")) or 0
+        pid = self._coerce_pid(lease.get("owner_pid"))
+        pid_alive = self._process_is_running(pid)
+        heartbeat_at = lease.get("last_heartbeat_at")
+        heartbeat_dt = parse_utc_timestamp(heartbeat_at)
+        heartbeat_age_seconds = None
+        if heartbeat_dt is not None:
+            heartbeat_age_seconds = max(0, int((datetime.now(timezone.utc) - heartbeat_dt).total_seconds()))
+        stale = False
+        reason = None
+        if pid is None:
+            stale = True
+            reason = "missing_pid"
+        elif pid_alive is False:
+            stale = True
+            reason = "pid_gone"
+        elif heartbeat_dt is None:
+            stale = True
+            reason = "missing_heartbeat"
+        elif threshold and heartbeat_age_seconds is not None and heartbeat_age_seconds > threshold:
+            stale = True
+            reason = "heartbeat_stale"
+        holder_keys = (
+            "schema_version",
+            "kind",
+            "status",
+            "workspace",
+            "owner_pid",
+            "started_at",
+            "last_heartbeat_at",
+            "heartbeat_count",
+            "selected_project",
+            "command_options",
+            "stale_after_seconds",
+            "current_activity",
+        )
+        return {
+            "schema_version": WORKSPACE_DISPATCH_LEASE_SCHEMA_VERSION,
+            "status": "stale" if stale else "held",
+            "active": True,
+            "path": path,
+            "stale": stale,
+            "reason": reason,
+            "pid": pid,
+            "pid_alive": pid_alive,
+            "heartbeat_at": heartbeat_at,
+            "heartbeat_age_seconds": heartbeat_age_seconds,
+            "threshold_seconds": threshold,
+            "holder": {key: deepcopy(lease.get(key)) for key in holder_keys if key in lease},
+        }
+
     def _self_iteration_docs_context(self) -> dict[str, Any]:
         blueprint = self._self_iteration_blueprint_context()
         blueprint_path = str(blueprint.get("path") or "")
@@ -4174,6 +4468,289 @@ continuation stage(s) were appended.
             return task
         return None
 
+    def runtime_dashboard_summary(self, status_summary: dict[str, Any] | None = None) -> dict[str, Any]:
+        summary = status_summary or self.status_summary()
+        if status_summary is None and isinstance(summary.get("runtime_dashboard"), dict):
+            return deepcopy(summary["runtime_dashboard"])
+        drive_control = summary.get("drive_control") if isinstance(summary.get("drive_control"), dict) else {}
+        approval_queue = summary.get("approval_queue") if isinstance(summary.get("approval_queue"), dict) else {}
+        failure_isolation = (
+            summary.get("failure_isolation") if isinstance(summary.get("failure_isolation"), dict) else {}
+        )
+        latest_reports = self._runtime_enriched_report_context()
+        workspace_dispatch = self._runtime_workspace_dispatch_summary()
+        latest_reports["workspace_dispatch_reports"] = deepcopy(workspace_dispatch.get("latest_reports", {}))
+        current_task = self._runtime_current_task(summary, drive_control)
+        return {
+            "schema_version": RUNTIME_DASHBOARD_SCHEMA_VERSION,
+            "kind": "engineering-harness.runtime-dashboard",
+            "generated_at": utc_now(),
+            "project": summary.get("project"),
+            "root": summary.get("root"),
+            "status_source": "engh status --json",
+            "drive_control": self._runtime_drive_control_payload(drive_control),
+            "drive_watchdog": deepcopy(drive_control.get("watchdog") if isinstance(drive_control.get("watchdog"), dict) else {}),
+            "current_task": current_task,
+            "current_phase": (current_task or {}).get("phase") or drive_control.get("current_activity"),
+            "executor_no_progress": self._runtime_executor_no_progress_payload(
+                summary,
+                drive_control,
+                failure_isolation,
+            ),
+            "approval_leases": self._runtime_approval_leases_payload(approval_queue),
+            "failure_isolation": deepcopy(failure_isolation),
+            "workspace_dispatch": workspace_dispatch,
+            "latest_reports": latest_reports,
+            "goal_gap": self._runtime_goal_gap_payload(summary, latest_reports),
+        }
+
+    def _runtime_drive_control_payload(self, drive_control: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "schema_version": drive_control.get("schema_version"),
+            "status": drive_control.get("status", "idle"),
+            "active": bool(drive_control.get("active", False)),
+            "pause_requested": bool(drive_control.get("pause_requested", False)),
+            "cancel_requested": bool(drive_control.get("cancel_requested", False)),
+            "stale": bool(drive_control.get("stale", False)),
+            "stale_reason": drive_control.get("stale_reason"),
+            "pid": drive_control.get("pid"),
+            "started_at": drive_control.get("started_at"),
+            "last_heartbeat_at": drive_control.get("last_heartbeat_at"),
+            "heartbeat_count": int(drive_control.get("heartbeat_count", 0) or 0),
+            "current_activity": drive_control.get("current_activity"),
+            "last_progress_message": drive_control.get("last_progress_message"),
+        }
+
+    def _runtime_current_task(
+        self,
+        summary: dict[str, Any],
+        drive_control: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        current = drive_control.get("current_task") if isinstance(drive_control.get("current_task"), dict) else None
+        if current:
+            return {
+                "source": "drive_control",
+                "active": bool(drive_control.get("active", False)),
+                "id": current.get("id"),
+                "title": current.get("title"),
+                "milestone_id": current.get("milestone_id"),
+                "milestone_title": current.get("milestone_title"),
+                "phase": current.get("phase") or drive_control.get("current_activity"),
+            }
+        next_task = summary.get("next_task") if isinstance(summary.get("next_task"), dict) else None
+        if next_task:
+            return {
+                "source": "roadmap_next_task",
+                "active": False,
+                "id": next_task.get("id"),
+                "title": next_task.get("title"),
+                "milestone_id": next_task.get("milestone_id"),
+                "milestone_title": next_task.get("milestone_title"),
+                "phase": None,
+            }
+        return None
+
+    def _runtime_approval_leases_payload(self, approval_queue: dict[str, Any]) -> dict[str, Any]:
+        counts = approval_queue.get("counts") if isinstance(approval_queue.get("counts"), dict) else {}
+        items = approval_queue.get("items") if isinstance(approval_queue.get("items"), list) else []
+        pending_items = [
+            {
+                "id": item.get("id"),
+                "task_id": item.get("task_id"),
+                "approval_kind": item.get("approval_kind"),
+                "decision_kind": item.get("decision_kind"),
+                "phase": item.get("phase"),
+                "name": item.get("name"),
+                "executor": item.get("executor"),
+                "status": item.get("status"),
+                "lease_expires_at": item.get("lease_expires_at"),
+                "reason": item.get("reason"),
+            }
+            for item in items[:25]
+            if isinstance(item, dict)
+        ]
+        pending_count = int(approval_queue.get("pending_count", counts.get("pending", 0)) or 0)
+        approved_count = int(approval_queue.get("approved_count", counts.get("approved", 0)) or 0)
+        consumed_count = int(approval_queue.get("consumed_count", counts.get("consumed", 0)) or 0)
+        stale_count = int(approval_queue.get("stale_count", counts.get("stale", 0)) or 0)
+        return {
+            "schema_version": approval_queue.get("schema_version", APPROVAL_QUEUE_SCHEMA_VERSION),
+            "path": approval_queue.get("path"),
+            "lease_ttl_seconds": approval_queue.get("lease_ttl_seconds"),
+            "counts": deepcopy(counts),
+            "pending_count": pending_count,
+            "approved_count": approved_count,
+            "consumed_count": consumed_count,
+            "stale_count": stale_count,
+            "open_count": pending_count + approved_count,
+            "stale_reasons": deepcopy(approval_queue.get("stale_reasons", {})),
+            "pending_items": pending_items,
+        }
+
+    def _runtime_executor_no_progress_payload(
+        self,
+        summary: dict[str, Any],
+        drive_control: dict[str, Any],
+        failure_isolation: dict[str, Any],
+    ) -> dict[str, Any]:
+        configured = summary.get("executor_watchdog") if isinstance(summary.get("executor_watchdog"), dict) else {}
+        current = (
+            deepcopy(drive_control.get("executor_watchdog"))
+            if isinstance(drive_control.get("executor_watchdog"), dict)
+            else None
+        )
+        latest_failure = None
+        latest_no_progress = None
+        failures = failure_isolation.get("latest_isolated_failures")
+        if isinstance(failures, list):
+            for item in failures:
+                if not isinstance(item, dict):
+                    continue
+                watchdog = item.get("executor_watchdog") if isinstance(item.get("executor_watchdog"), dict) else {}
+                if latest_failure is None and watchdog:
+                    latest_failure = deepcopy(item)
+                if item.get("failure_kind") == "executor_no_progress" or watchdog.get("status") == "no_progress":
+                    latest_no_progress = deepcopy(item)
+                    break
+        current_status = current.get("status") if isinstance(current, dict) else None
+        return {
+            "schema_version": EXECUTOR_WATCHDOG_CONTRACT_VERSION,
+            "enabled": bool(configured.get("enabled", False)),
+            "default_no_progress_seconds": configured.get("default_no_progress_seconds"),
+            "phase_no_progress_seconds": deepcopy(configured.get("phase_no_progress_seconds", {})),
+            "current": current,
+            "current_status": current_status,
+            "current_no_progress": current_status == "no_progress",
+            "latest_failure": latest_failure,
+            "latest_no_progress_failure": latest_no_progress,
+            "has_unresolved_no_progress": latest_no_progress is not None,
+        }
+
+    def _runtime_goal_gap_payload(
+        self,
+        summary: dict[str, Any],
+        latest_reports: dict[str, Any],
+    ) -> dict[str, Any]:
+        drive_reports = latest_reports.get("drive_reports") if isinstance(latest_reports.get("drive_reports"), dict) else {}
+        files = drive_reports.get("files") if isinstance(drive_reports.get("files"), list) else []
+        for item in files:
+            if not isinstance(item, dict) or not item.get("json_path"):
+                continue
+            path = self.project_root / str(item["json_path"])
+            try:
+                payload = load_mapping(path)
+            except Exception:
+                continue
+            retrospective = payload.get("goal_gap_retrospective") if isinstance(payload, dict) else None
+            if isinstance(retrospective, dict):
+                return self._runtime_goal_gap_from_retrospective(
+                    retrospective,
+                    source_report=str(item.get("path")),
+                    source_report_json=str(item.get("json_path")),
+                )
+        return {
+            "source": "current_status",
+            "source_report": None,
+            "source_report_json": None,
+            "next_actions": self._runtime_goal_gap_fallback_actions(summary),
+            "request_self_iteration": {"recommended": False, "reason": "no latest drive retrospective is available"},
+            "remaining_risks": [],
+        }
+
+    def _runtime_goal_gap_from_retrospective(
+        self,
+        retrospective: dict[str, Any],
+        *,
+        source_report: str,
+        source_report_json: str,
+    ) -> dict[str, Any]:
+        request = retrospective.get("request_self_iteration")
+        request_payload = deepcopy(request) if isinstance(request, dict) else {}
+        risks = [
+            deepcopy(item)
+            for item in retrospective.get("remaining_risks", [])
+            if isinstance(item, dict)
+        ]
+        actions = [
+            {
+                "id": item.get("id"),
+                "title": item.get("title"),
+                "source": "latest_drive_goal_gap",
+                "source_risks": deepcopy(item.get("source_risks", [])),
+            }
+            for item in retrospective.get("likely_next_stage_themes", [])
+            if isinstance(item, dict)
+        ]
+        if not actions and request_payload.get("recommended"):
+            actions.append(
+                {
+                    "id": "request-self-iteration",
+                    "title": "Request a self-iteration stage from the latest local evidence",
+                    "source": "latest_drive_goal_gap",
+                    "source_risks": ["roadmap_queue_empty"],
+                }
+            )
+        if not actions:
+            actions.append(
+                {
+                    "id": "monitor-next-drive",
+                    "title": "Run the next drive and compare the resulting local reports",
+                    "source": "latest_drive_goal_gap",
+                    "source_risks": [],
+                }
+            )
+        trigger = retrospective.get("trigger") if isinstance(retrospective.get("trigger"), dict) else {}
+        return {
+            "source": "latest_drive_report",
+            "source_report": source_report,
+            "source_report_json": source_report_json,
+            "goal": retrospective.get("goal"),
+            "stop_class": trigger.get("stop_class"),
+            "request_self_iteration": request_payload,
+            "remaining_risks": risks,
+            "next_actions": actions,
+        }
+
+    def _runtime_goal_gap_fallback_actions(self, summary: dict[str, Any]) -> list[dict[str, Any]]:
+        failure_isolation = summary.get("failure_isolation") if isinstance(summary.get("failure_isolation"), dict) else {}
+        approval_queue = summary.get("approval_queue") if isinstance(summary.get("approval_queue"), dict) else {}
+        next_task = summary.get("next_task") if isinstance(summary.get("next_task"), dict) else None
+        if int(failure_isolation.get("unresolved_count", 0) or 0) > 0:
+            return [
+                {
+                    "id": "recover-isolated-failure",
+                    "title": "Resolve unresolved isolated task failures before extending the roadmap",
+                    "source": "current_status",
+                    "source_risks": ["unresolved_isolated_failures"],
+                }
+            ]
+        if int(approval_queue.get("pending_count", 0) or 0) > 0:
+            return [
+                {
+                    "id": "review-approval-leases",
+                    "title": "Review pending approval gates before the next unattended drive",
+                    "source": "current_status",
+                    "source_risks": ["pending_approvals"],
+                }
+            ]
+        if next_task:
+            return [
+                {
+                    "id": "run-next-task",
+                    "title": f"Run or dispatch the next roadmap task `{next_task.get('id')}`",
+                    "source": "current_status",
+                    "source_risks": ["pending_work"],
+                }
+            ]
+        return [
+            {
+                "id": "monitor-next-drive",
+                "title": "Run the next drive and inspect the generated local reports",
+                "source": "current_status",
+                "source_risks": [],
+            }
+        ]
+
     def status_summary(self, *, refresh_approvals: bool = True) -> dict[str, Any]:
         state = self.load_state()
         state_tasks = state.get("tasks", {})
@@ -4202,7 +4779,16 @@ continuation stage(s) were appended.
                 milestone["failed"] += 1
             else:
                 milestone["pending"] += 1
-        return {
+        drive_control = self.drive_control_summary()
+        executor_watchdog = self.executor_watchdog_summary()
+        approval_queue = (
+            self.approval_queue_summary(status_filter="pending")
+            if refresh_approvals
+            else self._approval_queue_summary_from_state(state, status_filter="pending")
+        )
+        manifest_index = self.manifest_index_summary()
+        failure_isolation = self.latest_isolated_failures_summary()
+        summary = {
             "project": self.roadmap.get("project", self.project_root.name),
             "profile": self.roadmap.get("profile"),
             "root": str(self.project_root),
@@ -4213,16 +4799,14 @@ continuation stage(s) were appended.
             "experience": self.frontend_experience_plan(),
             "continuation": self.continuation_summary(),
             "self_iteration": self.self_iteration_summary(),
-            "drive_control": self.drive_control_summary(),
-            "executor_watchdog": self.executor_watchdog_summary(),
-            "approval_queue": (
-                self.approval_queue_summary(status_filter="pending")
-                if refresh_approvals
-                else self._approval_queue_summary_from_state(state, status_filter="pending")
-            ),
-            "manifest_index": self.manifest_index_summary(),
-            "failure_isolation": self.latest_isolated_failures_summary(),
+            "drive_control": drive_control,
+            "executor_watchdog": executor_watchdog,
+            "approval_queue": approval_queue,
+            "manifest_index": manifest_index,
+            "failure_isolation": failure_isolation,
         }
+        summary["runtime_dashboard"] = self.runtime_dashboard_summary(summary)
+        return summary
 
     def drive_goal_gap_retrospective(
         self,

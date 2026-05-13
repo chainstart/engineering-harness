@@ -186,6 +186,28 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(f"Drive progress: {drive_control.get('last_progress_message')}")
         print(f"Pending approvals: {approval_queue.get('pending_count', 0)}")
         print(f"Stale approvals: {approval_queue.get('stale_count', 0)}")
+        runtime_dashboard = summary.get("runtime_dashboard") if isinstance(summary.get("runtime_dashboard"), dict) else {}
+        if runtime_dashboard:
+            current_task = runtime_dashboard.get("current_task") if isinstance(runtime_dashboard.get("current_task"), dict) else None
+            if current_task:
+                phase = current_task.get("phase") or "none"
+                print(f"Runtime task: {current_task.get('id', 'unknown')} phase={phase}")
+            failure_isolation = (
+                runtime_dashboard.get("failure_isolation")
+                if isinstance(runtime_dashboard.get("failure_isolation"), dict)
+                else {}
+            )
+            print(f"Unresolved isolated failures: {failure_isolation.get('unresolved_count', 0)}")
+            workspace_dispatch = (
+                runtime_dashboard.get("workspace_dispatch")
+                if isinstance(runtime_dashboard.get("workspace_dispatch"), dict)
+                else {}
+            )
+            print(f"Workspace dispatch: {workspace_dispatch.get('status', 'not_found')}")
+            goal_gap = runtime_dashboard.get("goal_gap") if isinstance(runtime_dashboard.get("goal_gap"), dict) else {}
+            actions = goal_gap.get("next_actions") if isinstance(goal_gap.get("next_actions"), list) else []
+            if actions and isinstance(actions[0], dict):
+                print(f"Goal-gap next action: {actions[0].get('id')} - {actions[0].get('title')}")
         print("")
         for milestone in summary["milestones"]:
             print(

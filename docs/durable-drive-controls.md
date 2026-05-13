@@ -46,6 +46,39 @@ ENGINEERING_HARNESS_DRIVE_STALE_AFTER_SECONDS=7200 python3 -m engineering_harnes
 The watchdog only probes the recorded pid with a non-destructive local liveness check. It never kills
 or signals unrelated work beyond that liveness probe.
 
+## Runtime Dashboard Payload
+
+`status --json` also includes `runtime_dashboard`, a dashboard-ready summary for long unattended
+runs. It is generated from local state, task manifests, drive reports, and workspace-dispatch reports;
+it does not start a server or require external services.
+
+```bash
+bin/engh status --project-root /path/to/project --json
+```
+
+Inspect these fields first:
+
+- `runtime_dashboard.drive_watchdog`: active drive pid, heartbeat age, stale reason, and current
+  liveness verdict.
+- `runtime_dashboard.current_task` and `current_phase`: the active task/phase when a drive is
+  running, otherwise the next roadmap task when one is selectable.
+- `runtime_dashboard.executor_no_progress`: configured no-progress thresholds, current executor
+  watchdog evidence, and the latest unresolved no-progress failure.
+- `runtime_dashboard.approval_leases`: pending, approved, consumed, and stale approval lease counts
+  plus compact pending approval records.
+- `runtime_dashboard.failure_isolation`: unresolved isolated task failures and their local recovery
+  actions.
+- `runtime_dashboard.workspace_dispatch`: nearest workspace dispatch queue, latest dispatch report,
+  and active or latest lease status.
+- `runtime_dashboard.latest_reports`: latest task, drive, and workspace dispatch report metadata with
+  JSON sidecar paths.
+- `runtime_dashboard.goal_gap.next_actions`: deterministic next actions from the latest drive
+  goal-gap retrospective, or a current-status fallback when no drive report exists yet.
+
+The rest of the status payload remains machine-readable and stable for scripts. Operators can still
+open the referenced Markdown report when they need full stdout/stderr context, but the dashboard block
+is intended to answer the first triage questions without reading raw reports.
+
 ## Rolling Checkpoint Boundaries
 
 When `drive --rolling` materializes continuation stages and `--commit-after-task` or

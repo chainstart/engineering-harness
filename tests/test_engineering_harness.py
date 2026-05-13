@@ -1456,6 +1456,41 @@ def test_executor_no_progress_watchdog_isolates_silent_acceptance_and_status_jso
     assert payload["executor_watchdog"]["phase_no_progress_seconds"]["acceptance"] == 1
 
 
+def test_runtime_dashboard_executor_no_progress_state_surfaces_failure(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    project = tmp_path / "runtime-dashboard-no-progress-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="runtime-dashboard-no-progress-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["max_attempts"] = 1
+    task["acceptance"][0] = {
+        "name": "silent dashboard acceptance",
+        "command": "python3 -c \"import time; time.sleep(30)\"",
+        "timeout_seconds": 10,
+    }
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    monkeypatch.setenv("ENGINEERING_HARNESS_EXECUTOR_NO_PROGRESS_ACCEPTANCE_SECONDS", "1")
+
+    result = Harness(project).run_task(Harness(project).next_task())
+
+    assert result["status"] == "failed"
+    assert result["runs"][0]["status"] == "no_progress"
+
+    assert cli_main(["status", "--project-root", str(project), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    no_progress = payload["runtime_dashboard"]["executor_no_progress"]
+    assert no_progress["enabled"] is True
+    assert no_progress["phase_no_progress_seconds"]["acceptance"] == 1
+    assert no_progress["has_unresolved_no_progress"] is True
+    assert no_progress["latest_no_progress_failure"]["failure_kind"] == "executor_no_progress"
+    assert no_progress["latest_no_progress_failure"]["executor_watchdog"]["status"] == "no_progress"
+
+
 def test_executor_timeout_watchdog_marks_implementation_timeout(tmp_path):
     project = tmp_path / "executor-timeout-project"
     project.mkdir()
@@ -2260,6 +2295,38 @@ def test_workspace_dispatch_runs_one_project_in_deterministic_order(tmp_path, ca
     assert json.loads(sidecar.read_text(encoding="utf-8"))["status"] == "dispatched"
 
 
+def test_runtime_dashboard_dispatch_queue_and_lease_status(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    zeta = init_workspace_project(workspace, "zeta-dashboard-project", marker="zeta-dashboard-marker.txt")
+    alpha = init_workspace_project(workspace, "alpha-dashboard-project", marker="alpha-dashboard-marker.txt")
+
+    assert cli_main(["workspace-drive", "--workspace", str(workspace), "--json"]) == 0
+    dispatch_payload = json.loads(capsys.readouterr().out)
+    assert dispatch_payload["status"] == "dispatched"
+    assert dispatch_payload["selected"]["project"] == "alpha-dashboard-project"
+
+    assert cli_main(["status", "--project-root", str(alpha), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    dashboard = payload["runtime_dashboard"]
+    dispatch = dashboard["workspace_dispatch"]
+    assert dispatch["status"] == "reported"
+    assert dispatch["workspace_root"] == str(workspace.resolve())
+    assert dispatch["latest_report"]["path"] == dispatch_payload["dispatch_report"]
+    assert dispatch["latest_report_lease"]["status"] == "released"
+    assert dispatch["queue_count"] == 2
+    assert {item["project"] for item in dispatch["queue"]} == {
+        "alpha-dashboard-project",
+        "zeta-dashboard-project",
+    }
+    selected = next(item for item in dispatch["queue"] if item["selected"])
+    assert selected["project"] == "alpha-dashboard-project"
+    assert dashboard["latest_reports"]["workspace_dispatch_reports"]["files"][0]["path"] == dispatch_payload["dispatch_report"]
+    assert dashboard["latest_reports"]["workspace_dispatch_reports"]["files"][0]["json_path"] == dispatch_payload["dispatch_report_json"]
+    assert (alpha / "alpha-dashboard-marker.txt").read_text(encoding="utf-8") == "ok"
+    assert not (zeta / "zeta-dashboard-marker.txt").exists()
+
+
 def test_workspace_dispatch_rejects_fresh_lease(tmp_path, capsys):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -2767,6 +2834,72 @@ def test_drive_watchdog_status_output_includes_heartbeat_metadata(tmp_path, caps
     assert "Drive progress: status test heartbeat" in text
 
     Harness(project).finish_drive(status="completed", message="status output checked")
+
+
+def test_runtime_dashboard_watchdog_surfaces_current_task_phase(tmp_path, capsys):
+    project = tmp_path / "runtime-dashboard-watchdog-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="runtime-dashboard-watchdog-project")
+
+    harness = Harness(project)
+    assert harness.start_drive()["started"] is True
+    task = harness.next_task()
+    assert task is not None
+    harness.drive_heartbeat(
+        activity="acceptance-1:command",
+        message="runtime dashboard heartbeat",
+        task=task,
+        phase="acceptance-1",
+    )
+
+    assert cli_main(["status", "--project-root", str(project), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    dashboard = payload["runtime_dashboard"]
+    assert dashboard["kind"] == "engineering-harness.runtime-dashboard"
+    assert dashboard["drive_watchdog"]["status"] == "running"
+    assert dashboard["drive_watchdog"]["stale"] is False
+    assert dashboard["current_task"]["source"] == "drive_control"
+    assert dashboard["current_task"]["id"] == "tests"
+    assert dashboard["current_task"]["phase"] == "acceptance-1"
+    assert dashboard["current_phase"] == "acceptance-1"
+    assert dashboard["drive_control"]["last_progress_message"] == "runtime dashboard heartbeat"
+
+    Harness(project).finish_drive(status="completed", message="runtime dashboard checked")
+
+
+def test_runtime_dashboard_approval_failure_goal_gap_payload(tmp_path, capsys):
+    project = tmp_path / "runtime-dashboard-approval-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="runtime-dashboard-approval-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["manual_approval_required"] = True
+    task["acceptance"][0]["command"] = (
+        "python3 -c \"from pathlib import Path; Path('approval-dashboard.txt').write_text('ok')\""
+    )
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    assert cli_main(["drive", "--project-root", str(project), "--json"]) == 1
+    drive_payload = json.loads(capsys.readouterr().out)
+    assert drive_payload["status"] == "blocked"
+
+    assert cli_main(["status", "--project-root", str(project), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    dashboard = payload["runtime_dashboard"]
+    assert dashboard["approval_leases"]["pending_count"] == 1
+    assert dashboard["approval_leases"]["open_count"] == 1
+    assert dashboard["approval_leases"]["pending_items"][0]["task_id"] == "tests"
+    assert dashboard["failure_isolation"]["unresolved_count"] == 1
+    latest_failure = dashboard["failure_isolation"]["latest_isolated_failures"][0]
+    assert latest_failure["task_id"] == "tests"
+    assert latest_failure["failure_kind"] == "policy_block"
+    assert dashboard["latest_reports"]["drive_reports"]["files"][0]["path"] == drive_payload["drive_report"]
+    assert dashboard["latest_reports"]["drive_reports"]["files"][0]["json_path"] == drive_payload["drive_report_json"]
+    assert dashboard["goal_gap"]["source"] == "latest_drive_report"
+    assert dashboard["goal_gap"]["source_report_json"] == drive_payload["drive_report_json"]
+    action_ids = {item["id"] for item in dashboard["goal_gap"]["next_actions"]}
+    assert "resolve-blockers" in action_ids
 
 
 @pytest.mark.parametrize(

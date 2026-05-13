@@ -154,6 +154,18 @@ selected project, open `selected.drive_report_json` or `drive.drive_report_json`
 evidence. For skipped projects, inspect the project with `approvals --json` or `status --json`
 before resuming or approving anything.
 
+Project status now carries the nearest workspace dispatch evidence under
+`runtime_dashboard.workspace_dispatch`. From a project directory, use:
+
+```bash
+bin/engh status --project-root . --json
+```
+
+That dashboard block shows the latest dispatch queue, selected project, active workspace lease when
+one exists, latest released lease evidence, and the dispatch report sidecar paths. It is the quickest
+way to answer whether the project is skipped by workspace scheduling, blocked by a lease, or simply
+waiting behind another eligible project.
+
 The workspace dispatcher does not expose push flags and passes project drives with local checkpointing
 disabled. Roadmap tasks still run under the project policy engine, so live operations and agent or
 manual approval gates remain blocked unless explicitly allowed by the operator.
