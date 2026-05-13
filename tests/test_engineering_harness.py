@@ -178,6 +178,21 @@ def write_workspace_dispatch_lease(
     return payload
 
 
+def run_workspace_drive_json(capsys, workspace: Path, *extra_args: str) -> tuple[int, dict]:
+    capsys.readouterr()
+    exit_code = cli_main(["workspace-drive", "--workspace", str(workspace), *extra_args, "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    return exit_code, payload
+
+
+def project_text_snapshot(project: Path) -> dict[str, str]:
+    return {
+        str(path.relative_to(project)): path.read_text(encoding="utf-8")
+        for path in sorted(project.rglob("*"))
+        if path.is_file()
+    }
+
+
 def report_policy_evidence(project: Path, result: dict) -> dict:
     report = (project / result["report"]).read_text(encoding="utf-8")
     section = report.split("## Policy Decisions", 1)[1]
@@ -2433,6 +2448,141 @@ def test_workspace_drive_skips_without_mutating_skipped_project(tmp_path, capsys
     paused_item = next(item for item in payload["queue"] if item["project"] == "aa-paused-project")
     assert paused_item["dispatch_status"] == "skipped"
     assert {reason["code"] for reason in paused_item["skip_reasons"]} == {"paused"}
+
+
+def test_workspace_supervisor_multi_tick_e2e_loop_preserves_skips_and_reports(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    first = init_workspace_project(workspace, "aa-ready-first", marker="first-marker.txt")
+    second = init_workspace_project(workspace, "bb-ready-second", marker="second-marker.txt")
+    approval = init_workspace_project(workspace, "cc-approval-blocked", marker="approval-marker.txt")
+    isolated = init_workspace_project(workspace, "dd-isolated-failure")
+
+    approval_roadmap_path = approval / ".engineering/roadmap.yaml"
+    approval_roadmap = json.loads(approval_roadmap_path.read_text(encoding="utf-8"))
+    approval_roadmap["milestones"][0]["tasks"][0]["manual_approval_required"] = True
+    approval_roadmap_path.write_text(json.dumps(approval_roadmap), encoding="utf-8")
+    capsys.readouterr()
+    assert cli_main(["drive", "--project-root", str(approval), "--json"]) == 1
+    approval_payload = json.loads(capsys.readouterr().out)
+    assert approval_payload["status"] == "blocked"
+    assert not (approval / "approval-marker.txt").exists()
+
+    isolated_roadmap_path = isolated / ".engineering/roadmap.yaml"
+    isolated_roadmap = json.loads(isolated_roadmap_path.read_text(encoding="utf-8"))
+    isolated_task = isolated_roadmap["milestones"][0]["tasks"][0]
+    isolated_task["max_attempts"] = 1
+    isolated_task["acceptance"][0]["command"] = "python3 -c \"raise SystemExit(7)\""
+    isolated_roadmap_path.write_text(json.dumps(isolated_roadmap), encoding="utf-8")
+    isolated_result = Harness(isolated).run_task(Harness(isolated).next_task(), allow_agent=True)
+    assert isolated_result["status"] == "failed"
+    assert Harness(isolated).status_summary()["failure_isolation"]["unresolved_count"] == 1
+
+    approval_snapshot = project_text_snapshot(approval)
+    isolated_snapshot = project_text_snapshot(isolated)
+
+    write_workspace_dispatch_lease(workspace, owner_pid=os.getpid())
+    fresh_exit, fresh_payload = run_workspace_drive_json(
+        capsys,
+        workspace,
+        "--max-tasks",
+        "1",
+        "--time-budget-seconds",
+        "1",
+    )
+    assert fresh_exit == 1
+    assert fresh_payload["status"] == "lease_held"
+    assert fresh_payload["queue"] == []
+    assert fresh_payload["lease"]["assessment"]["status"] == "held"
+    assert fresh_payload["lease"]["assessment"]["pid_alive"] is True
+    assert not (first / "first-marker.txt").exists()
+    assert not (second / "second-marker.txt").exists()
+    assert project_text_snapshot(approval) == approval_snapshot
+    assert project_text_snapshot(isolated) == isolated_snapshot
+
+    write_workspace_dispatch_lease(workspace, owner_pid=unused_pid())
+    tick1_exit, tick1 = run_workspace_drive_json(
+        capsys,
+        workspace,
+        "--max-tasks",
+        "1",
+        "--time-budget-seconds",
+        "1",
+    )
+    tick2_exit, tick2 = run_workspace_drive_json(
+        capsys,
+        workspace,
+        "--max-tasks",
+        "1",
+        "--time-budget-seconds",
+        "1",
+    )
+    tick3_exit, tick3 = run_workspace_drive_json(
+        capsys,
+        workspace,
+        "--max-tasks",
+        "1",
+        "--time-budget-seconds",
+        "1",
+    )
+
+    assert [tick1_exit, tick2_exit, tick3_exit] == [0, 0, 0]
+    assert [tick1["status"], tick2["status"], tick3["status"]] == [
+        "dispatched",
+        "dispatched",
+        "no_eligible_project",
+    ]
+    assert [tick1["selected"]["project"], tick2["selected"]["project"]] == [
+        "aa-ready-first",
+        "bb-ready-second",
+    ]
+    assert tick3["selected"] is None
+    assert tick1["lease"]["status"] == "released"
+    assert tick1["lease"]["recovered"] is True
+    assert tick1["lease"]["recovery"]["reason"] == "pid_gone"
+    assert tick1["lease"]["selected_project"]["project"] == "aa-ready-first"
+    assert not workspace_dispatch_lease_dir(workspace).exists()
+
+    def queue_item(payload: dict, project_name: str) -> dict:
+        return next(item for item in payload["queue"] if item["project"] == project_name)
+
+    def skip_codes(payload: dict, project_name: str) -> set[str]:
+        return {reason["code"] for reason in queue_item(payload, project_name)["skip_reasons"]}
+
+    assert [item["project"] for item in tick1["queue"]] == [
+        "aa-ready-first",
+        "bb-ready-second",
+        "cc-approval-blocked",
+        "dd-isolated-failure",
+    ]
+    assert skip_codes(tick1, "bb-ready-second") == {"one_project_per_invocation"}
+    assert "waiting_on_approvals" in skip_codes(tick1, "cc-approval-blocked")
+    assert "unresolved_isolated_failures" in skip_codes(tick1, "dd-isolated-failure")
+    assert "no_pending_task" in skip_codes(tick2, "aa-ready-first")
+    assert skip_codes(tick3, "aa-ready-first") == {"no_pending_task"}
+    assert skip_codes(tick3, "bb-ready-second") == {"no_pending_task"}
+    assert "waiting_on_approvals" in skip_codes(tick3, "cc-approval-blocked")
+    assert "unresolved_isolated_failures" in skip_codes(tick3, "dd-isolated-failure")
+
+    assert (first / "first-marker.txt").read_text(encoding="utf-8") == "ok"
+    assert (second / "second-marker.txt").read_text(encoding="utf-8") == "ok"
+    assert not (approval / "approval-marker.txt").exists()
+    assert project_text_snapshot(approval) == approval_snapshot
+    assert project_text_snapshot(isolated) == isolated_snapshot
+
+    dispatches = [fresh_payload, tick1, tick2, tick3]
+    assert len({payload["dispatch_report_json"] for payload in dispatches}) == len(dispatches)
+    for payload in dispatches:
+        report_path = workspace / payload["dispatch_report"]
+        sidecar_path = workspace / payload["dispatch_report_json"]
+        assert report_path.exists()
+        assert sidecar_path.exists()
+        sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        assert sidecar["kind"] == "engineering-harness.workspace-drive-dispatch"
+        assert sidecar["status"] == payload["status"]
+        assert isinstance(sidecar.get("lease"), dict)
+        assert isinstance(sidecar.get("queue"), list)
+        assert "Machine-Readable Dispatch" in report_path.read_text(encoding="utf-8")
 
 
 def test_drive_pause_resume_and_cancel_controls_are_durable(tmp_path):

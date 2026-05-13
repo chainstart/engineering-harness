@@ -91,11 +91,41 @@ workspace report for scheduling evidence.
 
 ## Operating Loop
 
-Use repeated small invocations instead of a single large drive:
+Use repeated small invocations instead of a single large drive. For a bounded local supervisor check,
+run a fixed number of ticks and let each tick write its own dispatch report:
+
+```bash
+WORKSPACE=/path/to/workspace
+TICKS=6
+
+for tick in $(seq 1 "$TICKS"); do
+  bin/engh workspace-drive \
+    --workspace "$WORKSPACE" \
+    --max-tasks 1 \
+    --time-budget-seconds 1800 \
+    --rolling \
+    --max-continuations 1 \
+    --json
+done
+```
+
+For cron, keep the same one-project tick shape and redirect stdout to your local supervisor logs:
+
+```cron
+*/5 * * * * cd /path/to/engineering-harness && bin/engh workspace-drive --workspace /path/to/workspace --max-tasks 1 --time-budget-seconds 1800 --rolling --max-continuations 1 --json
+```
+
+For a long-running shell supervisor, keep the interval outside the dispatcher:
 
 ```bash
 while true; do
-  bin/engh workspace-drive --workspace /path/to/workspace --max-tasks 1 --rolling --max-continuations 1 --json
+  bin/engh workspace-drive \
+    --workspace /path/to/workspace \
+    --max-tasks 1 \
+    --time-budget-seconds 1800 \
+    --rolling \
+    --max-continuations 1 \
+    --json
   sleep 300
 done
 ```
@@ -109,6 +139,20 @@ Resolve safety skips locally before expecting a project to re-enter the queue:
 - `bin/engh resume --project-root <project>` clears pause, cancel, or stale drive control after review.
 - `bin/engh approvals --project-root <project> --json` shows pending approval gates.
 - `bin/engh status --project-root <project> --json` shows unresolved isolated failure evidence.
+
+Review evidence after each run from newest to oldest:
+
+```bash
+ls -t /path/to/workspace/.engineering/reports/workspace-dispatches/*.json | head
+python3 -m json.tool /path/to/workspace/.engineering/reports/workspace-dispatches/<report>.json
+```
+
+Check `status`, `selected`, `queue[].skip_reasons`, and `lease` first. Top-level `status` value
+`lease_held` is normal contention evidence for overlapping ticks. `lease.recovered: true` with a
+`recovery.reason` such as `pid_gone` or `heartbeat_stale` shows stale local lease recovery. For a
+selected project, open `selected.drive_report_json` or `drive.drive_report_json` for task-level
+evidence. For skipped projects, inspect the project with `approvals --json` or `status --json`
+before resuming or approving anything.
 
 The workspace dispatcher does not expose push flags and passes project drives with local checkpointing
 disabled. Roadmap tasks still run under the project policy engine, so live operations and agent or
