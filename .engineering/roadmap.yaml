@@ -3147,6 +3147,84 @@
           "generated_at": "2026-05-13T15:00:34Z"
         }
       ]
+    },
+    {
+      "id": "automatic-checkpoint-boundaries",
+      "title": "Make automatic checkpoint boundaries reliable during rolling self-iteration",
+      "status": "planned",
+      "objective": "Close the gap where passed self-iteration tasks can defer git checkpoints because materialization or prior harness-owned changes are already dirty. Implement a safer automatic checkpoint boundary model that distinguishes harness-owned accumulated changes from ",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-13T15:18:24Z",
+      "tasks": [
+        {
+          "id": "harden-automatic-checkpoint-boundaries",
+          "title": "Make automatic checkpoint boundaries reliable during rolling self-iteration",
+          "status": "pending",
+          "max_attempts": 4,
+          "max_task_iterations": 4,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 5400,
+              "sandbox": "workspace-write",
+              "prompt": "Close the gap where passed self-iteration tasks can defer git checkpoints because materialization or prior harness-owned changes are already dirty. Implement a safer automatic checkpoint boundary model that distinguishes harness-owned accumulated changes from unrelated user dirtiness, commits safe stage/task batches at deterministic boundaries, records checkpoint intent/result evidence, and keeps the worktree clean after successful bounded drives when allowed. Add tests that synthesize rolling self-iteration/materialization dirtiness and prove safe paths are committed while unrelated paths block without mutation.\nKeep the work local-only. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes unless the existing harness checkpoint path explicitly handles git in local tests."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 2700,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing tests for this stage while preserving existing drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "automatic checkpoint tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"checkpoint and (automatic or boundary or deferred or clean)\"",
+              "required": true,
+              "timeout_seconds": 1500
+            },
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 1500
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 300
+            }
+          ],
+          "e2e": [
+            {
+              "name": "automatic checkpoint local e2e",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q -k automatic_checkpoint_boundary_e2e",
+              "required": true,
+              "timeout_seconds": 1500
+            },
+            {
+              "name": "status remains machine-readable",
+              "command": "bin/engh status --project-root . --json",
+              "required": true,
+              "timeout_seconds": 300
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T15:18:24Z"
+        }
+      ]
     }
   ],
   "continuation": {
