@@ -706,7 +706,7 @@
   ],
   "continuation": {
     "enabled": true,
-    "goal": "Ship the autonomous engineering harness described in the blueprint, including mature executor, policy, frontend, E2E, observability, CI, and agent-integration capabilities.",
+    "goal": "开发一个完善的可以长时间、自动化开发软件和智能体的母智能体 engineering-harness。它是开发其他系统的脚手架和约束工程智能体，接收一个总目标，然后在该总目标的指引下循环迭代地开发出目标所指向的系统；中间无需人工干预，能够长时间自动化运行。每次迭代完成后，对比现阶段工程状态和总目标的距离，提出下一阶段工作计划，循环往复地完成总目标。",
     "blueprint": "docs/autonomous-engineering-harness-plan.md",
     "stages": [
       {
@@ -1560,8 +1560,8 @@
     ]
   },
   "self_iteration": {
-    "enabled": false,
-    "objective": "Append the next safe, testable stage only after schema, policy, and run evidence are mature enough.",
+    "enabled": true,
+    "objective": "围绕总目标持续自举：开发一个完善的可以长时间、自动化开发软件和智能体的母智能体 engineering-harness。每次自迭代都要读取最新路线图、任务报告、manifest、测试和当前代码状态，对比现阶段工程状态与总目标的距离，提出并追加下一个安全、可测试、可验收的阶段，使 harness 逐步具备接收总目标、自动分解阶段目标、开发软件和智能体、生成合适前端、执行常规测试和 E2E、处理策略约束、提交推送、暂停恢复取消、审批队列、可观测状态和长时间无人值守运行的能力。",
     "max_stages_per_iteration": 1,
     "file_scope": [
       ".engineering/roadmap.yaml",
@@ -1574,7 +1574,7 @@
       "executor": "codex",
       "timeout_seconds": 3600,
       "sandbox": "workspace-write",
-      "prompt": "Use the blueprint and latest reports to append exactly one new continuation stage with measurable acceptance and E2E gates."
+      "prompt": "Use the blueprint, latest reports, manifests, tests, current code state, and the Chinese total goal in continuation.goal/self_iteration.objective to compare the current engineering-harness against the target long-running autonomous meta-agent. Append exactly one next continuation stage with concrete tasks, file scopes, implementation prompts, repair prompts, measurable acceptance commands, and E2E gates. The stage must materially reduce the gap toward: accepting a high-level goal, decomposing it into iterative work, developing software and agents without routine human intervention, generating domain-appropriate frontends, running tests and realistic E2E checks, enforcing policies and approvals, committing and pushing after stages, and operating safely for long unattended drives."
     }
   }
 }
