@@ -5261,35 +5261,131 @@ def test_drive_rolling_commit_after_task_defers_when_materialization_has_user_di
         ]
     )
 
-    assert exit_code == 0
+    assert exit_code == 1
     payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "blocked"
+    assert payload["results"] == []
     materialization = payload["continuations"][0]["materialization_checkpoint"]
-    task_git = payload["results"][0]["git"]
     assert materialization["status"] == "deferred"
-    assert materialization["reason"] == "preexisting_dirty_worktree"
+    assert materialization["reason"] == "checkpoint_readiness_blocked"
     assert materialization["dirty_before_paths"] == ["user.txt"]
-    assert task_git["status"] == "deferred"
-    assert task_git["reason"] == "roadmap_materialization_checkpoint_deferred"
-    assert "pre-existing user changes" in task_git["message"]
+    assert materialization["dirty_before_blocking_paths"] == ["user.txt"]
     subjects = subprocess.check_output(["git", "log", "--format=%s"], cwd=project, text=True).splitlines()
     assert subjects == ["initial"]
     dirty_paths = subprocess.check_output(["git", "status", "--porcelain"], cwd=project, text=True)
-    assert ".engineering/roadmap.yaml" in dirty_paths
-    assert "generated.txt" in dirty_paths
     assert "user.txt" in dirty_paths
-    state = json.loads((project / ".engineering/state/harness-state.json").read_text(encoding="utf-8"))
-    checkpoint_events = [
-        event for event in state["tasks"]["generated-test"]["phase_history"] if event["phase"] == "checkpoint-intent"
-    ]
-    assert [(event["event"], event["status"]) for event in checkpoint_events] == [
-        ("before", "running"),
-        ("after", "deferred"),
-    ]
+    assert ".engineering/roadmap.yaml" not in dirty_paths
+    assert "generated.txt" not in dirty_paths
     report = project / payload["drive_report"]
     report_text = report.read_text(encoding="utf-8")
     assert "Materialization checkpoint: `deferred`" in report_text
     assert "Dirty before materialization: `user.txt`" in report_text
-    assert "Task `generated-test` checkpoint deferred" in report_text
+    assert "Task `generated-test` checkpoint deferred" not in report_text
+
+
+def test_automatic_checkpoint_boundary_e2e_commits_self_iteration_materialization_and_task(tmp_path, capsys):
+    project, roadmap_path = self_iteration_guard_project(tmp_path)
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"] = []
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    stage = valid_self_iteration_stage("auto-boundary-stage", "auto-boundary-task")
+    task = stage["tasks"][0]
+    task.pop("implementation")
+    task.pop("repair")
+    task["file_scope"] = ["tests/**"]
+    task["acceptance"][0]["command"] = (
+        "python3 -c \"from pathlib import Path; Path('tests').mkdir(exist_ok=True); "
+        "Path('tests/auto-boundary.txt').write_text('ok')\""
+    )
+    write_self_iteration_guard_planner(project, [stage])
+    init_git_repo(project)
+
+    exit_code = cli_main(
+        [
+            "drive",
+            "--project-root",
+            str(project),
+            "--rolling",
+            "--self-iterate",
+            "--max-continuations",
+            "1",
+            "--max-self-iterations",
+            "1",
+            "--max-tasks",
+            "1",
+            "--commit-after-task",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    advanced = next(item for item in payload["continuations"] if item["status"] == "advanced")
+    materialization = advanced["materialization_checkpoint"]
+    task_git = payload["results"][0]["git"]
+    assert materialization["status"] == "committed"
+    assert materialization["dirty_before_paths"] == [".engineering/roadmap.yaml"]
+    assert materialization["dirty_before_harness_paths"] == [".engineering/roadmap.yaml"]
+    assert materialization["dirty_before_blocking_paths"] == []
+    assert materialization["checkpointed_paths"] == [".engineering/roadmap.yaml"]
+    assert task_git["status"] == "committed"
+    assert task_git["checkpointed_paths"] == ["tests/auto-boundary.txt"]
+    subjects = subprocess.check_output(["git", "log", "--format=%s", "-3"], cwd=project, text=True).splitlines()
+    assert subjects == [
+        "chore(engineering): complete auto-boundary-task",
+        "chore(engineering): materialize roadmap continuation: auto-boundary-stage",
+        "initial",
+    ]
+    assert subprocess.check_output(["git", "status", "--porcelain"], cwd=project, text=True).strip() == ""
+
+
+def test_automatic_checkpoint_boundary_blocks_unrelated_dirty_without_mutation(tmp_path, capsys):
+    project, roadmap_path = self_iteration_guard_project(tmp_path)
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"] = []
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    write_self_iteration_guard_planner(
+        project,
+        [valid_self_iteration_stage("blocked-boundary-stage", "blocked-boundary-task")],
+        mutation="Path('planner-ran.txt').write_text('ran', encoding='utf-8')",
+    )
+    init_git_repo(project)
+    before_text = roadmap_path.read_text(encoding="utf-8")
+    (project / "operator-notes.txt").write_text("operator draft", encoding="utf-8")
+
+    exit_code = cli_main(
+        [
+            "drive",
+            "--project-root",
+            str(project),
+            "--rolling",
+            "--self-iterate",
+            "--max-continuations",
+            "1",
+            "--max-self-iterations",
+            "1",
+            "--max-tasks",
+            "1",
+            "--commit-after-task",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "stalled"
+    assert payload["results"] == []
+    assert payload["self_iterations"][0]["status"] == "blocked"
+    assert payload["self_iterations"][0]["checkpoint_gate"]["phase"] == "preflight"
+    assert roadmap_path.read_text(encoding="utf-8") == before_text
+    assert not (project / "planner-ran.txt").exists()
+    materialization = payload["continuations"][0]["materialization_checkpoint"]
+    assert materialization["status"] == "skipped"
+    assert payload["self_iterations"][0]["blocking_paths"] == ["operator-notes.txt"]
+    assert subprocess.check_output(["git", "log", "--format=%s"], cwd=project, text=True).splitlines() == ["initial"]
+    assert subprocess.check_output(["git", "status", "--porcelain"], cwd=project, text=True).strip() == (
+        "?? operator-notes.txt"
+    )
 
 
 def test_drive_rolling_stops_when_continuation_is_exhausted(tmp_path):

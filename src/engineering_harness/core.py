@@ -9309,6 +9309,26 @@ continuation stage(s) were appended.
     def _git_status_paths(self) -> list[str]:
         return sorted(dict.fromkeys(str(entry["path"]) for entry in self._git_status_entries()))
 
+    def _materialization_dirty_paths(self, paths: list[str] | set[str] | tuple[str, ...]) -> list[str]:
+        materialization_paths = set(self._roadmap_materialization_paths())
+        return sorted(
+            dict.fromkeys(
+                self._normalize_repo_path(str(path))
+                for path in paths
+                if str(path).strip() and self._normalize_repo_path(str(path)) in materialization_paths
+            )
+        )
+
+    def _non_materialization_dirty_paths(self, paths: list[str] | set[str] | tuple[str, ...]) -> list[str]:
+        materialization_paths = set(self._roadmap_materialization_paths())
+        return sorted(
+            dict.fromkeys(
+                self._normalize_repo_path(str(path))
+                for path in paths
+                if str(path).strip() and self._normalize_repo_path(str(path)) not in materialization_paths
+            )
+        )
+
     def checkpoint_readiness(self, task: HarnessTask | None = None) -> dict[str, Any]:
         base = {
             "schema_version": CHECKPOINT_READINESS_SCHEMA_VERSION,
@@ -9563,6 +9583,17 @@ continuation stage(s) were appended.
     ) -> dict[str, Any]:
         is_repository = self._is_git_repo()
         dirty_before = self._git_status_paths() if is_repository else []
+        checkpoint_readiness = self.checkpoint_readiness()
+        blocking_paths = (
+            list(checkpoint_readiness.get("blocking_paths", []))
+            if isinstance(checkpoint_readiness, dict)
+            else []
+        )
+        safe_paths = (
+            list(checkpoint_readiness.get("safe_to_checkpoint_paths", []))
+            if isinstance(checkpoint_readiness, dict)
+            else []
+        )
         intent = {
             "schema_version": MATERIALIZATION_CHECKPOINT_SCHEMA_VERSION,
             "kind": "roadmap_materialization_checkpoint",
@@ -9578,8 +9609,15 @@ continuation stage(s) were appended.
             "branch": branch,
             "is_repository": is_repository,
             "dirty_before_paths": dirty_before,
+            "dirty_before_harness_paths": self._materialization_dirty_paths(dirty_before),
+            "dirty_before_blocking_paths": sorted(
+                dict.fromkeys(str(path) for path in blocking_paths if str(path).strip())
+            ),
+            "safe_to_checkpoint_paths": sorted(
+                dict.fromkeys(str(path) for path in safe_paths if str(path).strip())
+            ),
             "materialization_paths": self._roadmap_materialization_paths(),
-            "checkpoint_readiness": self.checkpoint_readiness(),
+            "checkpoint_readiness": checkpoint_readiness,
         }
         append_jsonl(
             self.decision_log_path,
@@ -9614,6 +9652,25 @@ continuation stage(s) were appended.
                 if str(path).strip()
             )
         )
+        intent_readiness = (
+            deepcopy(intent.get("checkpoint_readiness"))
+            if isinstance(intent.get("checkpoint_readiness"), dict)
+            else self.checkpoint_readiness()
+        )
+        dirty_before_harness = self._materialization_dirty_paths(dirty_before)
+        dirty_before_non_harness = self._non_materialization_dirty_paths(dirty_before)
+        dirty_before_blocking = sorted(
+            dict.fromkeys(
+                [
+                    *dirty_before_non_harness,
+                    *[
+                        self._normalize_repo_path(str(path))
+                        for path in intent_readiness.get("blocking_paths", [])
+                        if str(path).strip()
+                    ],
+                ]
+            )
+        )
         payload_base = {
             "schema_version": MATERIALIZATION_CHECKPOINT_SCHEMA_VERSION,
             "kind": "roadmap_materialization_checkpoint",
@@ -9624,9 +9681,9 @@ continuation stage(s) were appended.
             "branch": branch,
             "materialization_paths": materialization_paths,
             "dirty_before_paths": dirty_before,
-            "checkpoint_readiness": deepcopy(intent.get("checkpoint_readiness"))
-            if isinstance(intent.get("checkpoint_readiness"), dict)
-            else self.checkpoint_readiness(),
+            "dirty_before_harness_paths": dirty_before_harness,
+            "dirty_before_blocking_paths": dirty_before_blocking,
+            "checkpoint_readiness": intent_readiness,
             "continuation_status": continuation.get("status"),
             "milestones_added": continuation.get("milestones_added", []),
             "tasks_added": continuation.get("tasks_added", 0),
@@ -9654,14 +9711,15 @@ continuation stage(s) were appended.
                 "status": "skipped",
                 "message": "project root is not inside a git repository",
             })
-        if dirty_before:
+        if dirty_before_blocking:
             return finish({
                 "status": "deferred",
-                "reason": "preexisting_dirty_worktree",
+                "reason": "preexisting_unrelated_dirty_paths",
                 "message": (
-                    "roadmap materialization checkpoint deferred because the worktree had "
-                    "pre-existing changes before materialization"
+                    "roadmap materialization checkpoint deferred because unrelated dirty paths "
+                    "existed before materialization"
                 ),
+                "unrelated_dirty_paths": dirty_before_blocking,
             })
         if not materialization_paths:
             return finish({
@@ -9739,6 +9797,7 @@ continuation stage(s) were appended.
             "status": "committed",
             "message": message,
             "commit": commit_sha["stdout"].strip() if commit_sha["returncode"] == 0 else None,
+            "checkpointed_paths": materialization_dirty,
             "dirty_after_paths": self._git_status_paths(),
         }
 
@@ -9762,6 +9821,70 @@ continuation stage(s) were appended.
                 result["status"] = "failed"
                 result["reason"] = "git_push_failed"
         return finish(result)
+
+    def defer_roadmap_materialization_checkpoint(
+        self,
+        intent: dict[str, Any],
+        *,
+        reason: str,
+        message: str,
+    ) -> dict[str, Any]:
+        materialization_paths = sorted(
+            dict.fromkeys(
+                self._normalize_repo_path(str(path))
+                for path in intent.get("materialization_paths", self._roadmap_materialization_paths())
+                if str(path).strip()
+            )
+        )
+        dirty_before = sorted(
+            dict.fromkeys(
+                self._normalize_repo_path(str(path))
+                for path in intent.get("dirty_before_paths", [])
+                if str(path).strip()
+            )
+        )
+        readiness = (
+            deepcopy(intent.get("checkpoint_readiness"))
+            if isinstance(intent.get("checkpoint_readiness"), dict)
+            else self.checkpoint_readiness()
+        )
+        blocking_paths = sorted(
+            dict.fromkeys(
+                self._normalize_repo_path(str(path))
+                for path in readiness.get("blocking_paths", [])
+                if str(path).strip()
+            )
+        )
+        result = {
+            "schema_version": MATERIALIZATION_CHECKPOINT_SCHEMA_VERSION,
+            "kind": "roadmap_materialization_checkpoint",
+            "intent_status": intent.get("status"),
+            "status": "deferred",
+            "reason": reason,
+            "message": message,
+            "push": bool(intent.get("push", False)),
+            "remote": intent.get("remote"),
+            "branch": intent.get("branch"),
+            "materialization_paths": materialization_paths,
+            "dirty_before_paths": dirty_before,
+            "dirty_before_harness_paths": self._materialization_dirty_paths(dirty_before),
+            "dirty_before_blocking_paths": blocking_paths or self._non_materialization_dirty_paths(dirty_before),
+            "unrelated_dirty_paths": blocking_paths or self._non_materialization_dirty_paths(dirty_before),
+            "checkpoint_readiness": readiness,
+            "continuation_status": "not_materialized",
+            "milestones_added": [],
+            "tasks_added": 0,
+            "dirty_after_paths": self._git_status_paths() if self._is_git_repo() else [],
+        }
+        append_jsonl(
+            self.decision_log_path,
+            {
+                "at": utc_now(),
+                "event": "roadmap_materialization_checkpoint",
+                **result,
+            },
+        )
+        return result
 
     def defer_git_checkpoint(
         self,
@@ -10333,6 +10456,7 @@ continuation stage(s) were appended.
                 "remote": remote,
                 "branch": branch,
                 "message_template": message_template,
+                "checkpoint_readiness": self.checkpoint_readiness(task),
             },
         )
 
@@ -10364,11 +10488,17 @@ continuation stage(s) were appended.
 
         task_state = state.get("tasks", {}).get(task.id, {})
         dirty_before = [str(path) for path in task_state.get("last_dirty_before_paths", [])]
-        if dirty_before:
+        dirty_before_harness = self._materialization_dirty_paths(dirty_before)
+        dirty_before_blocking = self._non_materialization_dirty_paths(dirty_before)
+        checkpoint_readiness = self.checkpoint_readiness(task)
+        if dirty_before_blocking:
             return finish({
                 "status": "skipped",
                 "message": "dirty worktree existed before the task; refusing to checkpoint mixed changes",
                 "dirty_before_paths": dirty_before,
+                "dirty_before_harness_paths": dirty_before_harness,
+                "dirty_before_blocking_paths": dirty_before_blocking,
+                "checkpoint_readiness": checkpoint_readiness,
             })
 
         status_before = self._git(["status", "--porcelain"])
@@ -10379,21 +10509,30 @@ continuation stage(s) were appended.
                 "stderr": status_before["stderr"],
             })
         current_paths = self._git_status_paths()
-        scope_violations = self._scope_violations(current_paths, task.file_scope)
+        allowed_accumulated_paths = set(dirty_before_harness)
+        scope_violations = sorted(
+            path
+            for path in current_paths
+            if path not in allowed_accumulated_paths and not self._path_in_scope(path, task.file_scope)
+        )
         if scope_violations:
             return finish({
                 "status": "skipped",
                 "message": "dirty files are outside task file_scope; refusing checkpoint",
                 "violations": scope_violations,
+                "dirty_before_paths": dirty_before,
+                "dirty_before_harness_paths": dirty_before_harness,
+                "checkpoint_readiness": checkpoint_readiness,
             })
         if not status_before["stdout"].strip():
             return finish({"status": "skipped", "message": "no git changes to commit"})
 
-        add_result = self._git(["add", "-A", "--", "."])
+        checkpoint_paths = sorted(dict.fromkeys(current_paths))
+        add_result = self._git(["add", "-A", "--", *checkpoint_paths])
         if add_result["returncode"] != 0:
             return finish({"status": "failed", "message": "git add failed", "stderr": add_result["stderr"]})
 
-        staged = self._git(["diff", "--cached", "--quiet"])
+        staged = self._git(["diff", "--cached", "--quiet", "--", *checkpoint_paths])
         if staged["returncode"] == 0:
             return finish({"status": "skipped", "message": "no staged git changes to commit"})
         if staged["returncode"] not in (0, 1):
@@ -10416,6 +10555,11 @@ continuation stage(s) were appended.
             "status": "committed",
             "message": message,
             "commit": commit_sha["stdout"].strip() if commit_sha["returncode"] == 0 else None,
+            "checkpointed_paths": checkpoint_paths,
+            "dirty_before_paths": dirty_before,
+            "dirty_before_harness_paths": dirty_before_harness,
+            "checkpoint_readiness": checkpoint_readiness,
+            "dirty_after_paths": self._git_status_paths(),
         }
 
         if push:

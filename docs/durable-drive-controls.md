@@ -135,15 +135,17 @@ When `drive --rolling` materializes continuation stages and `--commit-after-task
 `--push-after-task` is enabled, the harness treats roadmap materialization as its own checkpoint
 boundary before generated tasks run.
 
-If the git worktree is clean immediately before materialization, the harness commits the roadmap
-materialization first. Generated task checkpoints then run against a clean boundary and do not mistake
-the harness-owned roadmap edit for pre-existing user dirtiness.
+If the git worktree is clean or only roadmap/materialization paths are dirty immediately before
+materialization, the harness commits the roadmap materialization first. This covers rolling
+self-iteration, where the planner may have already appended an unmaterialized continuation stage to
+`.engineering/roadmap.yaml`. Generated task checkpoints then run against a clean boundary and do not
+mistake harness-owned accumulated roadmap edits for pre-existing user dirtiness.
 
-If the worktree already has user changes, the harness does not commit the materialization. The drive
-report records a deferred materialization checkpoint and later generated task checkpoints are
-explicitly marked `deferred` with the dirty paths that forced the boundary to stay open. This preserves
-the existing protection against committing unrelated user changes while distinguishing that case from
-ordinary task checkpoint skips.
+If unrelated user changes are present before materialization, the harness blocks that rolling
+materialization before mutating the roadmap. The drive report records the checkpoint intent, the
+deferred materialization checkpoint result, `blocking_paths`, and the operator action needed to close
+the boundary. This preserves the protection against committing unrelated user changes while still
+allowing harness-owned roadmap batches to checkpoint deterministically.
 
 ## Checkpoint Readiness
 

@@ -257,8 +257,9 @@ Current durable drive controls:
   current task, last progress message, and watchdog status. Stale state is reported when the pid is
   gone or the heartbeat exceeds the local `drive_watchdog.stale_after_seconds` threshold.
 - Rolling drives with task checkpointing record roadmap materialization checkpoint intent before
-  generated tasks run. Clean materializations are checkpointed first; materializations mixed with
-  pre-existing user dirtiness cause explicit task checkpoint deferral in the drive report.
+  generated tasks run. Clean or harness-owned roadmap/materialization dirtiness is checkpointed first;
+  pre-existing unrelated user dirtiness blocks materialization before roadmap mutation and is recorded
+  as a deferred checkpoint boundary in the drive report.
 - Drive reports include a deterministic goal-gap retrospective and JSON sidecar that compare final
   local evidence with the long-run unattended reliability goal.
 - `pause` and `cancel` stop future drive scheduling without deleting roadmap tasks or reports.

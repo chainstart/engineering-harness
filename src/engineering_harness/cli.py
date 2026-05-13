@@ -383,6 +383,8 @@ def materialization_task_checkpoint_defer_payload(checkpoint: dict) -> dict:
     unrelated = checkpoint.get("unrelated_dirty_paths") or []
     if reason == "preexisting_dirty_worktree":
         detail = "pre-existing user changes were present before roadmap materialization"
+    elif reason in {"preexisting_unrelated_dirty_paths", "checkpoint_readiness_blocked"}:
+        detail = "unrelated dirty paths were present before roadmap materialization"
     elif reason == "unrelated_dirty_paths":
         detail = "unrelated dirty paths appeared beside the harness-owned roadmap materialization"
     elif reason == "git_push_failed":
@@ -989,6 +991,10 @@ def run_project_drive(root: Path, args: argparse.Namespace) -> tuple[int, dict]:
                     )
                     checkpoint_intent = None
                     checkpoint_readiness = harness.checkpoint_readiness()
+                    continuation_summary = harness.continuation_summary()
+                    has_pending_continuation = (
+                        int(continuation_summary.get("pending_stage_count", 0) or 0) > 0
+                    )
                     if checkpoint_requested(args):
                         checkpoint_intent = harness.roadmap_materialization_checkpoint_intent(
                             reason="rolling_drive_queue_empty",
@@ -996,6 +1002,29 @@ def run_project_drive(root: Path, args: argparse.Namespace) -> tuple[int, dict]:
                             remote=str(getattr(args, "git_remote", "origin")),
                             branch=getattr(args, "git_branch", None),
                         )
+                        if has_pending_continuation and checkpoint_readiness.get("blocking"):
+                            block_message = (
+                                "roadmap materialization blocked because checkpoint readiness found "
+                                "unrelated dirty paths before the boundary"
+                            )
+                            materialization_checkpoint = harness.defer_roadmap_materialization_checkpoint(
+                                checkpoint_intent,
+                                reason="checkpoint_readiness_blocked",
+                                message=block_message,
+                            )
+                            continuation = {
+                                "status": "blocked",
+                                "message": block_message,
+                                "milestones_added": [],
+                                "tasks_added": 0,
+                                "checkpoint_readiness_before_materialization": checkpoint_readiness,
+                                "materialization_checkpoint_intent": checkpoint_intent,
+                                "materialization_checkpoint": materialization_checkpoint,
+                            }
+                            continuations.append(continuation)
+                            status = "blocked"
+                            message = block_message
+                            break
                     continuation = harness.advance_roadmap(
                         max_new_milestones=args.continuation_batch_size,
                         reason="rolling_drive_queue_empty",
