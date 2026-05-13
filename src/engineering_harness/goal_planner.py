@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 import re
 from copy import deepcopy
 from pathlib import Path
@@ -416,7 +418,13 @@ def _continuation_task(
     implementation_focus: str,
     stage_objective: str,
 ) -> dict[str, Any]:
-    journey_id = str(journey.get("id", "primary-journey"))
+    gates = _quality_gates(
+        stage_id=stage_id,
+        task_id=task_id,
+        profile=profile,
+        experience_kind=experience_kind,
+        journey=journey,
+    )
     return {
         "id": task_id,
         "title": title,
@@ -440,6 +448,7 @@ def _continuation_task(
                     experience_kind=experience_kind,
                     journey=journey,
                     blueprint_path=blueprint_path,
+                    gate_guidance=gates["prompt_guidance"],
                 ),
                 "timeout_seconds": 3600,
             }
@@ -452,20 +461,8 @@ def _continuation_task(
                 "timeout_seconds": 1800,
             }
         ],
-        "acceptance": [
-            {
-                "name": "generated task contract is locally checkable",
-                "command": _task_contract_command(stage_id=stage_id, task_id=task_id),
-                "timeout_seconds": 30,
-            }
-        ],
-        "e2e": [
-            {
-                "name": f"{journey_id} e2e gate is wired",
-                "command": _task_e2e_contract_command(stage_id=stage_id, task_id=task_id, journey_id=journey_id),
-                "timeout_seconds": 30,
-            }
-        ],
+        "acceptance": gates["acceptance"],
+        "e2e": gates["e2e"],
         "generated_by": GOAL_ROADMAP_PLANNER_ID,
     }
 
@@ -483,6 +480,250 @@ def _primary_journey(experience: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _quality_gates(
+    *,
+    stage_id: str,
+    task_id: str,
+    profile: str,
+    experience_kind: str,
+    journey: dict[str, Any],
+) -> dict[str, Any]:
+    acceptance = [
+        *_profile_acceptance_gates(
+            profile=profile,
+            experience_kind=experience_kind,
+            task_id=task_id,
+            journey=journey,
+        ),
+        *_experience_acceptance_gates(experience_kind=experience_kind, task_id=task_id, journey=journey),
+        {
+            "name": "roadmap task contract smoke",
+            "command": _task_contract_command(stage_id=stage_id, task_id=task_id),
+            "timeout_seconds": 30,
+        },
+    ]
+    e2e = _experience_e2e_gates(profile=profile, experience_kind=experience_kind, task_id=task_id, journey=journey)
+    return {
+        "acceptance": acceptance,
+        "e2e": e2e,
+        "prompt_guidance": _gate_prompt_guidance(acceptance=acceptance, e2e=e2e),
+    }
+
+
+def _profile_acceptance_gates(
+    *,
+    profile: str,
+    experience_kind: str,
+    task_id: str,
+    journey: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if profile in {"python-agent", "agent-monorepo"}:
+        return [
+            {
+                "name": "python behavioral tests pass",
+                "command": "python3 -m pytest tests -q",
+                "guidance": "Create or update focused pytest coverage under `tests/` for the implemented behavior.",
+                "timeout_seconds": 600,
+            }
+        ]
+    if profile == "node-frontend":
+        return [
+            {
+                "name": "frontend unit and integration tests pass",
+                "command": "npm test",
+                "guidance": "Create or update the local npm test script and focused frontend tests.",
+                "timeout_seconds": 900,
+            }
+        ]
+    journey_id = _journey_id(journey)
+    return [
+        {
+            "name": "local documented behavior check exists",
+            "command": _candidate_content_check_command(
+                _journey_evidence_candidates(
+                    task_id=task_id,
+                    journey_id=journey_id,
+                    experience_kind=experience_kind,
+                ),
+                [journey_id, _journey_persona(journey), "local"],
+                missing_label="missing local documented behavior check",
+            ),
+            "guidance": "Create a local documented check or evidence file for the selected journey.",
+            "timeout_seconds": 120,
+        }
+    ]
+
+
+def _experience_acceptance_gates(
+    *,
+    experience_kind: str,
+    task_id: str,
+    journey: dict[str, Any],
+) -> list[dict[str, Any]]:
+    journey_id = _journey_id(journey)
+    persona = _journey_persona(journey)
+    if experience_kind == "cli-only":
+        candidates = _cli_example_candidates(task_id=task_id, journey_id=journey_id)
+        return [
+            {
+                "name": "documented CLI example or local command check exists",
+                "command": _candidate_content_check_command(
+                    candidates,
+                    [journey_id, persona, "command", "output"],
+                    missing_label="missing deterministic CLI example or command check",
+                ),
+                "guidance": "Create one deterministic CLI example or local command check that includes the journey id, "
+                "persona, command, and output at one of: "
+                + ", ".join(f"`{item}`" for item in candidates),
+                "timeout_seconds": 120,
+            }
+        ]
+    if experience_kind == "api-only":
+        candidates = _api_example_candidates(task_id=task_id, journey_id=journey_id)
+        return [
+            {
+                "name": "documented API example or local client check exists",
+                "command": _candidate_content_check_command(
+                    candidates,
+                    [journey_id, persona, "request", "response"],
+                    missing_label="missing deterministic API example or client check",
+                ),
+                "guidance": "Create one deterministic API example or local client check that includes the journey id, "
+                "persona, request, and response at one of: "
+                + ", ".join(f"`{item}`" for item in candidates),
+                "timeout_seconds": 120,
+            }
+        ]
+    path = f"docs/experience/{task_id}.md"
+    return [
+        {
+            "name": f"{experience_kind} acceptance criteria are documented",
+            "command": _content_check_command(
+                path,
+                [experience_kind, journey_id, persona, "acceptance"],
+                missing_label="missing experience acceptance criteria",
+            ),
+            "guidance": f"Document the local acceptance criteria in `{path}`.",
+            "timeout_seconds": 120,
+        }
+    ]
+
+
+def _experience_e2e_gates(
+    *,
+    profile: str,
+    experience_kind: str,
+    task_id: str,
+    journey: dict[str, Any],
+) -> list[dict[str, Any]]:
+    journey_id = _journey_id(journey)
+    gates: list[dict[str, Any]] = []
+    if profile in {"python-agent", "agent-monorepo"}:
+        gates.append(
+            {
+                "name": f"{journey_id} local e2e tests pass",
+                "command": "python3 -m pytest tests/e2e -q",
+                "guidance": "Create or update deterministic pytest journey coverage under `tests/e2e/`.",
+                "timeout_seconds": 900,
+            }
+        )
+    elif profile == "node-frontend":
+        gates.append(
+            {
+                "name": f"{journey_id} local e2e journey passes",
+                "command": "npm run e2e",
+                "guidance": "Create or update the local npm `e2e` script and deterministic journey tests.",
+                "timeout_seconds": 1200,
+            }
+        )
+    evidence_candidates = _journey_evidence_candidates(
+        task_id=task_id,
+        journey_id=journey_id,
+        experience_kind=experience_kind,
+    )
+    gates.append(
+        {
+            "name": f"{journey_id} local journey evidence is captured",
+            "command": _candidate_content_check_command(
+                evidence_candidates,
+                [journey_id, _journey_persona(journey), "evidence"],
+                missing_label="missing local e2e journey evidence",
+            ),
+            "guidance": "Capture journey evidence or an executable check at one of: "
+            + ", ".join(f"`{item}`" for item in evidence_candidates),
+            "timeout_seconds": 120,
+        }
+    )
+    return gates
+
+
+def _gate_prompt_guidance(*, acceptance: list[dict[str, Any]], e2e: list[dict[str, Any]]) -> str:
+    lines = ["Generated local gates to satisfy after implementation:"]
+    lines.append("Acceptance:")
+    for item in acceptance:
+        lines.append(f"- {item['name']}: `{item['command']}`")
+        if item.get("guidance"):
+            lines.append(f"  {item['guidance']}")
+    lines.append("E2E/journey evidence:")
+    for item in e2e:
+        lines.append(f"- {item['name']}: `{item['command']}`")
+        if item.get("guidance"):
+            lines.append(f"  {item['guidance']}")
+    lines.append("Create or update the referenced tests, examples, docs, or evidence files inside file_scope.")
+    return "\n".join(lines)
+
+
+def _cli_example_candidates(*, task_id: str, journey_id: str) -> list[str]:
+    python_slug = _python_test_slug(journey_id)
+    return [
+        f"examples/{task_id}-cli.md",
+        f"docs/examples/{task_id}-cli.md",
+        f"tests/cli/test_{python_slug}.py",
+        f"tests/e2e/test_{python_slug}.py",
+    ]
+
+
+def _api_example_candidates(*, task_id: str, journey_id: str) -> list[str]:
+    python_slug = _python_test_slug(journey_id)
+    return [
+        f"examples/{task_id}-api.md",
+        f"docs/examples/{task_id}-api.md",
+        f"tests/api/test_{python_slug}.py",
+        f"tests/e2e/test_{python_slug}.py",
+    ]
+
+
+def _journey_evidence_candidates(*, task_id: str, journey_id: str, experience_kind: str) -> list[str]:
+    journey_slug = _slugify(journey_id)
+    python_slug = _python_test_slug(journey_id)
+    candidates = [
+        f"docs/e2e/{task_id}-{journey_slug}.md",
+        f"docs/evidence/{task_id}-{journey_slug}.md",
+        f"tests/e2e/test_{python_slug}.py",
+    ]
+    if experience_kind in {"dashboard", "submission-review", "multi-role-app"}:
+        candidates.extend(
+            [
+                f"tests/e2e/{journey_slug}.spec.ts",
+                f"tests/e2e/{journey_slug}.spec.js",
+                f"e2e/{journey_slug}.spec.ts",
+            ]
+        )
+    if experience_kind == "cli-only":
+        candidates.append(f"examples/{task_id}-cli.md")
+    if experience_kind == "api-only":
+        candidates.append(f"examples/{task_id}-api.md")
+    return candidates
+
+
+def _journey_id(journey: dict[str, Any]) -> str:
+    return str(journey.get("id") or "primary-local-journey")
+
+
+def _journey_persona(journey: dict[str, Any]) -> str:
+    return str(journey.get("persona") or "local operator")
+
+
 def _task_contract_command(*, stage_id: str, task_id: str) -> str:
     return _python_command(
         "import json; from pathlib import Path;",
@@ -497,17 +738,51 @@ def _task_contract_command(*, stage_id: str, task_id: str) -> str:
     )
 
 
-def _task_e2e_contract_command(*, stage_id: str, task_id: str, journey_id: str) -> str:
-    return _python_command(
-        "import json; from pathlib import Path;",
-        "data=json.loads(Path('.engineering/roadmap.yaml').read_text());",
-        f"stage=next(item for item in data.get('continuation', {{}}).get('stages', []) if item.get('id') == '{stage_id}');",
-        f"task=next(item for item in stage.get('tasks', []) if item.get('id') == '{task_id}');",
-        "assert task.get('e2e');",
-        "journeys=data.get('experience', {}).get('e2e_journeys', []);",
-        f"assert any(item.get('id') == '{journey_id}' for item in journeys);",
-        f"print('{task_id} e2e gate ok')",
+def _content_check_command(path: str, required_terms: list[str], *, missing_label: str) -> str:
+    encoded_terms = _b64_json([term for term in dict.fromkeys(required_terms) if str(term).strip()])
+    return (
+        "python3 -c \"import base64,json; from pathlib import Path; "
+        f"p=Path('{path}'); assert p.exists(), 'missing {path}'; "
+        "text=p.read_text(encoding='utf-8', errors='ignore').lower(); "
+        f"terms=json.loads(base64.b64decode('{encoded_terms}')); "
+        "missing=[term for term in terms if str(term).lower() not in text]; "
+        f"assert not missing, '{missing_label}: ' + ', '.join(missing); "
+        f"print('{path} content ok')\""
     )
+
+
+def _candidate_content_check_command(
+    candidates: list[str],
+    required_terms: list[str],
+    *,
+    missing_label: str,
+) -> str:
+    encoded_candidates = _b64_json(candidates)
+    encoded_terms = _b64_json([term for term in dict.fromkeys(required_terms) if str(term).strip()])
+    return (
+        "python3 -c \"import base64,json; from pathlib import Path; "
+        f"candidates=json.loads(base64.b64decode('{encoded_candidates}')); "
+        "paths=[Path(item) for item in candidates if Path(item).exists()]; "
+        f"assert paths, '{missing_label}; expected one of: ' + ', '.join(candidates); "
+        "text='\\n'.join(path.read_text(encoding='utf-8', errors='ignore').lower() for path in paths); "
+        f"terms=json.loads(base64.b64decode('{encoded_terms}')); "
+        "missing=[term for term in terms if str(term).lower() not in text]; "
+        f"assert not missing, '{missing_label} terms: ' + ', '.join(missing); "
+        "print('local journey content ok')\""
+    )
+
+
+def _b64_json(value: Any) -> str:
+    return base64.b64encode(json.dumps(value).encode("utf-8")).decode("ascii")
+
+
+def _slugify(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
+    return slug or "item"
+
+
+def _python_test_slug(value: str) -> str:
+    return _slugify(value).replace("-", "_")
 
 
 def _python_command(*statements: str) -> str:
@@ -525,6 +800,7 @@ def _implementation_prompt(
     experience_kind: str,
     journey: dict[str, Any],
     blueprint_path: str | None,
+    gate_guidance: str,
 ) -> str:
     blueprint = f"\nBlueprint: `{blueprint_path}`." if blueprint_path else ""
     return (
@@ -536,6 +812,7 @@ def _implementation_prompt(
         f"Experience kind: {experience_kind}.\n"
         f"Primary E2E journey: {journey.get('id')} for {journey.get('persona')} - {journey.get('goal')}\n"
         f"{_constraints_prompt(constraints)}\n"
+        f"{gate_guidance}\n"
         "Keep the work deterministic and local. Add or update focused tests and docs. Do not use private keys, "
         "paid live services, production deployments, mainnet writes, real-fund movement, or live trading."
     )

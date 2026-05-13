@@ -1285,6 +1285,234 @@
           "generated_at": "2026-05-13T04:58:22Z"
         }
       ]
+    },
+    {
+      "id": "goal-stage-quality-gates",
+      "title": "Goal Stage Quality Gates",
+      "status": "planned",
+      "objective": "Make generated goal-stage tasks prove project behavior with profile-aware local acceptance and experience-aware E2E evidence instead of relying only on roadmap contract checks.",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-13T05:36:38Z",
+      "tasks": [
+        {
+          "id": "profile-aware-goal-gates",
+          "title": "Generate profile-aware acceptance and E2E gates for goal stages",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 2,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 2400,
+              "sandbox": "workspace-write",
+              "prompt": "Update the goal roadmap planner so generated continuation tasks include profile-aware local acceptance gates that exercise the target project after implementation, not only structural roadmap contract checks. For python-agent and agent-monorepo profiles, generate pytest-oriented local checks; for node-frontend projects, generate npm-based local checks when appropriate; for CLI/API-only plans, generate deterministic documented-example or local command checks. Keep a small roadmap contract smoke if useful, but make it secondary. Replace contract-only E2E gates with experience-aware local journey evidence requirements or runnable local E2E checks tied to the selected experience journey, and update generated implementation prompts so coding agents know which tests or evidence files to create. Add focused tests and docs. Do not require external accounts, paid services, production deployment, private keys, mainnet writes, real-fund movement, or live trading."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 1200,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing goal-stage quality gate tests while preserving deterministic local planning, valid generated roadmaps, profile-aware acceptance commands, experience-aware E2E evidence requirements, and the no-external-services safety boundary."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "goal gate planner tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 120
+            }
+          ],
+          "e2e": [
+            {
+              "name": "materialize quality-gated goal roadmap in tmp",
+              "command": "bin/engh plan-goal --project-root /tmp/engineering-harness-gates-smoke --name gated-goal-smoke --profile python-agent --goal \"Build a local dashboard agent that reads reports, summarizes status, and lets an operator inspect E2E evidence.\" --materialize --force --json",
+              "required": true,
+              "timeout_seconds": 120
+            },
+            {
+              "name": "generated goal stages include behavioral gates",
+              "command": "python3 -c \"import json; from pathlib import Path; data=json.loads(Path('/tmp/engineering-harness-gates-smoke/.engineering/roadmap.yaml').read_text()); tasks=[task for stage in data.get('continuation', {}).get('stages', []) for task in stage.get('tasks', [])]; assert tasks; acceptance_commands=[cmd.get('command', '') for task in tasks for cmd in task.get('acceptance', [])]; e2e_commands=[cmd.get('command', '') for task in tasks for cmd in task.get('e2e', [])]; assert any(('pytest' in cmd or 'npm' in cmd or 'tests/' in cmd or 'docs/' in cmd) for cmd in acceptance_commands); assert any(('e2e' in cmd.lower() or 'journey' in cmd.lower() or 'evidence' in cmd.lower()) for cmd in e2e_commands); assert not all(cmd.get('name') == 'generated task contract is locally checkable' for task in tasks for cmd in task.get('acceptance', [])); print('goal gates ok')\"",
+              "required": true,
+              "timeout_seconds": 120
+            },
+            {
+              "name": "generated quality-gated roadmap validates",
+              "command": "bin/engh validate --project-root /tmp/engineering-harness-gates-smoke",
+              "required": true,
+              "timeout_seconds": 120
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T05:36:38Z"
+        }
+      ]
+    },
+    {
+      "id": "self-iteration-output-guards",
+      "title": "Self-Iteration Output Guards",
+      "status": "planned",
+      "objective": "Validate self-iteration planner output as a bounded roadmap diff before unattended drives trust newly generated stages.",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-13T05:49:55Z",
+      "tasks": [
+        {
+          "id": "self-iteration-plan-validator",
+          "title": "Reject unsafe or malformed self-iteration roadmap diffs",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 2,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 2400,
+              "sandbox": "workspace-write",
+              "prompt": "Add post-planner validation for self-iteration output in `Harness.run_self_iteration`. Capture the roadmap state before and after the planner, require exactly `self_iteration.max_stages_per_iteration` newly appended unmaterialized continuation stages, and reject planner output that mutates existing milestones or task statuses, adds duplicate ids, omits task file_scope or acceptance commands, omits codex repair for implementation work, or introduces unsafe live/private-key/mainnet/production/paid-service requirements. Run the normal roadmap validator against the accepted output, restore the previous roadmap and return a non-planned status with clear validation errors when the diff is invalid, and include those validation results in the self-iteration report. Add focused tests for valid output, too many new stages, malformed task gates, and milestone mutation. Update docs for the self-iteration safety contract. Do not edit `.engineering/state` or `.engineering/reports` in tests except through harness-generated temporary project artifacts."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 1200,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing self-iteration output guard tests while preserving bounded stage counts, rollback of invalid roadmap diffs, clear report errors, valid roadmap output, and the local-only safety boundary."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "self-iteration guard tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 120
+            }
+          ],
+          "e2e": [
+            {
+              "name": "self-iteration output guard smoke",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q -k self_iteration_output_guard",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "self-iteration status remains machine-readable",
+              "command": "bin/engh status --project-root . --json",
+              "required": true,
+              "timeout_seconds": 120
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T05:49:55Z"
+        }
+      ]
+    },
+    {
+      "id": "self-iteration-context-pack",
+      "title": "Self-Iteration Context Pack",
+      "status": "planned",
+      "objective": "Give the self-iteration planner a bounded, machine-readable assessment context that includes latest roadmap state, manifests, reports, docs, tests, code inventory, and git status before it chooses the next stage.",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-13T06:03:58Z",
+      "tasks": [
+        {
+          "id": "planner-context-pack",
+          "title": "Assemble bounded planner context before self-iteration",
+          "status": "pending",
+          "max_attempts": 2,
+          "max_task_iterations": 2,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 2400,
+              "sandbox": "workspace-write",
+              "prompt": "Implement a bounded self-iteration context pack for `Harness.run_self_iteration`. Before invoking the planner, collect a deterministic JSON context that summarizes the current roadmap and continuation state, latest manifest index and most recent task manifests, recent task and drive report metadata, blueprint and relevant docs paths or short excerpts, test inventory, source file inventory, git status, and recent commits. Store the context beside the self-iteration snapshot, include its path and summary in the snapshot and self-iteration report, and reference it from the planner prompt so future planners can assess current state without ad hoc repository discovery. Cap counts and text sizes, redact secrets using existing redaction helpers, keep behavior local-only, and avoid editing `.engineering/state` or repository report fixtures except through harness-generated temporary test artifacts. Add focused tests with a fake local planner that asserts the context pack contains manifests, reports, tests, code inventory, blueprint, and git metadata, and update docs for the planner input contract."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 1200,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing self-iteration context pack tests while preserving bounded deterministic context, secret redaction, planner prompt integration, valid self-iteration output validation, and the local-only safety boundary."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "self-iteration context pack tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q -k self_iteration_context_pack",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 120
+            }
+          ],
+          "e2e": [
+            {
+              "name": "planner receives context pack smoke",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q -k self_iteration_context_pack_smoke",
+              "required": true,
+              "timeout_seconds": 600
+            },
+            {
+              "name": "self-iteration status remains machine-readable",
+              "command": "bin/engh status --project-root . --json",
+              "required": true,
+              "timeout_seconds": 120
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-13T06:03:58Z"
+        }
+      ]
     }
   ],
   "continuation": {
@@ -2315,6 +2543,222 @@
               {
                 "name": "generated staged roadmap validates",
                 "command": "bin/engh validate --project-root /tmp/engineering-harness-decompose-smoke",
+                "required": true,
+                "timeout_seconds": 120
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "goal-stage-quality-gates",
+        "title": "Goal Stage Quality Gates",
+        "objective": "Make generated goal-stage tasks prove project behavior with profile-aware local acceptance and experience-aware E2E evidence instead of relying only on roadmap contract checks.",
+        "generated_by": "engineering-harness-self-iteration",
+        "generated_at": "2026-05-13T05:35:20Z",
+        "tasks": [
+          {
+            "id": "profile-aware-goal-gates",
+            "title": "Generate profile-aware acceptance and E2E gates for goal stages",
+            "max_attempts": 2,
+            "max_task_iterations": 2,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 2400,
+                "sandbox": "workspace-write",
+                "prompt": "Update the goal roadmap planner so generated continuation tasks include profile-aware local acceptance gates that exercise the target project after implementation, not only structural roadmap contract checks. For python-agent and agent-monorepo profiles, generate pytest-oriented local checks; for node-frontend projects, generate npm-based local checks when appropriate; for CLI/API-only plans, generate deterministic documented-example or local command checks. Keep a small roadmap contract smoke if useful, but make it secondary. Replace contract-only E2E gates with experience-aware local journey evidence requirements or runnable local E2E checks tied to the selected experience journey, and update generated implementation prompts so coding agents know which tests or evidence files to create. Add focused tests and docs. Do not require external accounts, paid services, production deployment, private keys, mainnet writes, real-fund movement, or live trading."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 1200,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing goal-stage quality gate tests while preserving deterministic local planning, valid generated roadmaps, profile-aware acceptance commands, experience-aware E2E evidence requirements, and the no-external-services safety boundary."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "goal gate planner tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 600
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 120
+              }
+            ],
+            "e2e": [
+              {
+                "name": "materialize quality-gated goal roadmap in tmp",
+                "command": "bin/engh plan-goal --project-root /tmp/engineering-harness-gates-smoke --name gated-goal-smoke --profile python-agent --goal \"Build a local dashboard agent that reads reports, summarizes status, and lets an operator inspect E2E evidence.\" --materialize --force --json",
+                "required": true,
+                "timeout_seconds": 120
+              },
+              {
+                "name": "generated goal stages include behavioral gates",
+                "command": "python3 -c \"import json; from pathlib import Path; data=json.loads(Path('/tmp/engineering-harness-gates-smoke/.engineering/roadmap.yaml').read_text()); tasks=[task for stage in data.get('continuation', {}).get('stages', []) for task in stage.get('tasks', [])]; assert tasks; acceptance_commands=[cmd.get('command', '') for task in tasks for cmd in task.get('acceptance', [])]; e2e_commands=[cmd.get('command', '') for task in tasks for cmd in task.get('e2e', [])]; assert any(('pytest' in cmd or 'npm' in cmd or 'tests/' in cmd or 'docs/' in cmd) for cmd in acceptance_commands); assert any(('e2e' in cmd.lower() or 'journey' in cmd.lower() or 'evidence' in cmd.lower()) for cmd in e2e_commands); assert not all(cmd.get('name') == 'generated task contract is locally checkable' for task in tasks for cmd in task.get('acceptance', [])); print('goal gates ok')\"",
+                "required": true,
+                "timeout_seconds": 120
+              },
+              {
+                "name": "generated quality-gated roadmap validates",
+                "command": "bin/engh validate --project-root /tmp/engineering-harness-gates-smoke",
+                "required": true,
+                "timeout_seconds": 120
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "self-iteration-output-guards",
+        "title": "Self-Iteration Output Guards",
+        "objective": "Validate self-iteration planner output as a bounded roadmap diff before unattended drives trust newly generated stages.",
+        "generated_by": "engineering-harness-self-iteration",
+        "generated_at": "2026-05-13T05:48:50Z",
+        "tasks": [
+          {
+            "id": "self-iteration-plan-validator",
+            "title": "Reject unsafe or malformed self-iteration roadmap diffs",
+            "max_attempts": 2,
+            "max_task_iterations": 2,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 2400,
+                "sandbox": "workspace-write",
+                "prompt": "Add post-planner validation for self-iteration output in `Harness.run_self_iteration`. Capture the roadmap state before and after the planner, require exactly `self_iteration.max_stages_per_iteration` newly appended unmaterialized continuation stages, and reject planner output that mutates existing milestones or task statuses, adds duplicate ids, omits task file_scope or acceptance commands, omits codex repair for implementation work, or introduces unsafe live/private-key/mainnet/production/paid-service requirements. Run the normal roadmap validator against the accepted output, restore the previous roadmap and return a non-planned status with clear validation errors when the diff is invalid, and include those validation results in the self-iteration report. Add focused tests for valid output, too many new stages, malformed task gates, and milestone mutation. Update docs for the self-iteration safety contract. Do not edit `.engineering/state` or `.engineering/reports` in tests except through harness-generated temporary project artifacts."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 1200,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing self-iteration output guard tests while preserving bounded stage counts, rollback of invalid roadmap diffs, clear report errors, valid roadmap output, and the local-only safety boundary."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "self-iteration guard tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 600
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 120
+              }
+            ],
+            "e2e": [
+              {
+                "name": "self-iteration output guard smoke",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k self_iteration_output_guard",
+                "required": true,
+                "timeout_seconds": 600
+              },
+              {
+                "name": "self-iteration status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 120
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "self-iteration-context-pack",
+        "title": "Self-Iteration Context Pack",
+        "objective": "Give the self-iteration planner a bounded, machine-readable assessment context that includes latest roadmap state, manifests, reports, docs, tests, code inventory, and git status before it chooses the next stage.",
+        "generated_by": "engineering-harness-self-iteration",
+        "generated_at": "2026-05-13T06:02:21Z",
+        "tasks": [
+          {
+            "id": "planner-context-pack",
+            "title": "Assemble bounded planner context before self-iteration",
+            "max_attempts": 2,
+            "max_task_iterations": 2,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 2400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement a bounded self-iteration context pack for `Harness.run_self_iteration`. Before invoking the planner, collect a deterministic JSON context that summarizes the current roadmap and continuation state, latest manifest index and most recent task manifests, recent task and drive report metadata, blueprint and relevant docs paths or short excerpts, test inventory, source file inventory, git status, and recent commits. Store the context beside the self-iteration snapshot, include its path and summary in the snapshot and self-iteration report, and reference it from the planner prompt so future planners can assess current state without ad hoc repository discovery. Cap counts and text sizes, redact secrets using existing redaction helpers, keep behavior local-only, and avoid editing `.engineering/state` or repository report fixtures except through harness-generated temporary test artifacts. Add focused tests with a fake local planner that asserts the context pack contains manifests, reports, tests, code inventory, blueprint, and git metadata, and update docs for the planner input contract."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 1200,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing self-iteration context pack tests while preserving bounded deterministic context, secret redaction, planner prompt integration, valid self-iteration output validation, and the local-only safety boundary."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "self-iteration context pack tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k self_iteration_context_pack",
+                "required": true,
+                "timeout_seconds": 600
+              },
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 600
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 120
+              }
+            ],
+            "e2e": [
+              {
+                "name": "planner receives context pack smoke",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k self_iteration_context_pack_smoke",
+                "required": true,
+                "timeout_seconds": 600
+              },
+              {
+                "name": "self-iteration status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
                 "required": true,
                 "timeout_seconds": 120
               }

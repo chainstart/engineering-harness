@@ -21,10 +21,22 @@ def _utc_now() -> str:
 def redact(text: str) -> str:
     redacted = text
     for marker in ("PRIVATE_KEY=", "OPENAI_API_KEY=", "ANTHROPIC_API_KEY=", "MNEMONIC="):
-        while marker in redacted:
-            before, _, after = redacted.partition(marker)
+        cursor = 0
+        while True:
+            index = redacted.find(marker, cursor)
+            if index < 0:
+                break
+            token_start = index + len(marker)
+            if redacted.startswith("[REDACTED]", token_start):
+                cursor = token_start + len("[REDACTED]")
+                continue
+            after = redacted[token_start:]
             token = after.split()[0] if after.split() else ""
-            redacted = before + marker + "[REDACTED]" + after[len(token) :]
+            if not token:
+                cursor = token_start
+                continue
+            redacted = redacted[:token_start] + "[REDACTED]" + redacted[token_start + len(token) :]
+            cursor = token_start + len("[REDACTED]")
     return redacted
 
 

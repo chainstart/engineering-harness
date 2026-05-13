@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from engineering_harness.goal_intake import GoalIntakeValidationError, normalize_goal_intake, validate_goal_intake
+from engineering_harness.goal_planner import plan_goal_roadmap
 from engineering_harness.core import Harness, discover_projects, init_project
 from engineering_harness.executors import (
     DAGGER_ENABLE_ENV,
@@ -17,6 +18,7 @@ from engineering_harness.executors import (
     ExecutorMetadata,
     ExecutorRegistry,
     ExecutorResult,
+    ShellExecutorAdapter,
     default_executor_registry,
 )
 from engineering_harness.cli import main as cli_main
@@ -68,6 +70,14 @@ def status_summary_for_roadmap(tmp_path: Path, project_name: str, roadmap: dict)
 def roadmap_fixture_payload(fixture_name: str) -> dict:
     fixture_path = ROADMAP_FIXTURES / fixture_name
     return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
+def continuation_tasks(roadmap: dict) -> list[dict]:
+    return [
+        task
+        for stage in roadmap.get("continuation", {}).get("stages", [])
+        for task in stage.get("tasks", [])
+    ]
 
 
 def task_manifest(project: Path, result: dict) -> dict:
@@ -333,6 +343,79 @@ def test_plan_goal_cli_materializes_goal_file_roadmap_and_validates(tmp_path, ca
             "--json",
         ]
     ) == 2
+
+
+def test_goal_planner_generates_python_behavioral_and_journey_gates(tmp_path):
+    proposal = plan_goal_roadmap(
+        project_root=tmp_path / "gated-python-agent",
+        project_name="Gated Dashboard Agent",
+        profile="python-agent",
+        goal_text="Build a local dashboard agent that reads reports and lets an operator inspect E2E evidence.",
+        desired_experience_kind="dashboard",
+    )
+    task = continuation_tasks(proposal["roadmap"])[0]
+
+    acceptance_names = [item["name"] for item in task["acceptance"]]
+    acceptance_commands = [item["command"] for item in task["acceptance"]]
+    e2e_names = [item["name"] for item in task["e2e"]]
+    e2e_commands = [item["command"] for item in task["e2e"]]
+    implementation_prompt = task["implementation"][0]["prompt"]
+
+    assert acceptance_names[0] == "python behavioral tests pass"
+    assert acceptance_commands[0] == "python3 -m pytest tests -q"
+    assert acceptance_names[-1] == "roadmap task contract smoke"
+    assert "generated task contract is locally checkable" not in acceptance_names
+    assert any(command == "python3 -m pytest tests/e2e -q" for command in e2e_commands)
+    assert any("journey evidence" in name for name in e2e_names)
+    assert "tests/e2e/" in implementation_prompt
+    assert "docs/e2e/" in implementation_prompt
+    assert "python3 -m pytest tests -q" in implementation_prompt
+    assert validate_roadmap_payload(tmp_path, proposal["roadmap"])["status"] == "passed"
+
+
+def test_goal_planner_generates_node_frontend_npm_gates(tmp_path):
+    proposal = plan_goal_roadmap(
+        project_root=tmp_path / "gated-node-frontend",
+        project_name="Gated Frontend",
+        profile="node-frontend",
+        goal_text="Build an operator dashboard frontend with local journey evidence.",
+        desired_experience_kind="dashboard",
+    )
+    task = continuation_tasks(proposal["roadmap"])[0]
+
+    assert task["acceptance"][0]["name"] == "frontend unit and integration tests pass"
+    assert task["acceptance"][0]["command"] == "npm test"
+    assert task["e2e"][0]["command"] == "npm run e2e"
+    assert "local npm `e2e` script" in task["implementation"][0]["prompt"]
+    assert "roadmap task contract smoke" == task["acceptance"][-1]["name"]
+    assert validate_roadmap_payload(tmp_path, proposal["roadmap"])["status"] == "passed"
+
+
+def test_goal_planner_generates_cli_and_api_documented_example_gates(tmp_path):
+    cli_proposal = plan_goal_roadmap(
+        project_root=tmp_path / "gated-cli",
+        project_name="Gated CLI",
+        profile="python-agent",
+        goal_text="Build a CLI tool that writes a deterministic local report.",
+        desired_experience_kind="cli",
+    )
+    api_proposal = plan_goal_roadmap(
+        project_root=tmp_path / "gated-api",
+        project_name="Gated API",
+        profile="python-agent",
+        goal_text="Build a local API with a documented client example.",
+        desired_experience_kind="api",
+    )
+
+    cli_task = continuation_tasks(cli_proposal["roadmap"])[0]
+    api_task = continuation_tasks(api_proposal["roadmap"])[0]
+
+    assert any("CLI example" in item["name"] for item in cli_task["acceptance"])
+    assert any("examples/" in item.get("guidance", "") for item in cli_task["acceptance"])
+    assert "tests/cli/" in cli_task["implementation"][0]["prompt"]
+    assert any("API example" in item["name"] for item in api_task["acceptance"])
+    assert any("tests/api/" in item.get("guidance", "") for item in api_task["acceptance"])
+    assert "request" in api_task["implementation"][0]["prompt"]
 
 
 def test_init_project_creates_config_and_policy(tmp_path):
@@ -2022,6 +2105,325 @@ def test_drive_rolling_stops_when_continuation_is_exhausted(tmp_path):
     report = next((project / ".engineering/reports/tasks/drives").glob("*-drive.md"))
     text = report.read_text(encoding="utf-8")
     assert "no unmaterialized continuation stage remains" in text
+
+
+def self_iteration_guard_project(tmp_path: Path, *, max_stages_per_iteration: int = 1) -> tuple[Path, Path]:
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["continuation"] = {"enabled": True, "goal": "Continue autonomously.", "stages": []}
+    roadmap["self_iteration"] = {
+        "enabled": True,
+        "objective": "Add the next generated test stage.",
+        "max_stages_per_iteration": max_stages_per_iteration,
+        "planner": {"name": "test planner", "command": "python3 planner.py"},
+    }
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    return project, roadmap_path
+
+
+def valid_self_iteration_stage(stage_id: str = "guard-stage", task_id: str = "guard-task") -> dict:
+    return {
+        "id": stage_id,
+        "title": "Guard Stage",
+        "objective": "Add a locally verifiable generated task.",
+        "tasks": [
+            {
+                "id": task_id,
+                "title": "Guard Task",
+                "file_scope": ["src/**", "tests/**", "docs/**"],
+                "implementation": [
+                    {
+                        "name": "implement guard task",
+                        "executor": "codex",
+                        "prompt": "Implement the focused local guard task.",
+                    }
+                ],
+                "repair": [
+                    {
+                        "name": "repair guard task",
+                        "executor": "codex",
+                        "prompt": "Repair the focused local guard task if validation fails.",
+                    }
+                ],
+                "acceptance": [
+                    {
+                        "name": "local guard smoke",
+                        "command": "python3 -c \"print('guard ok')\"",
+                        "timeout_seconds": 30,
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def write_self_iteration_guard_planner(project: Path, stages: list[dict], *, mutation: str = "") -> None:
+    stages_json = json.dumps(stages, indent=2)
+    (project / "planner.py").write_text(
+        f"""
+import json
+from pathlib import Path
+
+roadmap_path = Path(".engineering/roadmap.yaml")
+roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+{mutation}
+continuation = roadmap.setdefault("continuation", {{"enabled": True, "goal": "Continue autonomously.", "stages": []}})
+continuation["enabled"] = True
+continuation.setdefault("stages", []).extend({stages_json})
+roadmap_path.write_text(json.dumps(roadmap, indent=2), encoding="utf-8")
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def self_iteration_context_pack_project(tmp_path: Path) -> tuple[Path, Path]:
+    project, roadmap_path = self_iteration_guard_project(tmp_path)
+    (project / "docs").mkdir(exist_ok=True)
+    (project / "docs/blueprint.md").write_text(
+        "# Blueprint\n\nBuild from local reports. OPENAI_API_KEY=sk-context-secret\n",
+        encoding="utf-8",
+    )
+    (project / "docs/operator.md").write_text("# Operator Notes\n\nUse local task reports.\n", encoding="utf-8")
+    (project / "src").mkdir(exist_ok=True)
+    (project / "src/app.py").write_text("def marker():\n    return 'context-pack'\n", encoding="utf-8")
+    (project / "tests").mkdir(exist_ok=True)
+    (project / "tests/test_app.py").write_text(
+        "def test_marker():\n    assert 'context' in 'context-pack'\n",
+        encoding="utf-8",
+    )
+
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["goal"] = {
+        "text": "Use current local reports to plan the next stage.",
+        "blueprint": "docs/blueprint.md",
+        "constraints": ["local-only"],
+    }
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0]["command"] = "python3 -c \"print('context manifest ok')\""
+    roadmap["self_iteration"]["planner"] = {
+        "name": "context pack planner",
+        "executor": "context-planner",
+        "prompt": "Read the context pack and append the next local stage.",
+    }
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    subprocess.run(["git", "init"], cwd=project, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "harness@example.invalid"], cwd=project, check=True)
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=project, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=project, check=True)
+    subprocess.run(["git", "commit", "-m", "initial context"], cwd=project, check=True, capture_output=True, text=True)
+
+    assert cli_main(["drive", "--project-root", str(project), "--max-tasks", "1", "--json"]) == 0
+    return project, roadmap_path
+
+
+def context_pack_stage(stage_id: str = "context-pack-stage", task_id: str = "context-pack-task") -> dict:
+    return {
+        "id": stage_id,
+        "title": "Context Pack Stage",
+        "objective": "Use the bounded planner context to add a local follow-up task.",
+        "tasks": [
+            {
+                "id": task_id,
+                "title": "Context Pack Task",
+                "file_scope": ["src/**", "tests/**", "docs/**"],
+                "acceptance": [
+                    {
+                        "name": "context pack task smoke",
+                        "command": "python3 -c \"print('context pack task ok')\"",
+                        "timeout_seconds": 30,
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def context_pack_planner_registry(captured: dict, stage_id: str = "context-pack-stage") -> ExecutorRegistry:
+    class ContextPackPlanner:
+        metadata = ExecutorMetadata(
+            id="context-planner",
+            name="Context Pack Planner",
+            kind="process",
+            adapter="test.context-pack-planner",
+            input_mode="prompt",
+            capabilities=("local_process", "stdout", "stderr"),
+        )
+
+        def display_command(self, invocation):
+            return "context-pack-planner <prompt>"
+
+        def execute(self, invocation):
+            prompt = invocation.prompt or ""
+            captured["prompt"] = prompt
+            context_line = next(line for line in prompt.splitlines() if line.startswith("Planner context pack:"))
+            context_path = Path(context_line.split(":", 1)[1].strip())
+            context = json.loads(context_path.read_text(encoding="utf-8"))
+            captured["context_path"] = context_path
+            captured["context"] = context
+
+            roadmap_path = invocation.project_root / ".engineering/roadmap.yaml"
+            roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+            roadmap.setdefault("continuation", {"enabled": True, "stages": []}).setdefault("stages", []).append(
+                context_pack_stage(stage_id=stage_id, task_id=f"{stage_id}-task")
+            )
+            roadmap_path.write_text(json.dumps(roadmap, indent=2), encoding="utf-8")
+            return ExecutorResult(
+                status="passed",
+                returncode=0,
+                started_at="2024-01-01T00:00:00Z",
+                finished_at="2024-01-01T00:00:01Z",
+                stdout="context planner ok",
+                stderr="",
+            )
+
+    return ExecutorRegistry((ShellExecutorAdapter(), ContextPackPlanner()))
+
+
+def test_self_iteration_context_pack_smoke(tmp_path):
+    project, roadmap_path = self_iteration_context_pack_project(tmp_path)
+    captured: dict = {}
+
+    result = Harness(project, executor_registry=context_pack_planner_registry(captured)).run_self_iteration(
+        reason="context-pack-smoke"
+    )
+
+    assert result["status"] == "planned"
+    assert "Planner context pack:" in captured["prompt"]
+    assert captured["context_path"] == project / result["context_pack"]["path"]
+    context = captured["context"]
+    assert context["kind"] == "engineering-harness.self-iteration-context-pack"
+    assert context["manifests"]["recent_task_manifests"]
+    assert context["reports"]["task_reports"]["files"]
+    assert context["reports"]["drive_reports"]["files"]
+    assert any(item["path"] == "tests/test_app.py" for item in context["test_inventory"]["files"])
+    assert any(item["path"] == "src/app.py" for item in context["source_inventory"]["files"])
+    assert context["docs"]["blueprint"]["path"] == "docs/blueprint.md"
+    assert "OPENAI_API_KEY=[REDACTED]" in context["docs"]["blueprint"]["excerpt"]
+    assert "sk-context-secret" not in json.dumps(context)
+    assert context["git"]["is_repository"] is True
+    assert context["git"]["recent_commits"]
+    assert context["git"]["status"]["returncode"] == 0
+    assert json.loads(roadmap_path.read_text(encoding="utf-8"))["continuation"]["stages"][0]["id"] == (
+        "context-pack-stage"
+    )
+
+
+def test_self_iteration_context_pack_snapshot_report_and_result(tmp_path):
+    project, _roadmap_path = self_iteration_context_pack_project(tmp_path)
+    captured: dict = {}
+
+    result = Harness(project, executor_registry=context_pack_planner_registry(captured, "context-pack-contract")).run_self_iteration(
+        reason="context-pack-contract"
+    )
+
+    context_path = project / result["context_pack"]["path"]
+    snapshot_path = project / result["snapshot"]
+    report_path = project / result["report"]
+    context = json.loads(context_path.read_text(encoding="utf-8"))
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    report = report_path.read_text(encoding="utf-8")
+
+    assert snapshot["context_pack"] == result["context_pack"]
+    assert snapshot["context_pack"]["summary"] == context["summary"]
+    assert result["context_pack"]["summary"]["recent_manifest_count"] >= 1
+    assert "## Planner Context Pack" in report
+    assert result["context_pack"]["path"] in report
+    assert '"manifest_count"' in report
+    assert context["summary"]["source_file_count"] >= 1
+
+
+def test_self_iteration_output_guard_accepts_valid_appended_stage(tmp_path):
+    project, roadmap_path = self_iteration_guard_project(tmp_path)
+    write_self_iteration_guard_planner(project, [valid_self_iteration_stage()])
+
+    result = Harness(project).run_self_iteration(reason="guard-test")
+
+    assert result["status"] == "planned"
+    assert result["validation"]["status"] == "passed"
+    assert result["validation"]["new_stage_ids"] == ["guard-stage"]
+    updated = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    assert [stage["id"] for stage in updated["continuation"]["stages"]] == ["guard-stage"]
+    report = Path(project, result["report"]).read_text(encoding="utf-8")
+    assert "## Output Validation" in report
+    assert "- Status: `passed`" in report
+
+
+def test_self_iteration_output_guard_rejects_too_many_new_stages_and_restores(tmp_path):
+    project, roadmap_path = self_iteration_guard_project(tmp_path, max_stages_per_iteration=1)
+    before = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    write_self_iteration_guard_planner(
+        project,
+        [
+            valid_self_iteration_stage("guard-stage-a", "guard-task-a"),
+            valid_self_iteration_stage("guard-stage-b", "guard-task-b"),
+        ],
+    )
+
+    result = Harness(project).run_self_iteration(reason="guard-test")
+
+    assert result["status"] == "rejected"
+    assert result["validation"]["status"] == "failed"
+    assert any("expected exactly 1 new continuation stage(s), found 2" in error for error in result["validation"]["errors"])
+    assert json.loads(roadmap_path.read_text(encoding="utf-8")) == before
+    assert "found 2" in Path(project, result["report"]).read_text(encoding="utf-8")
+
+
+def test_self_iteration_output_guard_rejects_malformed_task_gates_and_restores(tmp_path):
+    project, roadmap_path = self_iteration_guard_project(tmp_path)
+    before = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    stage = valid_self_iteration_stage()
+    task = stage["tasks"][0]
+    task.pop("file_scope")
+    task["acceptance"] = [{"name": "missing command"}]
+    task["repair"] = []
+    write_self_iteration_guard_planner(project, [stage])
+
+    result = Harness(project).run_self_iteration(reason="guard-test")
+
+    assert result["status"] == "rejected"
+    errors = "\n".join(result["validation"]["errors"])
+    assert "file_scope" in errors
+    assert "acceptance command" in errors
+    assert "codex repair" in errors
+    assert json.loads(roadmap_path.read_text(encoding="utf-8")) == before
+
+
+def test_self_iteration_output_guard_rejects_unsafe_requirements_and_restores(tmp_path):
+    project, roadmap_path = self_iteration_guard_project(tmp_path)
+    before = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    stage = valid_self_iteration_stage()
+    stage["tasks"][0]["acceptance"][0]["command"] = "python3 -c \"print('live')\" --live"
+    stage["tasks"][0]["implementation"][0]["prompt"] = "Deploy to production with a paid service."
+    write_self_iteration_guard_planner(project, [stage])
+
+    result = Harness(project).run_self_iteration(reason="guard-test")
+
+    assert result["status"] == "rejected"
+    errors = "\n".join(result["validation"]["errors"])
+    assert "unsafe command" in errors
+    assert "production deployment" in errors
+    assert "paid service" in errors
+    assert json.loads(roadmap_path.read_text(encoding="utf-8")) == before
+
+
+def test_self_iteration_output_guard_rejects_milestone_mutation_and_restores(tmp_path):
+    project, roadmap_path = self_iteration_guard_project(tmp_path)
+    before = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    write_self_iteration_guard_planner(
+        project,
+        [valid_self_iteration_stage()],
+        mutation="roadmap['milestones'][0]['tasks'][0]['status'] = 'done'",
+    )
+
+    result = Harness(project).run_self_iteration(reason="guard-test")
+
+    assert result["status"] == "rejected"
+    assert any("mutated existing milestones" in error for error in result["validation"]["errors"])
+    assert json.loads(roadmap_path.read_text(encoding="utf-8")) == before
 
 
 def test_self_iteration_shell_planner_adds_continuation_stage(tmp_path):

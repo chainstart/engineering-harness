@@ -59,12 +59,76 @@ The generated roadmap includes:
 - an ordered continuation backlog with a first local slice, experience validation, policy/evidence/
   observability hardening, and unattended drive readiness stages up to the configured stage count;
 - every generated continuation task includes `file_scope`, `codex` implementation and repair
-  entries, local acceptance commands, and local e2e gates tied to the experience plan;
+  entries, profile-aware local acceptance commands, and local e2e or journey-evidence gates tied to
+  the experience plan;
 - `self_iteration` guidance for profiles or goals that are likely to need rolling autonomous work.
 
 The implementation and repair gates are configured as gated `codex` executor entries so normal
 drives will require explicit `--allow-agent` approval before invoking an agent. Acceptance and e2e
 commands remain local shell checks.
+
+## Self-Iteration Safety Contract
+
+When `self_iteration` is enabled, planner output is treated as an untrusted roadmap diff. After the
+planner exits, the harness reloads `.engineering/roadmap.yaml` and accepts the output only when it:
+
+- appends exactly `self_iteration.max_stages_per_iteration` new unmaterialized
+  `continuation.stages` entries;
+- leaves existing roadmap fields, milestones, tasks, task statuses, and continuation stages unchanged;
+- avoids duplicate stage or task ids;
+- gives every new task non-empty `file_scope` and local acceptance commands;
+- includes `codex` implementation and `codex` repair entries for tasks that require implementation
+  work;
+- avoids live operations, private keys, mainnet writes, production deployments, paid services,
+  real-fund movement, and live trading requirements.
+
+Accepted output is then checked with the normal roadmap validator. Invalid output is rejected, the
+previous roadmap text is restored, and the self-iteration report records the validation errors.
+
+## Self-Iteration Planner Input
+
+Before a self-iteration planner runs, the harness writes a bounded JSON context pack next to the
+self-iteration snapshot under `.engineering/reports/tasks/assessments/`. The planner prompt includes
+both paths:
+
+- `Status snapshot`: the machine-readable status snapshot for the run.
+- `Planner context pack`: the bounded planner input contract.
+
+Planners should read the context pack first and use the roadmap file only for the final append. The
+context pack is local-only, redacted with the harness secret redaction helper, and capped by count and
+excerpt size. Its top-level fields are:
+
+- `summary`: compact counts for continuation stages, manifests, reports, docs, tests, source files,
+  git status lines, and recent commits.
+- `roadmap`: project/profile/goal metadata, task status counts, next task, continuation summary, and
+  capped continuation stage summaries.
+- `manifests`: latest manifest-index summary plus the most recent task-run manifest summaries.
+- `reports`: recent task report and drive report metadata.
+- `docs`: blueprint metadata and capped excerpts from relevant local docs.
+- `test_inventory` and `source_inventory`: capped local file inventories.
+- `git`: repository flag, branch/head, short status lines, and recent commits.
+
+The self-iteration snapshot and Markdown report both record the context-pack path and summary so an
+operator can audit exactly what the planner saw.
+
+## Generated Goal Gates
+
+Continuation tasks now put behavioral checks before the small roadmap contract smoke:
+
+- `python-agent` and `agent-monorepo` tasks start with `python3 -m pytest tests -q` and require a
+  local `tests/e2e` pytest journey check.
+- `node-frontend` tasks use npm-oriented gates such as `npm test` and `npm run e2e`, leaving the
+  generated implementation prompt to create or wire the local scripts.
+- `cli-only` and `api-only` experience plans add deterministic documented-example or local command
+  checks under `examples/`, `docs/examples/`, `tests/cli/`, `tests/api/`, or `tests/e2e/`.
+- Every generated task also requires local journey evidence or an executable journey check tied to
+  the selected `experience.e2e_journeys` entry, for example under `docs/e2e/`, `docs/evidence/`, or
+  `tests/e2e/`.
+
+The generated implementation prompt lists the exact acceptance and E2E commands plus candidate test,
+example, and evidence paths. Coding agents should create those local artifacts as part of the task,
+not replace the gates with external-account, paid-service, production-deployment, private-key,
+mainnet, real-fund, or live-trading checks.
 
 ## Safety Boundary
 
@@ -72,5 +136,6 @@ The planner reuses the local goal-intake validator. It rejects non-local bluepri
 requirements such as production deployment, mainnet writes, private key use, live trading, real-fund
 movement, and paid live services.
 
-The generated starter is intentionally conservative. Replace the template acceptance and e2e checks
-with project-specific tests as implementation details become clear.
+The generated starter is intentionally conservative. Tighten the generated acceptance and e2e checks
+with project-specific local tests as implementation details become clear, while preserving the
+local-only safety boundary.

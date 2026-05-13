@@ -193,6 +193,81 @@ EXPERIENCE_KEYWORDS: dict[str, tuple[str, ...]] = {
 }
 FRONTEND_TASK_MILESTONE_ID = "frontend-visualization"
 FRONTEND_TASK_GENERATOR = "engineering-harness-frontend-task-generator"
+SELF_ITERATION_CONTEXT_SCHEMA_VERSION = 1
+SELF_ITERATION_CONTEXT_LIMITS = {
+    "recent_manifest_count": 5,
+    "recent_report_count": 8,
+    "doc_count": 8,
+    "doc_excerpt_chars": 1200,
+    "test_file_count": 60,
+    "test_name_count": 20,
+    "source_file_count": 120,
+    "continuation_stage_count": 12,
+    "manifest_run_count": 8,
+    "message_chars": 500,
+    "git_commit_count": 8,
+}
+SELF_ITERATION_DOC_EXTENSIONS = {".md", ".markdown", ".rst", ".txt"}
+SELF_ITERATION_TEST_EXTENSIONS = {".py", ".js", ".jsx", ".ts", ".tsx", ".sh"}
+SELF_ITERATION_SOURCE_EXTENSIONS = {
+    ".py",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".go",
+    ".rs",
+    ".java",
+    ".kt",
+    ".c",
+    ".cc",
+    ".cpp",
+    ".h",
+    ".hpp",
+    ".cs",
+    ".rb",
+    ".php",
+    ".sh",
+}
+SELF_ITERATION_UNSAFE_REQUIREMENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "private credential use",
+        re.compile(
+            r"\b(?:use|configure|require|load|import|set|provide|read)\s+"
+            r"(?:a\s+)?(?:private\s+keys?|mnemonics?|seed\s+phrases?|api\s+keys?)\b"
+        ),
+    ),
+    (
+        "private credential assignment",
+        re.compile(r"\b(?:PRIVATE_KEY|MNEMONIC|OPENAI_API_KEY|ANTHROPIC_API_KEY)\s*=", re.IGNORECASE),
+    ),
+    (
+        "mainnet write",
+        re.compile(
+            r"\b(?:cast\s+send|deploy:mainnet|--broadcast|--rpc-url\s+mainnet|"
+            r"mainnet\s+(?:write|transaction|deploy|deployment|release))\b"
+        ),
+    ),
+    ("production deployment", re.compile(r"\bdeploy(?:ment)?\s+(?:to\s+)?(?:production|prod|mainnet)\b")),
+    ("production deployment", re.compile(r"\b(?:production|prod|mainnet)\s+(?:deploy|deployment|release)\b")),
+    (
+        "production service mutation",
+        re.compile(
+            r"\b(?:call|write\s+to|mutate|modify)\s+(?:the\s+)?(?:production|prod|live)\s+"
+            r"(?:api|service|database|system)\b"
+        ),
+    ),
+    ("live operation", re.compile(r"\b--live\b|\blive\s+(?:deployment|service|trading|orders?|trades?)\b")),
+    ("live operation", re.compile(r"\b(?:place|submit|send|execute)\s+(?:real|live)\s+(?:orders?|trades?)\b")),
+    (
+        "real-fund movement",
+        re.compile(
+            r"\b(?:withdraw|transfer|move)\s+real\s+(?:funds|money)\b|"
+            r"\breal[- ]?fund\s+(?:transfer|withdrawal|payment)\b"
+        ),
+    ),
+    ("paid service", re.compile(r"\bpaid[- ]?(?:service|services|account|accounts|hosting|deployment|api|subscription)\b")),
+)
 FRONTEND_KIND_LABELS = {
     "dashboard": "operator dashboard",
     "submission-review": "submission review workflow",
@@ -348,10 +423,22 @@ def slug_now() -> str:
 def redact(text: str) -> str:
     redacted = text
     for marker in ("PRIVATE_KEY=", "OPENAI_API_KEY=", "ANTHROPIC_API_KEY=", "MNEMONIC="):
-        while marker in redacted:
-            before, _, after = redacted.partition(marker)
+        cursor = 0
+        while True:
+            index = redacted.find(marker, cursor)
+            if index < 0:
+                break
+            token_start = index + len(marker)
+            if redacted.startswith("[REDACTED]", token_start):
+                cursor = token_start + len("[REDACTED]")
+                continue
+            after = redacted[token_start:]
             token = after.split()[0] if after.split() else ""
-            redacted = before + marker + "[REDACTED]" + after[len(token) :]
+            if not token:
+                cursor = token_start
+                continue
+            redacted = redacted[:token_start] + "[REDACTED]" + redacted[token_start + len(token) :]
+            cursor = token_start + len("[REDACTED]")
     return redacted
 
 
@@ -1316,19 +1403,35 @@ class Harness:
                 "report": None,
             }
 
+        before_roadmap = deepcopy(self.roadmap)
+        before_roadmap_text = self.roadmap_path.read_text(encoding="utf-8")
         before = self.continuation_summary()
+        expected_new_stages = max(1, int(config.get("max_stages_per_iteration", 1)))
+        assessment_dir = self.report_dir / "assessments"
+        assessment_dir.mkdir(parents=True, exist_ok=True)
+        assessment_slug = slug_now()
+        snapshot_path = assessment_dir / f"{assessment_slug}-self-iteration-snapshot.json"
+        context_path = assessment_dir / f"{assessment_slug}-self-iteration-context.json"
+        report_path = assessment_dir / f"{assessment_slug}-self-iteration.md"
+        context_pack = self._self_iteration_context_pack(
+            reason=reason,
+            snapshot_path=snapshot_path,
+            context_path=context_path,
+        )
+        write_json(context_path, context_pack)
+        context_info = {
+            "path": str(context_path.relative_to(self.project_root)),
+            "summary": context_pack["summary"],
+        }
         snapshot = {
             "generated_at": utc_now(),
             "reason": reason,
             "status": self.status_summary(),
             "recent_git": self._git(["log", "--oneline", "-8"]),
             "git_status": self._git(["status", "--short"]),
+            "context_pack": context_info,
         }
-        assessment_dir = self.report_dir / "assessments"
-        assessment_dir.mkdir(parents=True, exist_ok=True)
-        snapshot_path = assessment_dir / f"{slug_now()}-self-iteration-snapshot.json"
         write_json(snapshot_path, snapshot)
-        report_path = assessment_dir / f"{slug_now()}-self-iteration.md"
 
         command = self._parse_task_commands([planner], default_name="self-iteration-planner")[0]
         executor = self.executor_registry.get(command.executor)
@@ -1346,7 +1449,15 @@ class Harness:
                 executor=command.executor,
                 executor_metadata=self.executor_registry.metadata_for(command.executor),
             )
-            self._write_self_iteration_report(report_path, reason, snapshot_path, before, before, run)
+            self._write_self_iteration_report(
+                report_path,
+                reason,
+                snapshot_path,
+                before,
+                before,
+                run,
+                context_pack=context_info,
+            )
             return {
                 "status": "blocked",
                 "message": f"unknown executor: {command.executor}",
@@ -1354,6 +1465,8 @@ class Harness:
                 "stage_count_after": before["stage_count"],
                 "pending_stage_count_after": before["pending_stage_count"],
                 "report": str(report_path.relative_to(self.project_root)),
+                "snapshot": str(snapshot_path.relative_to(self.project_root)),
+                "context_pack": context_info,
             }
         if executor.metadata.requires_agent_approval and not allow_agent:
             block_reason = f"{command.executor} planner requires --allow-agent"
@@ -1370,7 +1483,15 @@ class Harness:
                 executor=command.executor,
                 executor_metadata=executor.metadata.as_contract(),
             )
-            self._write_self_iteration_report(report_path, reason, snapshot_path, before, before, run)
+            self._write_self_iteration_report(
+                report_path,
+                reason,
+                snapshot_path,
+                before,
+                before,
+                run,
+                context_pack=context_info,
+            )
             return {
                 "status": "blocked",
                 "message": block_reason,
@@ -1378,6 +1499,8 @@ class Harness:
                 "stage_count_after": before["stage_count"],
                 "pending_stage_count_after": before["pending_stage_count"],
                 "report": str(report_path.relative_to(self.project_root)),
+                "snapshot": str(snapshot_path.relative_to(self.project_root)),
+                "context_pack": context_info,
             }
         if executor.metadata.uses_command_policy:
             allowed, block_reason = self.command_allowed(command.command, allow_live=allow_live)
@@ -1395,7 +1518,15 @@ class Harness:
                     executor=command.executor,
                     executor_metadata=executor.metadata.as_contract(),
                 )
-                self._write_self_iteration_report(report_path, reason, snapshot_path, before, before, run)
+                self._write_self_iteration_report(
+                    report_path,
+                    reason,
+                    snapshot_path,
+                    before,
+                    before,
+                    run,
+                    context_pack=context_info,
+                )
                 return {
                     "status": "blocked",
                     "message": block_reason,
@@ -1403,26 +1534,78 @@ class Harness:
                     "stage_count_after": before["stage_count"],
                     "pending_stage_count_after": before["pending_stage_count"],
                     "report": str(report_path.relative_to(self.project_root)),
+                    "snapshot": str(snapshot_path.relative_to(self.project_root)),
+                    "context_pack": context_info,
                 }
 
-        planner_prompt = self._self_iteration_prompt(config, snapshot_path)
+        planner_prompt = self._self_iteration_prompt(config, snapshot_path, context_path)
         planner_task = self._self_iteration_task(command, snapshot_path, planner_prompt)
         command = replace(command, prompt=planner_prompt)
         run = self._run_command(command, phase="self-iteration", task=planner_task)
 
-        self.roadmap = load_mapping(self.roadmap_path)
-        after = self.continuation_summary()
+        observed_after = before
+        validation: dict[str, Any]
         if run.returncode != 0:
             status = "failed"
             message = f"self-iteration planner failed: {command.name}"
-        elif after["stage_count"] > before["stage_count"] or after["pending_stage_count"] > before["pending_stage_count"]:
-            status = "planned"
-            message = "self-iteration planner added continuation stage(s)"
         else:
-            status = "stalled"
-            message = "self-iteration planner did not add continuation stages"
+            try:
+                after_roadmap = load_mapping(self.roadmap_path)
+            except Exception as exc:
+                validation = self._self_iteration_validation_result(
+                    status="failed",
+                    errors=[f"planner output is not a readable roadmap mapping: {exc}"],
+                    warnings=[],
+                    expected_new_stage_count=expected_new_stages,
+                    actual_new_stage_count=0,
+                    new_stage_ids=[],
+                )
+                self.roadmap_path.write_text(before_roadmap_text, encoding="utf-8")
+                self.roadmap = deepcopy(before_roadmap)
+                status = "rejected"
+                message = "self-iteration planner output failed validation"
+            else:
+                self.roadmap = after_roadmap
+                observed_after = self.continuation_summary()
+                validation = self._validate_self_iteration_output(
+                    before_roadmap,
+                    after_roadmap,
+                    expected_new_stage_count=expected_new_stages,
+                )
+                if validation["status"] == "passed":
+                    status = "planned"
+                    count = len(validation.get("new_stage_ids", []))
+                    message = f"self-iteration planner added {count} validated continuation stage(s)"
+                else:
+                    self.roadmap_path.write_text(before_roadmap_text, encoding="utf-8")
+                    self.roadmap = deepcopy(before_roadmap)
+                    status = "rejected"
+                    message = "self-iteration planner output failed validation"
 
-        self._write_self_iteration_report(report_path, reason, snapshot_path, before, after, run)
+        if run.returncode != 0:
+            self.roadmap_path.write_text(before_roadmap_text, encoding="utf-8")
+            self.roadmap = deepcopy(before_roadmap)
+            validation = self._self_iteration_validation_result(
+                status="skipped",
+                errors=[],
+                warnings=["planner command failed; output was restored and not validated"],
+                expected_new_stage_count=expected_new_stages,
+                actual_new_stage_count=0,
+                new_stage_ids=[],
+            )
+
+        final_after = self.continuation_summary()
+
+        self._write_self_iteration_report(
+            report_path,
+            reason,
+            snapshot_path,
+            before,
+            observed_after,
+            run,
+            validation=validation,
+            context_pack=context_info,
+        )
         append_jsonl(
             self.decision_log_path,
             {
@@ -1432,18 +1615,24 @@ class Harness:
                 "status": status,
                 "message": message,
                 "stage_count_before": before["stage_count"],
-                "stage_count_after": after["stage_count"],
-                "pending_stage_count_after": after["pending_stage_count"],
+                "stage_count_after": final_after["stage_count"],
+                "pending_stage_count_after": final_after["pending_stage_count"],
+                "validation": validation,
                 "report": str(report_path.relative_to(self.project_root)),
+                "snapshot": str(snapshot_path.relative_to(self.project_root)),
+                "context_pack": context_info,
             },
         )
         return {
             "status": status,
             "message": message,
             "stage_count_before": before["stage_count"],
-            "stage_count_after": after["stage_count"],
-            "pending_stage_count_after": after["pending_stage_count"],
+            "stage_count_after": final_after["stage_count"],
+            "pending_stage_count_after": final_after["pending_stage_count"],
             "report": str(report_path.relative_to(self.project_root)),
+            "snapshot": str(snapshot_path.relative_to(self.project_root)),
+            "context_pack": context_info,
+            "validation": validation,
             "run": {
                 "name": run.name,
                 "command": run.command,
@@ -1451,6 +1640,836 @@ class Harness:
                 "returncode": run.returncode,
             },
         }
+
+    def _self_iteration_context_pack(
+        self,
+        *,
+        reason: str,
+        snapshot_path: Path,
+        context_path: Path,
+    ) -> dict[str, Any]:
+        roadmap_context = self._self_iteration_roadmap_context()
+        manifest_context = self._self_iteration_manifest_context()
+        report_context = self._self_iteration_report_context()
+        docs_context = self._self_iteration_docs_context()
+        test_inventory = self._self_iteration_test_inventory()
+        source_inventory = self._self_iteration_source_inventory()
+        git_context = self._self_iteration_git_context()
+        summary = {
+            "project": roadmap_context.get("project"),
+            "roadmap_path": roadmap_context.get("path"),
+            "continuation_stage_count": roadmap_context.get("continuation", {}).get("stage_count", 0),
+            "pending_stage_count": roadmap_context.get("continuation", {}).get("pending_stage_count", 0),
+            "manifest_count": manifest_context.get("index", {}).get("manifest_count", 0),
+            "recent_manifest_count": len(manifest_context.get("recent_task_manifests", [])),
+            "task_report_count": report_context.get("task_reports", {}).get("total_count", 0),
+            "drive_report_count": report_context.get("drive_reports", {}).get("total_count", 0),
+            "doc_count": docs_context.get("relevant_docs", {}).get("included_count", 0),
+            "test_file_count": test_inventory.get("included_count", 0),
+            "source_file_count": source_inventory.get("included_count", 0),
+            "git_is_repository": git_context.get("is_repository", False),
+            "git_status_line_count": len(git_context.get("status_lines", [])),
+            "recent_commit_count": len(git_context.get("recent_commits", [])),
+        }
+        payload: dict[str, Any] = {
+            "schema_version": SELF_ITERATION_CONTEXT_SCHEMA_VERSION,
+            "kind": "engineering-harness.self-iteration-context-pack",
+            "reason": reason,
+            "project_root": str(self.project_root),
+            "snapshot_path": str(snapshot_path.relative_to(self.project_root)),
+            "context_path": str(context_path.relative_to(self.project_root)),
+            "limits": dict(SELF_ITERATION_CONTEXT_LIMITS),
+            "summary": summary,
+            "roadmap": roadmap_context,
+            "manifests": manifest_context,
+            "reports": report_context,
+            "docs": docs_context,
+            "test_inventory": test_inventory,
+            "source_inventory": source_inventory,
+            "git": git_context,
+        }
+        return self._redact_context_value(payload)
+
+    def _self_iteration_roadmap_context(self) -> dict[str, Any]:
+        milestones = self.roadmap.get("milestones", [])
+        if not isinstance(milestones, list):
+            milestones = []
+        continuation = self.continuation_summary()
+        continuation_config = self.roadmap.get("continuation") if isinstance(self.roadmap.get("continuation"), dict) else {}
+        continuation_stages = continuation_config.get("stages", []) if isinstance(continuation_config, dict) else []
+        if not isinstance(continuation_stages, list):
+            continuation_stages = []
+        state = self.load_state()
+        task_states = state.get("tasks", {}) if isinstance(state.get("tasks"), dict) else {}
+        tasks = list(self.iter_tasks())
+        task_status_counts: dict[str, int] = {}
+        for task in tasks:
+            task_state = task_states.get(task.id, {}) if isinstance(task_states.get(task.id), dict) else {}
+            status = str(task_state.get("status", task.status))
+            task_status_counts[status] = task_status_counts.get(status, 0) + 1
+        goal = self.roadmap.get("goal") if isinstance(self.roadmap.get("goal"), dict) else {}
+        generated_from = self.roadmap.get("generated_from") if isinstance(self.roadmap.get("generated_from"), dict) else {}
+        return {
+            "path": self._project_relative_path(self.roadmap_path),
+            "project": str(self.roadmap.get("project", self.project_root.name)),
+            "profile": self.roadmap.get("profile"),
+            "generated_by": self.roadmap.get("generated_by"),
+            "goal": {
+                "text": self._truncate_text(str(goal.get("text") or generated_from.get("goal") or ""), 500),
+                "blueprint": goal.get("blueprint") or generated_from.get("blueprint_path"),
+                "constraints": self._string_items(goal.get("constraints")) if isinstance(goal, dict) else [],
+            },
+            "milestone_count": len(milestones),
+            "task_count": len(tasks),
+            "task_status_counts": dict(sorted(task_status_counts.items())),
+            "next_task": self.task_payload(self.next_task()),
+            "continuation": {
+                **continuation,
+                "stages": [
+                    self._self_iteration_stage_summary(stage)
+                    for stage in continuation_stages[: SELF_ITERATION_CONTEXT_LIMITS["continuation_stage_count"]]
+                    if isinstance(stage, dict)
+                ],
+                "stage_count_truncated": len(continuation_stages)
+                > SELF_ITERATION_CONTEXT_LIMITS["continuation_stage_count"],
+            },
+            "self_iteration": self.self_iteration_summary(),
+        }
+
+    def _self_iteration_stage_summary(self, stage: dict[str, Any]) -> dict[str, Any]:
+        tasks = stage.get("tasks", [])
+        if not isinstance(tasks, list):
+            tasks = []
+        return {
+            "id": str(stage.get("id", "")),
+            "title": str(stage.get("title", "")),
+            "status": str(stage.get("status", "planned")),
+            "objective": self._truncate_text(str(stage.get("objective", "")), 500),
+            "task_count": len(tasks),
+            "tasks": [
+                {
+                    "id": str(task.get("id", "")),
+                    "title": str(task.get("title", "")),
+                    "status": str(task.get("status", "pending")),
+                    "file_scope": [str(scope) for scope in task.get("file_scope", [])]
+                    if isinstance(task.get("file_scope"), list)
+                    else [],
+                    "acceptance_count": len(task.get("acceptance", [])) if isinstance(task.get("acceptance"), list) else 0,
+                    "e2e_count": len(task.get("e2e", [])) if isinstance(task.get("e2e"), list) else 0,
+                }
+                for task in tasks[:8]
+                if isinstance(task, dict)
+            ],
+            "task_count_truncated": len(tasks) > 8,
+        }
+
+    def _self_iteration_manifest_context(self) -> dict[str, Any]:
+        index = self._build_manifest_index()
+        recent_entries = list(reversed(index.get("manifests", [])))[: SELF_ITERATION_CONTEXT_LIMITS["recent_manifest_count"]]
+        recent_manifests = []
+        for entry in recent_entries:
+            manifest_path = self.project_root / str(entry.get("manifest_path", ""))
+            try:
+                manifest = load_mapping(manifest_path)
+            except Exception as exc:
+                recent_manifests.append(
+                    {
+                        **entry,
+                        "load_error": self._truncate_text(str(exc), SELF_ITERATION_CONTEXT_LIMITS["message_chars"]),
+                    }
+                )
+                continue
+            recent_manifests.append(self._self_iteration_manifest_summary(entry, manifest))
+        return {
+            "index": {
+                "path": index.get("manifest_index_path"),
+                "manifest_count": index.get("manifest_count", 0),
+                "latest_manifest": index.get("latest_manifest"),
+                "latest_by_task": index.get("latest_by_task", {}),
+                "status_counts": index.get("status_counts", {}),
+                "policy_decision_summary": index.get("policy_decision_summary", {}),
+            },
+            "recent_task_manifests": recent_manifests,
+        }
+
+    def _self_iteration_manifest_summary(self, entry: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
+        runs = manifest.get("runs", []) if isinstance(manifest.get("runs"), list) else []
+        git = manifest.get("git", {}) if isinstance(manifest.get("git"), dict) else {}
+        return {
+            "manifest_path": entry.get("manifest_path") or manifest.get("manifest_path"),
+            "report_path": entry.get("report_path") or manifest.get("report_path"),
+            "task_id": entry.get("task_id") or manifest.get("task_id"),
+            "task_title": entry.get("task_title"),
+            "milestone_id": entry.get("milestone_id") or manifest.get("milestone_id"),
+            "status": entry.get("status") or manifest.get("status"),
+            "message": self._truncate_text(
+                str(manifest.get("message", "")),
+                SELF_ITERATION_CONTEXT_LIMITS["message_chars"],
+            ),
+            "started_at": manifest.get("started_at"),
+            "finished_at": manifest.get("finished_at"),
+            "attempt": manifest.get("attempt"),
+            "run_count": len(runs),
+            "policy_decision_summary": manifest.get("policy_decision_summary", {}),
+            "runs": [
+                {
+                    "phase": str(run.get("phase", "")),
+                    "name": str(run.get("name", "")),
+                    "executor": str(run.get("executor", "")),
+                    "status": str(run.get("status", "")),
+                    "returncode": run.get("returncode"),
+                }
+                for run in runs[: SELF_ITERATION_CONTEXT_LIMITS["manifest_run_count"]]
+                if isinstance(run, dict)
+            ],
+            "run_count_truncated": len(runs) > SELF_ITERATION_CONTEXT_LIMITS["manifest_run_count"],
+            "git": {
+                "is_repository": bool(git.get("is_repository", False)),
+                "branch": git.get("branch"),
+                "head": git.get("head"),
+                "short_head": git.get("short_head"),
+            },
+        }
+
+    def _self_iteration_report_context(self) -> dict[str, Any]:
+        task_reports = self._self_iteration_recent_reports(self.report_dir.glob("*.md"))
+        drive_reports = self._self_iteration_recent_reports((self.report_dir / "drives").glob("*.md"))
+        return {
+            "task_reports": task_reports,
+            "drive_reports": drive_reports,
+        }
+
+    def _self_iteration_recent_reports(self, paths: Any) -> dict[str, Any]:
+        report_paths = sorted(
+            [path for path in paths if isinstance(path, Path) and path.is_file()],
+            key=self._project_relative_path,
+        )
+        recent = list(reversed(report_paths))[: SELF_ITERATION_CONTEXT_LIMITS["recent_report_count"]]
+        return {
+            "total_count": len(report_paths),
+            "included_count": len(recent),
+            "files": [self._self_iteration_report_file_summary(path) for path in recent],
+        }
+
+    def _self_iteration_report_file_summary(self, path: Path) -> dict[str, Any]:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = None
+        return {
+            "path": self._project_relative_path(path),
+            "bytes": size,
+            "title": self._markdown_title(path),
+        }
+
+    def _self_iteration_docs_context(self) -> dict[str, Any]:
+        blueprint = self._self_iteration_blueprint_context()
+        blueprint_path = str(blueprint.get("path") or "")
+        docs = self._self_iteration_doc_paths()
+        docs.sort(key=lambda path: self._self_iteration_doc_sort_key(path, blueprint_path))
+        included = docs[: SELF_ITERATION_CONTEXT_LIMITS["doc_count"]]
+        return {
+            "blueprint": blueprint,
+            "relevant_docs": {
+                "total_count": len(docs),
+                "included_count": len(included),
+                "files": [self._self_iteration_doc_summary(path) for path in included],
+            },
+        }
+
+    def _self_iteration_blueprint_context(self) -> dict[str, Any]:
+        path_value = self._self_iteration_blueprint_value()
+        if not path_value:
+            return {"path": None, "exists": False, "excerpt": ""}
+        candidate = self._self_iteration_project_path(path_value)
+        if candidate is None:
+            return {"path": str(path_value), "exists": False, "error": "blueprint path is outside the project root"}
+        payload = {
+            "path": self._project_relative_path(candidate),
+            "exists": candidate.exists() and candidate.is_file(),
+        }
+        if payload["exists"]:
+            payload.update(self._text_excerpt_payload(candidate, SELF_ITERATION_CONTEXT_LIMITS["doc_excerpt_chars"]))
+        return payload
+
+    def _self_iteration_blueprint_value(self) -> str | None:
+        for container_name, key in (
+            ("goal", "blueprint"),
+            ("generated_from", "blueprint_path"),
+            ("continuation", "blueprint"),
+        ):
+            container = self.roadmap.get(container_name)
+            if isinstance(container, dict):
+                value = container.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return None
+
+    def _self_iteration_doc_paths(self) -> list[Path]:
+        docs = self._iter_project_files(("docs",), extensions=SELF_ITERATION_DOC_EXTENSIONS)
+        for readme_name in ("README.md", "README.rst", "README.txt"):
+            readme = self.project_root / readme_name
+            if readme.exists() and readme.is_file():
+                docs.append(readme)
+        unique = {self._project_relative_path(path): path for path in docs}
+        return [unique[key] for key in sorted(unique)]
+
+    def _self_iteration_doc_sort_key(self, path: Path, blueprint_path: str) -> tuple[int, str]:
+        relative = self._project_relative_path(path)
+        lowered = relative.lower()
+        if blueprint_path and relative == blueprint_path:
+            priority = 0
+        elif Path(relative).name.lower().startswith("readme"):
+            priority = 1
+        elif any(keyword in lowered for keyword in ("blueprint", "roadmap", "planner", "plan", "contract", "design")):
+            priority = 2
+        else:
+            priority = 3
+        return (priority, relative)
+
+    def _self_iteration_doc_summary(self, path: Path) -> dict[str, Any]:
+        payload = self._text_excerpt_payload(path, SELF_ITERATION_CONTEXT_LIMITS["doc_excerpt_chars"])
+        return {
+            "path": self._project_relative_path(path),
+            "bytes": payload.get("bytes"),
+            "excerpt": payload.get("excerpt", ""),
+            "excerpt_truncated": payload.get("excerpt_truncated", False),
+        }
+
+    def _self_iteration_test_inventory(self) -> dict[str, Any]:
+        files = self._iter_project_files(("tests",), extensions=SELF_ITERATION_TEST_EXTENSIONS)
+        included = files[: SELF_ITERATION_CONTEXT_LIMITS["test_file_count"]]
+        return {
+            "total_count": len(files),
+            "included_count": len(included),
+            "files": [self._self_iteration_test_file_summary(path) for path in included],
+        }
+
+    def _self_iteration_test_file_summary(self, path: Path) -> dict[str, Any]:
+        names = self._test_names(path)
+        return {
+            "path": self._project_relative_path(path),
+            "bytes": self._file_size(path),
+            "test_count": len(names),
+            "tests": names[: SELF_ITERATION_CONTEXT_LIMITS["test_name_count"]],
+            "test_count_truncated": len(names) > SELF_ITERATION_CONTEXT_LIMITS["test_name_count"],
+        }
+
+    def _self_iteration_source_inventory(self) -> dict[str, Any]:
+        files = self._iter_project_files(
+            ("src", "app", "lib", "packages", "cli"),
+            extensions=SELF_ITERATION_SOURCE_EXTENSIONS,
+        )
+        for path in self.project_root.iterdir():
+            if not path.is_file() or path.suffix.lower() not in SELF_ITERATION_SOURCE_EXTENSIONS:
+                continue
+            files.append(path)
+        unique = {self._project_relative_path(path): path for path in files}
+        files = [unique[key] for key in sorted(unique)]
+        included = files[: SELF_ITERATION_CONTEXT_LIMITS["source_file_count"]]
+        return {
+            "total_count": len(files),
+            "included_count": len(included),
+            "files": [
+                {
+                    "path": self._project_relative_path(path),
+                    "bytes": self._file_size(path),
+                }
+                for path in included
+            ],
+        }
+
+    def _self_iteration_git_context(self) -> dict[str, Any]:
+        context: dict[str, Any] = {
+            "is_repository": False,
+            "root": None,
+            "branch": None,
+            "head": None,
+            "short_head": None,
+            "status": {"returncode": None, "stdout": "", "stderr": ""},
+            "status_lines": [],
+            "recent_commits": [],
+        }
+        if not self._is_git_repo():
+            return context
+        root = self._git(["rev-parse", "--show-toplevel"])
+        head = self._git(["rev-parse", "HEAD"])
+        short_head = self._git(["rev-parse", "--short", "HEAD"])
+        status = self._git(["status", "--short"])
+        commits = self._git(["log", "--oneline", f"-{SELF_ITERATION_CONTEXT_LIMITS['git_commit_count']}"])
+        context.update(
+            {
+                "is_repository": True,
+                "root": root["stdout"].strip() if root["returncode"] == 0 else None,
+                "branch": self._current_branch(),
+                "head": head["stdout"].strip() if head["returncode"] == 0 else None,
+                "short_head": short_head["stdout"].strip() if short_head["returncode"] == 0 else None,
+                "status": status,
+                "status_lines": [line for line in status["stdout"].splitlines() if line.strip()],
+                "recent_commits": [line for line in commits["stdout"].splitlines() if line.strip()],
+            }
+        )
+        return context
+
+    def _iter_project_files(self, roots: tuple[str, ...], *, extensions: set[str]) -> list[Path]:
+        files: dict[str, Path] = {}
+        for root_name in roots:
+            root = self.project_root / root_name
+            if root.is_file():
+                candidates = [root]
+            elif root.exists():
+                candidates = [path for path in root.rglob("*") if path.is_file()]
+            else:
+                candidates = []
+            for path in candidates:
+                relative = path.relative_to(self.project_root)
+                if any(part in PRUNE_DIRS or part == ".engineering" for part in relative.parts):
+                    continue
+                if path.suffix.lower() not in extensions:
+                    continue
+                files[str(relative)] = path
+        return [files[key] for key in sorted(files)]
+
+    def _self_iteration_project_path(self, path_value: str) -> Path | None:
+        if "://" in path_value:
+            return None
+        path = Path(path_value)
+        candidate = path if path.is_absolute() else self.project_root / path
+        try:
+            resolved = candidate.resolve(strict=False)
+        except OSError:
+            return None
+        if not resolved.is_relative_to(self.project_root):
+            return None
+        return resolved
+
+    def _text_excerpt_payload(self, path: Path, max_chars: int) -> dict[str, Any]:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = None
+        try:
+            with path.open("r", encoding="utf-8", errors="ignore") as handle:
+                text = handle.read(max_chars + 1)
+        except OSError as exc:
+            return {
+                "bytes": size,
+                "excerpt": "",
+                "excerpt_truncated": False,
+                "read_error": self._truncate_text(str(exc), SELF_ITERATION_CONTEXT_LIMITS["message_chars"]),
+            }
+        return {
+            "bytes": size,
+            "excerpt": self._truncate_text(text, max_chars),
+            "excerpt_truncated": len(text) > max_chars,
+        }
+
+    def _markdown_title(self, path: Path) -> str:
+        try:
+            with path.open("r", encoding="utf-8", errors="ignore") as handle:
+                text = handle.read(4096)
+        except OSError:
+            return ""
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped:
+                return self._truncate_text(stripped.lstrip("#").strip(), 160)
+        return ""
+
+    def _test_names(self, path: Path) -> list[str]:
+        try:
+            with path.open("r", encoding="utf-8", errors="ignore") as handle:
+                text = handle.read(20000)
+        except OSError:
+            return []
+        names = [
+            match.group(1)
+            for match in re.finditer(r"^\s*(?:async\s+)?def\s+(test_[A-Za-z0-9_]+)\s*\(", text, re.MULTILINE)
+        ]
+        names.extend(
+            match.group(2)
+            for match in re.finditer(r"^\s*(?:test|it)\s*\(\s*(['\"])(.*?)\1", text, re.MULTILINE)
+        )
+        return [name for name in names if name]
+
+    def _file_size(self, path: Path) -> int | None:
+        try:
+            return path.stat().st_size
+        except OSError:
+            return None
+
+    def _truncate_text(self, text: str, max_chars: int) -> str:
+        text = redact(text)
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars] + "\n...[truncated]"
+
+    def _redact_context_value(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {str(key): self._redact_context_value(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._redact_context_value(item) for item in value]
+        if isinstance(value, tuple):
+            return [self._redact_context_value(item) for item in value]
+        if isinstance(value, str):
+            return redact(value)
+        return value
+
+    def _self_iteration_validation_result(
+        self,
+        *,
+        status: str,
+        errors: list[str],
+        warnings: list[str],
+        expected_new_stage_count: int,
+        actual_new_stage_count: int,
+        new_stage_ids: list[str],
+        roadmap_validation: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "status": status,
+            "error_count": len(errors),
+            "warning_count": len(warnings),
+            "errors": errors,
+            "warnings": warnings,
+            "expected_new_stage_count": expected_new_stage_count,
+            "actual_new_stage_count": actual_new_stage_count,
+            "new_stage_ids": new_stage_ids,
+            "roadmap_validation": roadmap_validation,
+        }
+
+    def _validate_self_iteration_output(
+        self,
+        before_roadmap: dict[str, Any],
+        after_roadmap: dict[str, Any],
+        *,
+        expected_new_stage_count: int,
+    ) -> dict[str, Any]:
+        errors: list[str] = []
+        warnings: list[str] = []
+        before_stages = self._self_iteration_continuation_stages(
+            before_roadmap,
+            location="previous roadmap continuation.stages",
+            errors=errors,
+        )
+        after_stages = self._self_iteration_continuation_stages(
+            after_roadmap,
+            location="planner output continuation.stages",
+            errors=errors,
+        )
+        existing_stage_count = len(before_stages)
+        if len(after_stages) < existing_stage_count:
+            errors.append("planner output removed existing continuation stages")
+            new_stages: list[Any] = []
+        else:
+            existing_prefix = after_stages[:existing_stage_count]
+            if existing_prefix != before_stages:
+                errors.append("planner output mutated existing continuation stages; only appends are allowed")
+            new_stages = after_stages[existing_stage_count:]
+
+        if self._self_iteration_without_new_stages(after_roadmap, existing_stage_count) != before_roadmap:
+            if after_roadmap.get("milestones", []) != before_roadmap.get("milestones", []):
+                errors.append("planner output mutated existing milestones; only continuation.stages may be appended")
+            else:
+                errors.append("planner output changed existing roadmap fields; only continuation.stages may be appended")
+
+        new_stage_ids: list[str] = []
+        if len(new_stages) != expected_new_stage_count:
+            errors.append(
+                f"expected exactly {expected_new_stage_count} new continuation stage(s), found {len(new_stages)}"
+            )
+
+        existing_ids = self._self_iteration_existing_ids(before_roadmap)
+        seen_new_ids: set[str] = set()
+        materialized_stage_ids = self._self_iteration_milestone_ids(after_roadmap)
+        for offset, stage in enumerate(new_stages):
+            stage_index = existing_stage_count + offset
+            location = f"continuation.stages[{stage_index}]"
+            if not isinstance(stage, dict):
+                errors.append(f"{location} must be a mapping")
+                continue
+            stage_id = str(stage.get("id", "")).strip()
+            if not stage_id:
+                errors.append(f"{location}.id is required")
+            else:
+                new_stage_ids.append(stage_id)
+                if stage_id in existing_ids:
+                    errors.append(f"new continuation stage id duplicates an existing id: {stage_id}")
+                if stage_id in seen_new_ids:
+                    errors.append(f"duplicate new continuation id: {stage_id}")
+                if stage_id in materialized_stage_ids:
+                    errors.append(f"new continuation stage `{stage_id}` was also materialized as a milestone")
+                seen_new_ids.add(stage_id)
+            stage_status = str(stage.get("status", "planned")).strip()
+            if stage_status and stage_status not in {"planned", "pending"}:
+                errors.append(f"new continuation stage `{stage_id or stage_index}` status must be planned or pending")
+            self._validate_self_iteration_new_stage(
+                stage,
+                stage_id=stage_id or f"stage-{stage_index}",
+                location=location,
+                existing_ids=existing_ids,
+                seen_new_ids=seen_new_ids,
+                errors=errors,
+                warnings=warnings,
+            )
+
+        if errors:
+            return self._self_iteration_validation_result(
+                status="failed",
+                errors=errors,
+                warnings=warnings,
+                expected_new_stage_count=expected_new_stage_count,
+                actual_new_stage_count=len(new_stages),
+                new_stage_ids=new_stage_ids,
+            )
+
+        current_roadmap = self.roadmap
+        self.roadmap = after_roadmap
+        try:
+            roadmap_validation = self.validate_roadmap()
+        finally:
+            self.roadmap = current_roadmap
+        if roadmap_validation["status"] != "passed":
+            errors.extend(f"roadmap validation: {error}" for error in roadmap_validation.get("errors", []))
+        warnings.extend(f"roadmap validation: {warning}" for warning in roadmap_validation.get("warnings", []))
+        return self._self_iteration_validation_result(
+            status="passed" if not errors else "failed",
+            errors=errors,
+            warnings=warnings,
+            expected_new_stage_count=expected_new_stage_count,
+            actual_new_stage_count=len(new_stages),
+            new_stage_ids=new_stage_ids,
+            roadmap_validation=roadmap_validation,
+        )
+
+    def _self_iteration_continuation_stages(
+        self,
+        roadmap: dict[str, Any],
+        *,
+        location: str,
+        errors: list[str],
+    ) -> list[Any]:
+        continuation = roadmap.get("continuation", {})
+        if continuation is None:
+            return []
+        if not isinstance(continuation, dict):
+            errors.append(f"{location} parent must be a mapping")
+            return []
+        stages = continuation.get("stages", [])
+        if stages is None:
+            return []
+        if not isinstance(stages, list):
+            errors.append(f"{location} must be a list")
+            return []
+        return stages
+
+    def _self_iteration_without_new_stages(
+        self,
+        roadmap: dict[str, Any],
+        existing_stage_count: int,
+    ) -> dict[str, Any]:
+        payload = deepcopy(roadmap)
+        continuation = payload.get("continuation")
+        if isinstance(continuation, dict):
+            stages = continuation.get("stages", [])
+            if isinstance(stages, list):
+                continuation["stages"] = deepcopy(stages[:existing_stage_count])
+        return payload
+
+    def _self_iteration_milestone_ids(self, roadmap: dict[str, Any]) -> set[str]:
+        milestones = roadmap.get("milestones", [])
+        if not isinstance(milestones, list):
+            return set()
+        return {
+            str(milestone.get("id", "")).strip()
+            for milestone in milestones
+            if isinstance(milestone, dict) and str(milestone.get("id", "")).strip()
+        }
+
+    def _self_iteration_existing_ids(self, roadmap: dict[str, Any]) -> set[str]:
+        ids: set[str] = set()
+        milestones = roadmap.get("milestones", [])
+        if isinstance(milestones, list):
+            for milestone in milestones:
+                if not isinstance(milestone, dict):
+                    continue
+                milestone_id = str(milestone.get("id", "")).strip()
+                if milestone_id:
+                    ids.add(milestone_id)
+                tasks = milestone.get("tasks", [])
+                if isinstance(tasks, list):
+                    ids.update(
+                        str(task.get("id", "")).strip()
+                        for task in tasks
+                        if isinstance(task, dict) and str(task.get("id", "")).strip()
+                    )
+        continuation = roadmap.get("continuation", {})
+        stages = continuation.get("stages", []) if isinstance(continuation, dict) else []
+        if isinstance(stages, list):
+            for stage in stages:
+                if not isinstance(stage, dict):
+                    continue
+                stage_id = str(stage.get("id", "")).strip()
+                if stage_id:
+                    ids.add(stage_id)
+                tasks = stage.get("tasks", [])
+                if isinstance(tasks, list):
+                    ids.update(
+                        str(task.get("id", "")).strip()
+                        for task in tasks
+                        if isinstance(task, dict) and str(task.get("id", "")).strip()
+                    )
+        return ids
+
+    def _validate_self_iteration_new_stage(
+        self,
+        stage: dict[str, Any],
+        *,
+        stage_id: str,
+        location: str,
+        existing_ids: set[str],
+        seen_new_ids: set[str],
+        errors: list[str],
+        warnings: list[str],
+    ) -> None:
+        self._validate_self_iteration_unsafe_requirements(stage, location=location, errors=errors)
+        tasks = stage.get("tasks", [])
+        if not isinstance(tasks, list) or not tasks:
+            errors.append(f"new continuation stage `{stage_id}` must define at least one task")
+            return
+        for task_index, task in enumerate(tasks):
+            task_location = f"{location}.tasks[{task_index}]"
+            if not isinstance(task, dict):
+                errors.append(f"{task_location} must be a mapping")
+                continue
+            task_id = str(task.get("id", "")).strip()
+            if not task_id:
+                errors.append(f"{task_location}.id is required")
+                task_id = f"{stage_id}-task-{task_index}"
+            elif task_id in existing_ids:
+                errors.append(f"new continuation task id duplicates an existing id: {task_id}")
+            elif task_id in seen_new_ids:
+                errors.append(f"duplicate new continuation task id: {task_id}")
+            seen_new_ids.add(task_id)
+            self._validate_self_iteration_new_task(
+                task,
+                task_id=task_id,
+                location=task_location,
+                errors=errors,
+                warnings=warnings,
+            )
+
+    def _validate_self_iteration_new_task(
+        self,
+        task: dict[str, Any],
+        *,
+        task_id: str,
+        location: str,
+        errors: list[str],
+        warnings: list[str],
+    ) -> None:
+        status = str(task.get("status", "pending")).strip()
+        if status and status not in {"pending", "planned"}:
+            errors.append(f"new continuation task `{task_id}` status must be pending or planned")
+
+        file_scope = task.get("file_scope")
+        if not isinstance(file_scope, list) or not any(str(item).strip() for item in file_scope):
+            errors.append(f"new continuation task `{task_id}` must define non-empty file_scope")
+
+        acceptance = task.get("acceptance")
+        if not isinstance(acceptance, list) or not acceptance:
+            errors.append(f"new continuation task `{task_id}` must define acceptance commands")
+        elif not any(isinstance(item, dict) and str(item.get("command", "")).strip() for item in acceptance):
+            errors.append(f"new continuation task `{task_id}` must define at least one acceptance command")
+
+        implementation = task.get("implementation", [])
+        if implementation is None:
+            implementation = []
+        repair = task.get("repair", [])
+        if repair is None:
+            repair = []
+        if implementation:
+            if not isinstance(implementation, list):
+                errors.append(f"new continuation task `{task_id}` implementation must be a list")
+            elif not self._self_iteration_has_codex_entry(implementation):
+                errors.append(f"new continuation task `{task_id}` implementation work must use a codex entry")
+            if not isinstance(repair, list) or not self._self_iteration_has_codex_entry(repair):
+                errors.append(f"new continuation task `{task_id}` implementation work must define a codex repair entry")
+
+        for group_name in ("implementation", "repair", "acceptance", "e2e"):
+            group = task.get(group_name, [])
+            if group is None:
+                continue
+            if not isinstance(group, list):
+                continue
+            for command_index, item in enumerate(group):
+                if not isinstance(item, dict):
+                    continue
+                command = str(item.get("command", "") or "")
+                if not command:
+                    continue
+                outcome, reason, metadata = self._command_policy_match(command)
+                if outcome == "requires_approval" or metadata.get("blocked_pattern"):
+                    errors.append(
+                        f"new continuation task `{task_id}` {group_name}[{command_index}] has unsafe command: {reason}"
+                    )
+                elif outcome == "denied":
+                    warnings.append(
+                        f"new continuation task `{task_id}` {group_name}[{command_index}] command is not currently allowlisted: {reason}"
+                    )
+
+    def _self_iteration_has_codex_entry(self, items: list[Any]) -> bool:
+        return any(
+            isinstance(item, dict)
+            and str(item.get("executor", "")).strip() == "codex"
+            and str(item.get("prompt", "") or item.get("command", "")).strip()
+            for item in items
+        )
+
+    def _validate_self_iteration_unsafe_requirements(
+        self,
+        value: Any,
+        *,
+        location: str,
+        errors: list[str],
+    ) -> None:
+        seen: set[tuple[str, str, str]] = set()
+        for text_location, text in self._self_iteration_string_values(value, location=location):
+            lowered = text.lower()
+            for reason, pattern in SELF_ITERATION_UNSAFE_REQUIREMENT_PATTERNS:
+                for match in pattern.finditer(lowered):
+                    if self._self_iteration_requirement_is_negated(lowered, match.start()):
+                        continue
+                    matched_text = text[match.start() : match.end()]
+                    key = (text_location, reason, matched_text.lower())
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    errors.append(
+                        f"{text_location} introduces unsafe {reason} requirement `{matched_text}`"
+                    )
+
+    def _self_iteration_string_values(self, value: Any, *, location: str) -> list[tuple[str, str]]:
+        values: list[tuple[str, str]] = []
+        if isinstance(value, dict):
+            for key, item in value.items():
+                values.extend(self._self_iteration_string_values(item, location=f"{location}.{key}"))
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                values.extend(self._self_iteration_string_values(item, location=f"{location}[{index}]"))
+        elif isinstance(value, str) and value.strip():
+            values.append((location, value))
+        return values
+
+    def _self_iteration_requirement_is_negated(self, text: str, match_start: int) -> bool:
+        prefix = text[max(0, match_start - 120) : match_start]
+        sentence_prefix = re.split(r"[.;\n]", prefix)[-1]
+        return bool(
+            re.search(
+                r"\b(no|not|never|without|avoid|do not|don't|must not|should not|cannot|can't)\b",
+                sentence_prefix,
+            )
+        )
 
     def _self_iteration_task(self, command: AcceptanceCommand, snapshot_path: Path, prompt: str) -> HarnessTask:
         return HarnessTask(
@@ -1476,7 +2495,7 @@ class Harness:
             e2e=(),
         )
 
-    def _self_iteration_prompt(self, config: dict[str, Any], snapshot_path: Path) -> str:
+    def _self_iteration_prompt(self, config: dict[str, Any], snapshot_path: Path, context_path: Path) -> str:
         custom = str((config.get("planner") or {}).get("prompt", "")).strip()
         objective = str(config.get("objective", "Assess current project status and plan the next engineering stage."))
         max_stages = int(config.get("max_stages_per_iteration", 1))
@@ -1486,22 +2505,28 @@ You are the self-iteration planner for an autonomous engineering harness.
 Project root: {self.project_root}
 Roadmap file: {self.roadmap_path}
 Status snapshot: {snapshot_path}
+Planner context pack: {context_path}
 Objective: {objective}
 
-Read the repository, the roadmap file, and the status snapshot. Assess what has just been completed,
-identify the next highest-value engineering stage, and append exactly {max_stages} new unmaterialized
-stage(s) to `continuation.stages` in the roadmap file.
+Read the bounded JSON planner context pack first. It summarizes the roadmap, continuation state,
+recent manifests and reports, blueprint/docs excerpts, test and source inventories, git status, and
+recent commits so you can assess current state without ad hoc repository discovery. Use the roadmap
+file and status snapshot only when you need to verify or write the final roadmap diff. Append exactly
+{max_stages} new unmaterialized stage(s) to `continuation.stages` in the roadmap file.
 
 Rules:
 - Do not edit `.engineering/state` or `.engineering/reports`.
 - Do not mark tasks done and do not add generated stages to `milestones`.
+- Existing roadmap fields, milestones, tasks, statuses, and continuation stages must remain unchanged.
 - New stages must be concrete, measurable, and automatable.
-- Each task must include acceptance commands.
+- Each new task must include non-empty `file_scope` and local acceptance commands.
 - If code must be written, use an `implementation` entry with `"executor": "codex"` and a focused prompt.
-- Include a `repair` entry for non-trivial implementation tasks.
-- Do not require live private keys, Sepolia writes, mainnet writes, paid services, or external accounts.
+- Include a `repair` entry with `"executor": "codex"` for every task that has implementation work.
+- Do not require live operations, private keys, mainnet writes, production deployments, paid services, or external accounts.
 - Prefer the next step that moves the project toward the stated blueprint and vision.
 - Keep scope tight enough that a coding agent can complete the stage in one iteration.
+Planner output is accepted only if validation can prove that exactly {max_stages} safe, unmaterialized
+continuation stage(s) were appended.
 """
         return base if not custom else f"{base}\n\nProject-specific planning guidance:\n{custom}\n"
 
@@ -1513,6 +2538,8 @@ Rules:
         before: dict[str, Any],
         after: dict[str, Any],
         run: CommandRun,
+        validation: dict[str, Any] | None = None,
+        context_pack: dict[str, Any] | None = None,
     ) -> None:
         report_path.parent.mkdir(parents=True, exist_ok=True)
         lines = [
@@ -1520,20 +2547,63 @@ Rules:
             "",
             f"- Reason: `{reason}`",
             f"- Snapshot: `{snapshot_path.relative_to(self.project_root)}`",
-            f"- Before stages: `{before.get('stage_count')}` pending `{before.get('pending_stage_count')}`",
-            f"- After stages: `{after.get('stage_count')}` pending `{after.get('pending_stage_count')}`",
-            "",
-            "## Planner Run",
-            "",
-            f"- Name: {run.name}",
-            f"- Status: `{run.status}`",
-            f"- Return code: `{run.returncode}`",
-            "",
-            "```bash",
-            run.command,
-            "```",
-            "",
         ]
+        if context_pack is not None:
+            lines.append(f"- Context pack: `{context_pack.get('path')}`")
+        lines.extend(
+            [
+                f"- Before stages: `{before.get('stage_count')}` pending `{before.get('pending_stage_count')}`",
+                f"- After stages: `{after.get('stage_count')}` pending `{after.get('pending_stage_count')}`",
+                "",
+            ]
+        )
+        if context_pack is not None:
+            lines.extend(
+                [
+                    "## Planner Context Pack",
+                    "",
+                    "```json",
+                    json.dumps(context_pack.get("summary", {}), indent=2, sort_keys=True),
+                    "```",
+                    "",
+                ]
+            )
+        lines.extend(
+            [
+                "## Planner Run",
+                "",
+                f"- Name: {run.name}",
+                f"- Status: `{run.status}`",
+                f"- Return code: `{run.returncode}`",
+                "",
+                "```bash",
+                run.command,
+                "```",
+                "",
+            ]
+        )
+        if validation is not None:
+            lines.extend(
+                [
+                    "## Output Validation",
+                    "",
+                    f"- Status: `{validation.get('status')}`",
+                    f"- Expected new stages: `{validation.get('expected_new_stage_count')}`",
+                    f"- Actual new stages: `{validation.get('actual_new_stage_count')}`",
+                    f"- New stage ids: `{', '.join(validation.get('new_stage_ids') or [])}`",
+                    f"- Errors: `{validation.get('error_count', 0)}`",
+                    f"- Warnings: `{validation.get('warning_count', 0)}`",
+                    "",
+                ]
+            )
+            if validation.get("errors"):
+                lines.extend(["Errors:", ""])
+                lines.extend(f"- {error}" for error in validation.get("errors", []))
+                lines.append("")
+            if validation.get("warnings"):
+                lines.extend(["Warnings:", ""])
+                lines.extend(f"- {warning}" for warning in validation.get("warnings", []))
+                lines.append("")
         if run.stdout:
             lines.extend(["Stdout:", "", "```text", run.stdout, "```", ""])
         if run.stderr:
