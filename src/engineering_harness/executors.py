@@ -163,9 +163,13 @@ class ExecutorTaskCommand:
     command: str | None
     prompt: str | None
     executor: str
+    spec_refs: tuple[str, ...] = ()
 
     def summary(self) -> str:
-        return self.command or self.prompt or self.executor
+        summary = self.command or self.prompt or self.executor
+        if self.spec_refs:
+            summary = f"{summary} [spec_refs: {', '.join(self.spec_refs)}]"
+        return summary
 
 
 @dataclass(frozen=True)
@@ -175,6 +179,7 @@ class ExecutorTaskContext:
     title: str
     milestone_id: str
     milestone_title: str
+    spec_refs: tuple[str, ...]
     file_scope: tuple[str, ...]
     acceptance: tuple[ExecutorTaskCommand, ...]
     e2e: tuple[ExecutorTaskCommand, ...]
@@ -619,12 +624,15 @@ class CodexExecutorAdapter:
         acceptance = "\n".join(f"- {item.name}: {item.summary()}" for item in task_context.acceptance)
         e2e = "\n".join(f"- {item.name}: {item.summary()}" for item in task_context.e2e)
         file_scope = "\n".join(f"- {scope}" for scope in task_context.file_scope) or "- repository-scoped, but keep changes minimal"
+        spec_refs = "\n".join(f"- {ref}" for ref in task_context.spec_refs) or "- none declared"
         verification = acceptance if not e2e else f"{acceptance}\n\nE2E/user-experience commands:\n{e2e}"
         expanded_prompt = (
             "You are executing one roadmap task for an autonomous engineering harness.\n\n"
             f"Project root: {task_context.project_root}\n"
             f"Milestone: {task_context.milestone_id} - {task_context.milestone_title}\n"
             f"Task: {task_context.task_id} - {task_context.title}\n\n"
+            "Spec refs:\n"
+            f"{spec_refs}\n\n"
             "Goal:\n"
             f"{prompt}\n\n"
             "Allowed file scope:\n"

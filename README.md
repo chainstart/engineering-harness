@@ -503,6 +503,8 @@ Safety policy should not block production development. It should make risk expli
 More design documents:
 
 - [Autonomous Engineering Harness Development Plan](docs/autonomous-engineering-harness-plan.md)
+- [Engineering Harness System Specification](docs/engineering-harness-system-spec.md)
+- [Spec-Driven Development Plan](docs/spec-driven-development-plan.md)
 - [Durable Drive Controls](docs/durable-drive-controls.md)
 - [Executor Contract](docs/executor-contract.md)
 - [Goal Intake Contract](docs/goal-intake-contract.md)

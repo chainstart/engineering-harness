@@ -846,6 +846,83 @@ def test_harness_runs_task_and_writes_matching_manifest(tmp_path):
     assert state["tasks"]["tests"]["last_manifest"] == result["manifest"]
 
 
+def test_roadmap_validation_checks_spec_refs(tmp_path):
+    roadmap = {
+        "version": 1,
+        "project": "spec-project",
+        "profile": "python-agent",
+        "milestones": [
+            {
+                "id": "baseline",
+                "title": "Baseline",
+                "tasks": [
+                    {
+                        "id": "spec-task",
+                        "title": "Spec task",
+                        "spec_refs": ["EH-SPEC-002", "EH-SPEC-008"],
+                        "file_scope": ["**"],
+                        "acceptance": [
+                            {
+                                "name": "spec acceptance",
+                                "command": "python3 -c \"print('ok')\"",
+                                "spec_refs": ["EH-SPEC-007"],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+    valid_root = tmp_path / "valid"
+    invalid_root = tmp_path / "invalid"
+    valid_root.mkdir()
+    invalid_root.mkdir()
+
+    assert validate_roadmap_payload(valid_root, roadmap)["status"] == "passed"
+
+    invalid = deepcopy(roadmap)
+    invalid["milestones"][0]["tasks"][0]["spec_refs"] = ["EH-SPEC-002", "EH-SPEC-002"]
+    invalid["milestones"][0]["tasks"][0]["acceptance"][0]["spec_refs"] = [""]
+    result = validate_roadmap_payload(invalid_root, invalid)
+
+    assert result["status"] == "failed"
+    assert "task `spec-task` spec_refs contains duplicate spec ref `EH-SPEC-002`" in result["errors"]
+    assert "task `spec-task` acceptance[0].spec_refs[0] must be a non-empty string" in result["errors"]
+
+
+def test_spec_refs_are_preserved_in_manifest_policy_input_and_report(tmp_path):
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["spec_refs"] = ["EH-SPEC-002", "EH-SPEC-008"]
+    task["acceptance"][0]["name"] = "spec trace acceptance"
+    task["acceptance"][0]["command"] = "python3 -c \"print('spec trace ok')\""
+    task["acceptance"][0]["spec_refs"] = ["EH-SPEC-007"]
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    result = Harness(project).run_task(Harness(project).next_task())
+    manifest = task_manifest(project, result)
+    command_policy = policy_decision(manifest, "command_policy", outcome="allowed")
+    report_text = (project / result["report"]).read_text(encoding="utf-8")
+
+    assert result["status"] == "passed"
+    assert result["task"]["spec_refs"] == ["EH-SPEC-002", "EH-SPEC-008"]
+    assert result["runs"][0]["spec_refs"] == ["EH-SPEC-007"]
+    assert manifest["task"]["spec_refs"] == ["EH-SPEC-002", "EH-SPEC-008"]
+    assert manifest["task"]["acceptance"][0]["spec_refs"] == ["EH-SPEC-007"]
+    assert manifest["runs"][0]["spec_refs"] == ["EH-SPEC-007"]
+    assert manifest["policy_input"]["task"]["spec_refs"] == ["EH-SPEC-002", "EH-SPEC-008"]
+    assert command_policy["input"]["task"]["spec_refs"] == ["EH-SPEC-002", "EH-SPEC-008"]
+    assert command_policy["input"]["command"]["spec_refs"] == ["EH-SPEC-007"]
+    assert "## Spec Traceability" in report_text
+    assert 'Task spec refs: `["EH-SPEC-002", "EH-SPEC-008"]`' in report_text
+    assert 'acceptance `spec trace acceptance` spec refs: `["EH-SPEC-007"]`' in report_text
+
+
 def test_opa_policy_input_export_shape(tmp_path):
     project = tmp_path / "agent-project"
     project.mkdir()

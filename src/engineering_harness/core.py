@@ -710,6 +710,7 @@ class AcceptanceCommand:
     no_progress_timeout_seconds: int | None = None
     requested_capabilities: tuple[str, ...] = ()
     user_experience_gate: dict[str, Any] = field(default_factory=dict)
+    spec_refs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -724,6 +725,7 @@ class HarnessTask:
     manual_approval_required: bool
     agent_approval_required: bool
     max_task_iterations: int
+    spec_refs: tuple[str, ...]
     implementation: tuple[AcceptanceCommand, ...]
     repair: tuple[AcceptanceCommand, ...]
     acceptance: tuple[AcceptanceCommand, ...]
@@ -2041,6 +2043,7 @@ class Harness:
             executor = command.executor
             requested_capabilities = list(command.requested_capabilities)
             user_experience_gate = deepcopy(command.user_experience_gate)
+            spec_refs = list(command.spec_refs)
         else:
             name = str(command.get("name") or "")
             command_text = command.get("command")
@@ -2057,6 +2060,7 @@ class Harness:
                 if isinstance(command.get("user_experience_gate"), dict)
                 else {}
             )
+            spec_refs = list(self._normalize_spec_refs(command.get("spec_refs")))
         return {
             "name": name,
             "executor": executor,
@@ -2067,6 +2071,7 @@ class Harness:
             "sandbox": sandbox,
             "requested_capabilities": list(requested_capabilities),
             "user_experience_gate": user_experience_gate,
+            "spec_refs": spec_refs,
             "command_sha256": self._approval_text_digest(command_text),
             "prompt_sha256": self._approval_text_digest(prompt),
             "has_command": command_text is not None,
@@ -3076,6 +3081,7 @@ class Harness:
                 "sandbox",
                 "requested_capabilities",
                 "user_experience_gate",
+                "spec_refs",
             ],
             "commands": [
                 {
@@ -3092,6 +3098,7 @@ class Harness:
                     "sandbox": command.sandbox,
                     "requested_capabilities": list(command.requested_capabilities),
                     "user_experience_gate": deepcopy(command.user_experience_gate),
+                    "spec_refs": list(command.spec_refs),
                 }
                 for index, command in enumerate(commands)
             ],
@@ -3111,6 +3118,7 @@ class Harness:
                 "sandbox": command.sandbox,
                 "requested_capabilities": list(command.requested_capabilities),
                 "user_experience_gate": deepcopy(command.user_experience_gate),
+                "spec_refs": list(command.spec_refs),
             }
             for command in commands
         ]
@@ -5702,6 +5710,7 @@ class Harness:
             manual_approval_required=False,
             agent_approval_required=bool(self.executor_registry.metadata_for(command.executor).get("requires_agent_approval")),
             max_task_iterations=1,
+            spec_refs=(),
             implementation=(),
             repair=(),
             acceptance=(
@@ -6036,6 +6045,7 @@ continuation stage(s) were appended.
                         manual_approval_required=bool(task.get("manual_approval_required", False)),
                         agent_approval_required=bool(task.get("agent_approval_required", bool(implementation or repair))),
                         max_task_iterations=max(1, int(task.get("max_task_iterations", 1))),
+                        spec_refs=self._normalize_spec_refs(task.get("spec_refs")),
                         implementation=tuple(implementation),
                         repair=tuple(repair),
                         acceptance=tuple(acceptance),
@@ -6060,6 +6070,7 @@ continuation stage(s) were appended.
                 if capability_field is not None
                 else ()
             )
+            spec_refs = self._normalize_spec_refs(item.get("spec_refs"))
             user_experience_gate = item.get("user_experience_gate")
             if not isinstance(user_experience_gate, dict):
                 user_experience_gate = item.get("browser_user_experience")
@@ -6078,6 +6089,7 @@ continuation stage(s) were appended.
                     no_progress_timeout_seconds=no_progress_timeout,
                     requested_capabilities=requested_capabilities,
                     user_experience_gate=deepcopy(user_experience_gate),
+                    spec_refs=spec_refs,
                 )
             )
         return commands
@@ -9207,6 +9219,44 @@ continuation stage(s) were appended.
             capabilities.append(text)
         return tuple(capabilities)
 
+    def _normalize_spec_refs(self, value: Any) -> tuple[str, ...]:
+        if not isinstance(value, list):
+            return ()
+        spec_refs: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            text = str(item).strip() if isinstance(item, str) else ""
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            spec_refs.append(text)
+        return tuple(spec_refs)
+
+    def _validate_spec_refs(
+        self,
+        value: Any,
+        *,
+        location: str,
+        errors: list[str],
+    ) -> None:
+        if value is None:
+            return
+        if not isinstance(value, list):
+            errors.append(f"{location} must be a non-empty list")
+            return
+        if not value:
+            errors.append(f"{location} must be a non-empty list")
+            return
+        seen: set[str] = set()
+        for ref_index, ref in enumerate(value):
+            text = str(ref).strip() if isinstance(ref, str) else ""
+            if not text:
+                errors.append(f"{location}[{ref_index}] must be a non-empty string")
+                continue
+            if text in seen:
+                errors.append(f"{location} contains duplicate spec ref `{text}`")
+            seen.add(text)
+
     def _validate_requested_capabilities(
         self,
         item: dict[str, Any],
@@ -9261,6 +9311,7 @@ continuation stage(s) were appended.
         seen_task_ids.add(task_id)
         if not str(task.get("title", task_id)).strip():
             warnings.append(f"task `{task_id}` title is empty")
+        self._validate_spec_refs(task.get("spec_refs"), location=f"task `{task_id}` spec_refs", errors=errors)
         file_scope = task.get("file_scope", [])
         if file_scope is not None and not isinstance(file_scope, list):
             errors.append(f"task `{task_id}` file_scope must be a list")
@@ -9297,6 +9348,7 @@ continuation stage(s) were appended.
         if not isinstance(item, dict):
             errors.append(f"{location} must be a mapping")
             return
+        self._validate_spec_refs(item.get("spec_refs"), location=f"{location}.spec_refs", errors=errors)
         user_experience_gate = item.get("user_experience_gate")
         if user_experience_gate is not None:
             if not isinstance(user_experience_gate, dict):
@@ -9382,6 +9434,8 @@ continuation stage(s) were appended.
                 payload["requested_capabilities"] = list(command.requested_capabilities)
             if command.user_experience_gate:
                 payload["user_experience_gate"] = deepcopy(command.user_experience_gate)
+            if command.spec_refs:
+                payload["spec_refs"] = list(command.spec_refs)
             payload["safety_classification"] = self._command_safety_classification(command)
             return payload
 
@@ -9394,6 +9448,7 @@ continuation stage(s) were appended.
             "manual_approval_required": task.manual_approval_required,
             "agent_approval_required": task.agent_approval_required,
             "max_task_iterations": task.max_task_iterations,
+            "spec_refs": list(task.spec_refs),
             "implementation": [command_payload(command) for command in task.implementation],
             "repair": [command_payload(command) for command in task.repair],
             "acceptance": [command_payload(command) for command in task.acceptance],
@@ -9436,6 +9491,7 @@ continuation stage(s) were appended.
                 "executor": command.executor,
                 "requested_capabilities": list(command.requested_capabilities),
                 "user_experience_gate": deepcopy(command.user_experience_gate),
+                "spec_refs": list(command.spec_refs),
                 "safety_classification": safety_classification,
             }
         roadmap_path = (
@@ -9459,6 +9515,7 @@ continuation stage(s) were appended.
                 "manual_approval_required": task.manual_approval_required,
                 "agent_approval_required": task.agent_approval_required,
                 "max_task_iterations": task.max_task_iterations,
+                "spec_refs": list(task.spec_refs),
             },
             phase=phase,
             command=command_payload,
@@ -11483,6 +11540,7 @@ continuation stage(s) were appended.
                 command=command.command,
                 prompt=command.prompt,
                 executor=command.executor,
+                spec_refs=command.spec_refs,
             )
 
         return ExecutorTaskContext(
@@ -11491,6 +11549,7 @@ continuation stage(s) were appended.
             title=task.title,
             milestone_id=task.milestone_id,
             milestone_title=task.milestone_title,
+            spec_refs=task.spec_refs,
             file_scope=task.file_scope,
             acceptance=tuple(task_command(item) for item in task.acceptance),
             e2e=tuple(task_command(item) for item in task.e2e),
@@ -11881,6 +11940,7 @@ continuation stage(s) were appended.
             "model": metadata.get("model"),
             "sandbox": metadata.get("sandbox"),
             "requested_capabilities": metadata.get("requested_capabilities", []),
+            "spec_refs": metadata.get("spec_refs", []),
             "safety_classification": self._command_run_safety_classification(task, run, metadata),
             "user_experience_gate": deepcopy(metadata.get("user_experience_gate", {})),
             "executor_capabilities": executor_metadata.get("capabilities", []) if isinstance(executor_metadata, dict) else [],
@@ -11904,6 +11964,7 @@ continuation stage(s) were appended.
             "returncode": manifest_payload["returncode"],
             "executor": manifest_payload["executor"],
             "requested_capabilities": manifest_payload.get("requested_capabilities", []),
+            "spec_refs": manifest_payload.get("spec_refs", []),
             "safety_classification": manifest_payload.get("safety_classification", {}),
             "user_experience_gate": manifest_payload.get("user_experience_gate", {}),
             "executor_capabilities": manifest_payload.get("executor_capabilities", []),
@@ -11988,6 +12049,7 @@ continuation stage(s) were appended.
                     "sandbox": command.sandbox,
                     "requested_capabilities": list(command.requested_capabilities),
                     "user_experience_gate": deepcopy(command.user_experience_gate),
+                    "spec_refs": list(command.spec_refs),
                     "executor_metadata": self.executor_registry.metadata_for(command.executor),
                 }
         return {
@@ -11999,6 +12061,7 @@ continuation stage(s) were appended.
             "sandbox": None,
             "requested_capabilities": [],
             "user_experience_gate": {},
+            "spec_refs": [],
             "executor_metadata": run.executor_metadata
             or self.executor_registry.metadata_for(
                 run.executor or ("codex" if run.command.startswith("codex exec ") else "shell")
@@ -12582,9 +12645,38 @@ continuation stage(s) were appended.
             f"- Finished: {finished_at}",
             f"- Message: {redact(message)}",
             "",
-            "## Task Runs",
-            "",
         ]
+        phase_commands = {
+            "implementation": task.implementation,
+            "repair": task.repair,
+            "acceptance": task.acceptance,
+            "e2e": task.e2e,
+        }
+        command_spec_refs = [
+            (phase, command)
+            for phase, commands in phase_commands.items()
+            for command in commands
+            if command.spec_refs
+        ]
+        if task.spec_refs or command_spec_refs:
+            lines.extend(
+                [
+                    "## Spec Traceability",
+                    "",
+                    f"- Task spec refs: `{json.dumps(list(task.spec_refs))}`",
+                ]
+            )
+            for phase, command in command_spec_refs:
+                lines.append(
+                    f"- {phase} `{command.name}` spec refs: `{json.dumps(list(command.spec_refs))}`"
+                )
+            lines.append("")
+        lines.extend(
+            [
+                "## Task Runs",
+                "",
+            ]
+        )
         if not runs:
             lines.append("No task commands were executed.")
         for run in runs:

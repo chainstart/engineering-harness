@@ -7,7 +7,13 @@
   "decision_log_path": ".engineering/state/decision-log.jsonl",
   "report_dir": ".engineering/reports/tasks",
   "vision": "Build a local-first autonomous engineering control layer for roadmap-driven software work, safety policy, coding-agent execution, project-specific frontends, and realistic end-to-end user validation.",
-  "blueprint": "docs/autonomous-engineering-harness-plan.md",
+  "blueprint": "docs/engineering-harness-system-spec.md",
+  "spec": {
+    "schema_version": 1,
+    "path": "docs/engineering-harness-system-spec.md",
+    "development_plan": "docs/spec-driven-development-plan.md",
+    "traceability_field": "spec_refs"
+  },
   "experience": {
     "kind": "dashboard",
     "personas": [
@@ -53,6 +59,11 @@
           "id": "tests",
           "title": "Run Python test suite",
           "status": "pending",
+          "spec_refs": [
+            "EH-SPEC-003",
+            "EH-SPEC-007",
+            "EH-SPEC-008"
+          ],
           "max_attempts": 2,
           "file_scope": [
             "**"
@@ -60,6 +71,10 @@
           "acceptance": [
             {
               "name": "Run Python test suite",
+              "spec_refs": [
+                "EH-SPEC-007",
+                "EH-SPEC-008"
+              ],
               "command": "python3 -c \"import sys; sys.path.insert(0, 'src'); import pytest; raise SystemExit(pytest.main(['-q']))\"",
               "required": true,
               "timeout_seconds": 600
