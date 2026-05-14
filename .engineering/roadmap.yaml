@@ -6846,6 +6846,88 @@
             ]
           }
         ]
+      },
+      {
+        "id": "recover-stale-running-drive",
+        "title": "Recover stale running drives with dead owners",
+        "objective": "Close the blocked stale-running recovery gap. Add a local, conservative recovery path that detects stale drive heartbeats whose owner process is dead or missing, records recovery evidence, clears unsafe running state, and allows the next unattended drive to continue without manual state edits.",
+        "status": "planned",
+        "generated_by": "engineering-harness-self-iteration",
+        "generated_at": "2026-05-14T11:30:13Z",
+        "tasks": [
+          {
+            "id": "recover-stale-running-drive-owner",
+            "title": "Recover stale running drives with dead or missing owner PIDs",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement safe stale-running drive recovery for local unattended operation. When drive preflight or status sees a stale running drive whose recorded owner process is dead or missing, classify it distinctly from an active owner, write bounded recovery evidence into normal status/report surfaces, clear or transition the stale running marker through existing durable controls, and allow the next drive to proceed without editing .engineering/state by hand. Preserve active-owner protection, pause/cancel semantics, checkpoint readiness gates, replay guard behavior, and local-only safety. Add focused pytest coverage and update docs for the recovery behavior. Do not require external accounts, network services, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing stale-running recovery tests while preserving active-owner blocking, drive watchdog semantics, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, replay guard, and local-only execution behavior."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "stale running recovery tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"stale and running and recovery\"",
+                "required": true,
+                "timeout_seconds": 1500
+              },
+              {
+                "name": "drive control regression tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k \"drive_control or watchdog or replay_guard\"",
+                "required": true,
+                "timeout_seconds": 1500
+              },
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300
+              }
+            ],
+            "e2e": [
+              {
+                "name": "stale dead-owner drive preflight e2e",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q -k stale_running_dead_owner_recovery_e2e",
+                "required": true,
+                "timeout_seconds": 1500
+              },
+              {
+                "name": "status exposes stale recovery evidence",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300
+              }
+            ]
+          }
+        ]
       }
     ]
   },
