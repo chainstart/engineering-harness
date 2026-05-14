@@ -7575,7 +7575,15 @@ def test_self_iteration_output_guard_accepts_valid_appended_stage(tmp_path):
 
 
 def test_self_iteration_reports_new_stage_requirement_refs(tmp_path):
-    project, _roadmap_path = self_iteration_guard_project(tmp_path)
+    project, roadmap_path = self_iteration_guard_project(tmp_path)
+    (project / "docs").mkdir(exist_ok=True)
+    (project / "docs/spec.md").write_text(
+        "# Project Spec\n\n### EH-SPEC-001: Local planning\n\n### EH-SPEC-013: Self iteration\n",
+        encoding="utf-8",
+    )
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["spec"] = {"schema_version": 1, "path": "docs/spec.md"}
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
     refs = ["EH-SPEC-001", "EH-SPEC-013"]
     stage = valid_self_iteration_stage("spec-guard-stage", "spec-guard-task")
     stage["spec_refs"] = refs
@@ -7594,6 +7602,7 @@ def test_self_iteration_reports_new_stage_requirement_refs(tmp_path):
     result = Harness(project).run_self_iteration(reason="spec-ref-summary")
 
     assert result["status"] == "planned"
+    assert result["validation"]["spec_traceability"]["required"] is True
     requirement_refs = result["validation"]["new_stage_requirement_refs"]
     assert requirement_refs[0]["stage_id"] == "spec-guard-stage"
     assert requirement_refs[0]["spec_refs"] == refs
@@ -7605,6 +7614,37 @@ def test_self_iteration_reports_new_stage_requirement_refs(tmp_path):
 
     latest = Harness(project).self_iteration_summary()["latest_assessment"]
     assert latest["validation"]["new_stage_requirement_refs"][0]["spec_refs"] == refs
+
+
+def test_self_iteration_rejects_missing_spec_refs_when_traceability_is_configured(tmp_path):
+    project, roadmap_path = self_iteration_guard_project(tmp_path)
+    (project / "docs").mkdir(exist_ok=True)
+    (project / "docs/spec.md").write_text(
+        "# Project Spec\n\n### EH-SPEC-001: Local planning\n\n### EH-SPEC-013: Self iteration\n",
+        encoding="utf-8",
+    )
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["spec"] = {"schema_version": 1, "path": "docs/spec.md"}
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    before = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    write_self_iteration_guard_planner(project, [valid_self_iteration_stage("missing-spec-stage", "missing-spec-task")])
+
+    result = Harness(project).run_self_iteration(reason="missing-spec-refs")
+
+    assert result["status"] == "rejected"
+    assert result["validation"]["status"] == "failed"
+    assert result["validation"]["spec_traceability"]["required"] is True
+    errors = "\n".join(result["validation"]["errors"])
+    assert "new continuation stage `missing-spec-stage` must define non-empty spec_refs" in errors
+    assert "new continuation task `missing-spec-task` must define non-empty spec_refs" in errors
+    assert json.loads(roadmap_path.read_text(encoding="utf-8")) == before
+
+    context = json.loads((project / result["context_pack"]["path"]).read_text(encoding="utf-8"))
+    assert context["summary"]["spec_traceability_required"] is True
+    assert context["spec"]["known_requirement_count"] == 2
+    report = Path(project, result["report"]).read_text(encoding="utf-8")
+    assert "## Requirement Advancement" in report
+    assert "- `missing-spec-stage` advances: `none declared`" in report
 
 
 def test_duplicate_plan_guard_rejects_exact_duplicate_stage_under_new_ids(tmp_path):

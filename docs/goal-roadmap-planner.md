@@ -118,6 +118,9 @@ The harness then reloads `.engineering/roadmap.yaml` and accepts the output only
   local fields such as titles, objectives, task titles, file scope, acceptance commands, and E2E
   commands while ignoring ids, generated timestamps, and status fields; the context pack also
   includes an identity fingerprint with task ids for auditability;
+- when the existing roadmap is spec-traceable through a configured `spec` block or existing
+  `spec_refs`, gives every new stage and task non-empty `spec_refs` so the assessment can explain
+  which requirements the continuation advances;
 - gives every new task non-empty `file_scope` and local acceptance commands;
 - includes `codex` implementation and `codex` repair entries for tasks that require implementation
   work;
@@ -144,9 +147,11 @@ context pack is local-only, redacted with the harness secret redaction helper, a
 excerpt size. Its top-level fields are:
 
 - `summary`: compact counts for continuation stages, duplicate-plan fingerprints, manifests,
-  reports, docs, tests, source files, git status lines, and recent commits.
+  reports, docs, tests, source files, git status lines, recent commits, and spec traceability.
 - `roadmap`: project/profile/goal metadata, task status counts, next task, continuation summary, and
   capped continuation stage summaries.
+- `spec` and `spec_traceability`: compact coverage and whether appended stages must cite
+  requirement refs with `spec_refs`.
 - `duplicate_plan`: a bounded list of existing continuation-stage fingerprints and task-id/title
   hints so planners can avoid re-appending the same local plan under new ids.
 - `manifests`: latest manifest-index summary plus the most recent task-run manifest summaries.

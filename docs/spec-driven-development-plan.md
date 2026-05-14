@@ -181,5 +181,6 @@ Stages 1 and 2 establish traceability and the canonical spec index. Stage 3 star
 traceable continuation stages without adding duplicate coverage. Duplicate detection compares
 source task semantics with existing roadmap task semantics under the same spec refs, so partially
 covered stages keep only the still-uncovered tasks. Generated spec traceability is kept when those
-stages advance into active milestones, and self-iteration assessments report which requirement refs
-newly appended stages advance.
+stages advance into active milestones. Self-iteration context packs expose the spec traceability
+expectation, validation rejects new stages or tasks without `spec_refs` when the existing roadmap is
+spec-traceable, and accepted assessments report which requirement refs newly appended stages advance.

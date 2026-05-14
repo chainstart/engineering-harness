@@ -4155,11 +4155,17 @@ class Harness:
         duplicate_plan = self._self_iteration_duplicate_plan_summary()
         status_for_scorecard = self.status_summary()
         goal_gap_scorecard = deepcopy(status_for_scorecard.get("goal_gap_scorecard", {}))
+        spec_coverage = self.spec_coverage_summary()
+        spec_traceability = self._self_iteration_spec_traceability_context(self.roadmap)
         summary = {
             "project": roadmap_context.get("project"),
             "roadmap_path": roadmap_context.get("path"),
             "continuation_stage_count": roadmap_context.get("continuation", {}).get("stage_count", 0),
             "pending_stage_count": roadmap_context.get("continuation", {}).get("pending_stage_count", 0),
+            "spec_status": spec_coverage.get("status"),
+            "spec_traceability_required": bool(spec_traceability.get("required")),
+            "spec_known_requirement_count": spec_coverage.get("known_requirement_count", 0),
+            "spec_referenced_requirement_count": spec_coverage.get("referenced_requirement_count", 0),
             "duplicate_plan_fingerprint_count": duplicate_plan.get("fingerprint_count", 0),
             "duplicate_plan_duplicate_group_count": duplicate_plan.get("duplicate_group_count", 0),
             "manifest_count": manifest_context.get("index", {}).get("manifest_count", 0),
@@ -4188,6 +4194,8 @@ class Harness:
             "limits": dict(SELF_ITERATION_CONTEXT_LIMITS),
             "summary": summary,
             "roadmap": roadmap_context,
+            "spec": spec_coverage,
+            "spec_traceability": spec_traceability,
             "duplicate_plan": duplicate_plan,
             "manifests": manifest_context,
             "reports": report_context,
@@ -4311,6 +4319,96 @@ class Harness:
                 if ref not in refs:
                     refs.append(ref)
         return refs
+
+    def _spec_coverage_summary_for_roadmap(self, roadmap: dict[str, Any]) -> dict[str, Any]:
+        current_roadmap = self.roadmap
+        self.roadmap = roadmap
+        try:
+            return self.spec_coverage_summary()
+        finally:
+            self.roadmap = current_roadmap
+
+    def _roadmap_declared_spec_refs(self, roadmap: dict[str, Any]) -> list[str]:
+        refs: list[str] = []
+        milestones = roadmap.get("milestones", [])
+        if isinstance(milestones, list):
+            for milestone in milestones:
+                if isinstance(milestone, dict):
+                    for ref in self._collect_stage_spec_refs(milestone):
+                        if ref not in refs:
+                            refs.append(ref)
+        continuation = roadmap.get("continuation") if isinstance(roadmap.get("continuation"), dict) else {}
+        stages = continuation.get("stages", []) if isinstance(continuation, dict) else []
+        if isinstance(stages, list):
+            for stage in stages:
+                if isinstance(stage, dict):
+                    for ref in self._collect_stage_spec_refs(stage):
+                        if ref not in refs:
+                            refs.append(ref)
+        return refs
+
+    def _self_iteration_spec_traceability_context(self, roadmap: dict[str, Any]) -> dict[str, Any]:
+        spec = roadmap.get("spec") if isinstance(roadmap.get("spec"), dict) else {}
+        declared_refs = self._roadmap_declared_spec_refs(roadmap)
+        coverage = self._spec_coverage_summary_for_roadmap(roadmap)
+        spec_configured = bool(coverage.get("configured"))
+        spec_fields = []
+        for field_name in ("path", "requirements_index", "development_plan", "traceability_field"):
+            if isinstance(spec, dict) and str(spec.get(field_name) or "").strip():
+                spec_fields.append(field_name)
+        required = bool(declared_refs or spec_configured or spec_fields)
+        if declared_refs:
+            reason = "roadmap_has_spec_refs"
+        elif spec_configured or spec_fields:
+            reason = "roadmap_spec_configured"
+        else:
+            reason = "roadmap_spec_traceability_unconfigured"
+        candidate_refs: list[str] = []
+        for key in ("referenced_requirements", "unreferenced_requirements", "unknown_requirements"):
+            for ref in coverage.get(key, []):
+                if ref not in candidate_refs:
+                    candidate_refs.append(ref)
+        return {
+            "field": "spec_refs",
+            "required": required,
+            "reason": reason,
+            "spec_fields": spec_fields,
+            "known_requirement_count": coverage.get("known_requirement_count", 0),
+            "referenced_requirement_count": len(declared_refs),
+            "candidate_requirement_refs": candidate_refs[:25],
+            "candidate_requirement_refs_truncated": len(candidate_refs) > 25,
+            "referenced_requirements": declared_refs[:25],
+            "referenced_requirements_truncated": len(declared_refs) > 25,
+        }
+
+    def _validate_self_iteration_new_stage_spec_refs(
+        self,
+        stage: dict[str, Any],
+        *,
+        stage_id: str,
+        location: str,
+        spec_traceability: dict[str, Any],
+        errors: list[str],
+    ) -> None:
+        if not bool(spec_traceability.get("required")):
+            return
+        if not self._normalize_spec_refs(stage.get("spec_refs")):
+            errors.append(
+                f"new continuation stage `{stage_id}` must define non-empty spec_refs because "
+                "the existing roadmap is spec-traceable"
+            )
+        tasks = stage.get("tasks", [])
+        if not isinstance(tasks, list):
+            return
+        for task_index, task in enumerate(tasks):
+            if not isinstance(task, dict):
+                continue
+            task_id = str(task.get("id", "")).strip() or f"{location}.tasks[{task_index}]"
+            if not self._normalize_spec_refs(task.get("spec_refs")):
+                errors.append(
+                    f"new continuation task `{task_id}` must define non-empty spec_refs because "
+                    "the existing roadmap is spec-traceable"
+                )
 
     def _self_iteration_stage_requirement_ref_summaries(self, stages: list[Any]) -> list[dict[str, Any]]:
         summaries: list[dict[str, Any]] = []
@@ -5472,6 +5570,7 @@ class Harness:
         actual_new_stage_count: int,
         new_stage_ids: list[str],
         new_stage_requirement_refs: list[dict[str, Any]] | None = None,
+        spec_traceability: dict[str, Any] | None = None,
         roadmap_validation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return {
@@ -5484,6 +5583,7 @@ class Harness:
             "actual_new_stage_count": actual_new_stage_count,
             "new_stage_ids": new_stage_ids,
             "new_stage_requirement_refs": new_stage_requirement_refs or [],
+            "spec_traceability": spec_traceability or {},
             "roadmap_validation": roadmap_validation,
         }
 
@@ -5529,6 +5629,7 @@ class Harness:
                 f"expected exactly {expected_new_stage_count} new continuation stage(s), found {len(new_stages)}"
             )
 
+        spec_traceability = self._self_iteration_spec_traceability_context(before_roadmap)
         existing_ids = self._self_iteration_existing_ids(before_roadmap)
         existing_task_ids = self._self_iteration_existing_task_ids(before_roadmap)
         existing_stage_fingerprints = self._self_iteration_stage_fingerprint_index(before_stages)
@@ -5571,6 +5672,13 @@ class Harness:
             stage_status = str(stage.get("status", "planned")).strip()
             if stage_status and stage_status not in {"planned", "pending"}:
                 errors.append(f"new continuation stage `{stage_id or stage_index}` status must be planned or pending")
+            self._validate_self_iteration_new_stage_spec_refs(
+                stage,
+                stage_id=stage_id or f"stage-{stage_index}",
+                location=location,
+                spec_traceability=spec_traceability,
+                errors=errors,
+            )
             self._validate_self_iteration_new_stage(
                 stage,
                 stage_id=stage_id or f"stage-{stage_index}",
@@ -5591,6 +5699,7 @@ class Harness:
                 actual_new_stage_count=len(new_stages),
                 new_stage_ids=new_stage_ids,
                 new_stage_requirement_refs=new_stage_requirement_refs,
+                spec_traceability=spec_traceability,
             )
 
         current_roadmap = self.roadmap
@@ -5610,6 +5719,7 @@ class Harness:
             actual_new_stage_count=len(new_stages),
             new_stage_ids=new_stage_ids,
             new_stage_requirement_refs=new_stage_requirement_refs,
+            spec_traceability=spec_traceability,
             roadmap_validation=roadmap_validation,
         )
 
@@ -5927,8 +6037,9 @@ Rules:
 - Each new task must include non-empty `file_scope` and local acceptance commands.
 - If code must be written, use an `implementation` entry with `"executor": "codex"` and a focused prompt.
 - Include a `repair` entry with `"executor": "codex"` for every task that has implementation work.
-- When the roadmap or specification uses `spec_refs`, add the relevant requirement refs to new stages,
-  tasks, acceptance commands, and E2E commands so the assessment can explain the requirements advanced.
+- Read `spec_traceability` in the context pack. When it is required, add relevant requirement refs to
+  new stages, tasks, acceptance commands, and E2E commands so validation and the assessment can
+  explain the requirements advanced.
 - Do not require live operations, private keys, mainnet writes, production deployments, paid services, or external accounts.
 - Prefer the next step that moves the project toward the stated blueprint and vision.
 - Keep scope tight enough that a coding agent can complete the stage in one iteration.
