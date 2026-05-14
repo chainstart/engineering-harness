@@ -364,6 +364,13 @@ stale-running case where the heartbeat is stale and the recorded pid is missing 
 report JSON, Markdown report, `status --json`, and runtime dashboard expose the
 `stale_running_recovery` block.
 
+The local regression that exercises the dead-owner recovery path through a full drive and E2E command
+is:
+
+```bash
+python3 -m pytest tests/test_engineering_harness.py -q -k stale_running_dead_owner_recovery_e2e
+```
+
 When a stale state was already marked and reviewed, or when an operator intentionally wants to clear a
 paused/cancelled control, clear it locally:
 

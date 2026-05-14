@@ -5287,6 +5287,95 @@ def test_stale_running_recovery_allows_next_drive(tmp_path, capsys):
     assert status_payload["runtime_dashboard"]["drive_control"]["stale_running_recovery"]["previous_pid"] == previous_pid
 
 
+def test_stale_running_dead_owner_recovery_e2e(tmp_path, capsys):
+    project = tmp_path / "stale-running-dead-owner-recovery-e2e-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="stale-running-dead-owner-recovery-e2e-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    roadmap["drive_watchdog"] = {"stale_after_seconds": 1}
+    task["acceptance"][0]["command"] = (
+        "python3 -c \"from pathlib import Path; Path('accepted-dead-owner.txt').write_text('ok')\""
+    )
+    task["e2e"] = [
+        {
+            "name": "dead owner recovery user path",
+            "command": (
+                "python3 -c \"from pathlib import Path; "
+                "assert Path('accepted-dead-owner.txt').read_text(encoding='utf-8') == 'ok'; "
+                "Path('dead-owner-e2e.txt').write_text('ok', encoding='utf-8')\""
+            ),
+        }
+    ]
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    assert harness.start_drive()["started"] is True
+    previous_pid = unused_pid()
+    state = harness_state(project)
+    state["drive_control"]["pid"] = previous_pid
+    state["drive_control"]["last_heartbeat_at"] = "2000-01-01T00:00:00Z"
+    write_harness_state(project, state)
+
+    assert cli_main(["drive", "--project-root", str(project), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    recovery = payload["stale_running_recovery"]
+    assert payload["status"] == "completed"
+    assert payload["results"][0]["status"] == "passed"
+    assert [run["phase"] for run in payload["results"][0]["runs"]] == ["acceptance-1", "e2e"]
+    assert recovery["status"] == "recovered"
+    assert recovery["reason"] == "dead_pid_and_stale_heartbeat"
+    assert recovery["previous_pid"] == previous_pid
+    assert (project / "dead-owner-e2e.txt").read_text(encoding="utf-8") == "ok"
+
+    assert cli_main(["status", "--project-root", str(project), "--json"]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    assert status_payload["drive_control"]["status"] == "idle"
+    assert status_payload["drive_control"]["stale_running_recovery"]["reason"] == "dead_pid_and_stale_heartbeat"
+    assert (
+        status_payload["runtime_dashboard"]["drive_control"]["stale_running_recovery"]["previous_pid"]
+        == previous_pid
+    )
+
+
+def test_stale_running_missing_owner_recovery_allows_next_drive(tmp_path, capsys):
+    project = tmp_path / "stale-running-missing-owner-recovery-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="stale-running-missing-owner-recovery-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["drive_watchdog"] = {"stale_after_seconds": 1}
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0]["command"] = (
+        "python3 -c \"from pathlib import Path; Path('missing-owner-marker.txt').write_text('ok')\""
+    )
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    assert harness.start_drive()["started"] is True
+    state = harness_state(project)
+    state["drive_control"]["pid"] = None
+    state["drive_control"]["last_heartbeat_at"] = "2000-01-01T00:00:00Z"
+    write_harness_state(project, state)
+
+    assert cli_main(["drive", "--project-root", str(project), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    recovery = payload["stale_running_recovery"]
+    assert payload["status"] == "completed"
+    assert recovery["status"] == "recovered"
+    assert recovery["reason"] == "missing_pid_and_stale_heartbeat"
+    assert recovery["previous_pid"] is None
+    assert recovery["pid_alive"] is None
+    assert (project / "missing-owner-marker.txt").read_text(encoding="utf-8") == "ok"
+
+    assert cli_main(["status", "--project-root", str(project), "--json"]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    assert status_payload["drive_control"]["stale_running_recovery"]["reason"] == "missing_pid_and_stale_heartbeat"
+    assert status_payload["runtime_dashboard"]["drive_control"]["stale_running_recovery"]["previous_pid"] is None
+
+
 def test_stale_running_recovery_blocks_live_pid_without_mutating_state(tmp_path, capsys):
     project = tmp_path / "stale-running-live-pid-project"
     project.mkdir()
@@ -5361,6 +5450,60 @@ def test_stale_running_recovery_protects_fresh_heartbeat_without_mutating_state(
     assert payload["drive_control"]["stale_running_block"] is None
     assert not (project / "fresh-heartbeat-marker.txt").exists()
     assert harness_state(project) == state_before
+
+
+def test_stale_running_recovery_preserves_paused_and_cancelled_controls(tmp_path, capsys):
+    paused = tmp_path / "stale-running-paused-control-project"
+    paused.mkdir()
+    init_project(paused, "python-agent", name="stale-running-paused-control-project")
+    paused_roadmap_path = paused / ".engineering/roadmap.yaml"
+    paused_roadmap = json.loads(paused_roadmap_path.read_text(encoding="utf-8"))
+    paused_roadmap["drive_watchdog"] = {"stale_after_seconds": 1}
+    paused_roadmap["milestones"][0]["tasks"][0]["acceptance"][0]["command"] = (
+        "python3 -c \"from pathlib import Path; Path('paused-stale-marker.txt').write_text('no')\""
+    )
+    paused_roadmap_path.write_text(json.dumps(paused_roadmap), encoding="utf-8")
+
+    assert cli_main(["pause", "--project-root", str(paused), "--reason", "operator_pause"]) == 0
+    capsys.readouterr()
+    paused_state = harness_state(paused)
+    paused_state["drive_control"]["active"] = True
+    paused_state["drive_control"]["pid"] = None
+    paused_state["drive_control"]["last_heartbeat_at"] = "2000-01-01T00:00:00Z"
+    write_harness_state(paused, paused_state)
+
+    assert cli_main(["drive", "--project-root", str(paused), "--json"]) == 0
+    paused_payload = json.loads(capsys.readouterr().out)
+    assert paused_payload["status"] == "paused"
+    assert paused_payload["stale_running_preflight"]["status"] == "not_needed"
+    assert harness_state(paused)["drive_control"]["status"] == "paused"
+    assert not (paused / "paused-stale-marker.txt").exists()
+
+    cancelled = tmp_path / "stale-running-cancelled-control-project"
+    cancelled.mkdir()
+    init_project(cancelled, "python-agent", name="stale-running-cancelled-control-project")
+    cancelled_roadmap_path = cancelled / ".engineering/roadmap.yaml"
+    cancelled_roadmap = json.loads(cancelled_roadmap_path.read_text(encoding="utf-8"))
+    cancelled_roadmap["drive_watchdog"] = {"stale_after_seconds": 1}
+    cancelled_roadmap["milestones"][0]["tasks"][0]["acceptance"][0]["command"] = (
+        "python3 -c \"from pathlib import Path; Path('cancelled-stale-marker.txt').write_text('no')\""
+    )
+    cancelled_roadmap_path.write_text(json.dumps(cancelled_roadmap), encoding="utf-8")
+
+    assert cli_main(["cancel", "--project-root", str(cancelled), "--reason", "operator_cancel"]) == 0
+    capsys.readouterr()
+    cancelled_state = harness_state(cancelled)
+    cancelled_state["drive_control"]["active"] = True
+    cancelled_state["drive_control"]["pid"] = None
+    cancelled_state["drive_control"]["last_heartbeat_at"] = "2000-01-01T00:00:00Z"
+    write_harness_state(cancelled, cancelled_state)
+
+    assert cli_main(["drive", "--project-root", str(cancelled), "--json"]) == 1
+    cancelled_payload = json.loads(capsys.readouterr().out)
+    assert cancelled_payload["status"] == "cancelled"
+    assert cancelled_payload["stale_running_preflight"]["status"] == "not_needed"
+    assert harness_state(cancelled)["drive_control"]["status"] == "cancelled"
+    assert not (cancelled / "cancelled-stale-marker.txt").exists()
 
 
 def test_drive_watchdog_status_output_includes_heartbeat_metadata(tmp_path, capsys):

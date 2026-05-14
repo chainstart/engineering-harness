@@ -1235,7 +1235,16 @@ class Harness:
         if heartbeat_dt is not None:
             heartbeat_age_seconds = max(0, int((checked_dt - heartbeat_dt).total_seconds()))
         pid_alive = self._process_is_running(pid)
-        watching = status == "running" or bool(control.get("active")) or status == "stale"
+        protected_control = (
+            status in {"paused", "cancelled"}
+            or bool(control.get("pause_requested"))
+            or bool(control.get("cancel_requested"))
+        )
+        watching = (
+            status == "running"
+            or (bool(control.get("active")) and not protected_control)
+            or status == "stale"
+        )
         stale = False
         reason = None
         message = "drive is not running"
@@ -1329,6 +1338,28 @@ class Harness:
             "recommended_follow_up": self._stale_running_recovery_follow_up(),
         }
         if status != "running" and not active:
+            return payload
+
+        if (
+            status in {"paused", "cancelled"}
+            or bool(control.get("pause_requested"))
+            or bool(control.get("cancel_requested"))
+        ):
+            if status == "cancelled" or bool(control.get("cancel_requested")):
+                protected_reason = "cancelled"
+            else:
+                protected_reason = "paused"
+            payload.update(
+                {
+                    "status": "not_needed",
+                    "reason": protected_reason,
+                    "message": (
+                        f"drive control is {protected_reason}; stale-running recovery is not applied"
+                    ),
+                    "recoverable": False,
+                    "blocking": False,
+                }
+            )
             return payload
 
         if heartbeat_stale and (pid is None or pid_alive is False):
@@ -1728,6 +1759,22 @@ class Harness:
         watchdog = self._drive_watchdog_status(control)
         preflight = self._stale_running_preflight_from_control(control, watchdog=watchdog, reason=reason)
         recovery: dict[str, Any] | None = None
+        if bool(control.get("pause_requested")) or from_status == "paused":
+            return {
+                "started": False,
+                "status": "paused",
+                "message": "drive is paused; run `resume` before starting another drive",
+                "drive_control": self._drive_control_summary_from_state(state),
+                "stale_running_preflight": preflight,
+            }
+        if bool(control.get("cancel_requested")) or from_status == "cancelled":
+            return {
+                "started": False,
+                "status": "cancelled",
+                "message": "drive is cancelled; run `resume` to clear the cancellation before driving again",
+                "drive_control": self._drive_control_summary_from_state(state),
+                "stale_running_preflight": preflight,
+            }
         if preflight.get("status") == "recoverable":
             recovery = self._recover_stale_running_in_state(state, control, preflight, reason=reason)
             from_status = str(control.get("status", "idle"))
@@ -1763,22 +1810,6 @@ class Harness:
                 "message": "stale drive state must be reviewed before starting another drive",
                 "drive_control": summary,
                 "stale_running_preflight": summary.get("stale_running_preflight"),
-            }
-        if bool(control.get("pause_requested")) or from_status == "paused":
-            return {
-                "started": False,
-                "status": "paused",
-                "message": "drive is paused; run `resume` before starting another drive",
-                "drive_control": self._drive_control_summary_from_state(state),
-                "stale_running_preflight": preflight,
-            }
-        if bool(control.get("cancel_requested")) or from_status == "cancelled":
-            return {
-                "started": False,
-                "status": "cancelled",
-                "message": "drive is cancelled; run `resume` to clear the cancellation before driving again",
-                "drive_control": self._drive_control_summary_from_state(state),
-                "stale_running_preflight": preflight,
             }
         now = utc_now()
         control.update(
