@@ -44,6 +44,8 @@ def build_spec_backlog_plan(
     source_values = source_paths or default_spec_backlog_sources(roadmap, include_blueprint=include_blueprint)
     existing_stage_ids = _existing_stage_ids(roadmap)
     existing_task_ids = _existing_task_ids(roadmap)
+    existing_source_stage_keys = _existing_source_stage_keys(roadmap)
+    existing_stage_semantic_keys = _existing_stage_semantic_keys(roadmap)
     stages: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     sources: list[dict[str, Any]] = []
@@ -63,12 +65,18 @@ def build_spec_backlog_plan(
             stage = build_continuation_stage(parsed_stage)
             stage_id = str(stage["id"])
             task_ids = [str(task["id"]) for task in stage.get("tasks", [])]
+            source_stage_key = _source_stage_key(stage)
+            stage_semantic_key = _stage_semantic_key(stage)
             reasons = []
             if stage_id in existing_stage_ids:
                 reasons.append("existing_stage_id")
             duplicate_tasks = [task_id for task_id in task_ids if task_id in existing_task_ids]
             if duplicate_tasks:
                 reasons.append("existing_task_id")
+            if source_stage_key and source_stage_key in existing_source_stage_keys:
+                reasons.append("existing_source_stage")
+            if stage_semantic_key and stage_semantic_key in existing_stage_semantic_keys:
+                reasons.append("existing_stage_semantics")
             if reasons:
                 skipped.append(
                     {
@@ -83,6 +91,10 @@ def build_spec_backlog_plan(
                 continue
             existing_stage_ids.add(stage_id)
             existing_task_ids.update(task_ids)
+            if source_stage_key:
+                existing_source_stage_keys.add(source_stage_key)
+            if stage_semantic_key:
+                existing_stage_semantic_keys.add(stage_semantic_key)
             stages.append(stage)
 
     return {
@@ -411,6 +423,85 @@ def _existing_task_ids(roadmap: dict[str, Any]) -> set[str]:
                 if isinstance(task, dict) and str(task.get("id", "")).strip():
                     task_ids.add(str(task["id"]))
     return task_ids
+
+
+def _existing_source_stage_keys(roadmap: dict[str, Any]) -> set[tuple[str, int]]:
+    keys: set[tuple[str, int]] = set()
+    for stage in _roadmap_stages(roadmap):
+        key = _source_stage_key(stage)
+        if key:
+            keys.add(key)
+    return keys
+
+
+def _existing_stage_semantic_keys(roadmap: dict[str, Any]) -> set[tuple[tuple[str, ...], tuple[str, ...]]]:
+    keys: set[tuple[tuple[str, ...], tuple[str, ...]]] = set()
+    for stage in _roadmap_stages(roadmap):
+        key = _stage_semantic_key(stage)
+        if key:
+            keys.add(key)
+    return keys
+
+
+def _roadmap_stages(roadmap: dict[str, Any]) -> list[dict[str, Any]]:
+    stages: list[dict[str, Any]] = []
+    milestones = roadmap.get("milestones", [])
+    if isinstance(milestones, list):
+        stages.extend(item for item in milestones if isinstance(item, dict))
+    continuation = roadmap.get("continuation") if isinstance(roadmap.get("continuation"), dict) else {}
+    continuation_stages = continuation.get("stages", []) if isinstance(continuation, dict) else []
+    if isinstance(continuation_stages, list):
+        stages.extend(item for item in continuation_stages if isinstance(item, dict))
+    return stages
+
+
+def _source_stage_key(stage: dict[str, Any]) -> tuple[str, int] | None:
+    source = stage.get("source")
+    if not isinstance(source, dict):
+        return None
+    path = str(source.get("path") or "").strip()
+    if not path:
+        return None
+    try:
+        stage_number = int(source.get("stage_number"))
+    except (TypeError, ValueError):
+        return None
+    return (path, stage_number)
+
+
+def _stage_semantic_key(stage: dict[str, Any]) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    refs = _unique_texts(stage.get("spec_refs"))
+    tasks = stage.get("tasks", [])
+    if not isinstance(tasks, list):
+        tasks = []
+    task_texts: list[str] = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        refs.extend(ref for ref in _unique_texts(task.get("spec_refs")) if ref not in refs)
+        source_task = task.get("source_spec_task") if isinstance(task.get("source_spec_task"), dict) else {}
+        task_text = str(source_task.get("task") or task.get("title") or "").rstrip(".")
+        normalized = _semantic_text(task_text)
+        if normalized:
+            task_texts.append(normalized)
+    if not refs or not task_texts:
+        return None
+    return (tuple(sorted(refs)), tuple(task_texts))
+
+
+def _unique_texts(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        if text and text not in items:
+            items.append(text)
+    return items
+
+
+def _semantic_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip().casefold()
 
 
 def _append_sentence(existing: str, text: str) -> str:

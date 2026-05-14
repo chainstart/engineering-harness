@@ -737,6 +737,116 @@ Acceptance:
     assert repeated["skipped_stage_count"] == 1
 
 
+def test_plan_spec_cli_reads_explicit_spec_document_and_skips_semantic_coverage(tmp_path, capsys):
+    project = tmp_path / "plan-spec-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="plan-spec-project")
+    docs_dir = project / "docs"
+    docs_dir.mkdir()
+    spec_plan = docs_dir / "spec-plan.md"
+    spec_plan.write_text(
+        """# Spec Plan
+
+## Stage 3: Spec-To-Roadmap Planner
+
+Requirement refs:
+
+- `EH-SPEC-001`
+- `EH-SPEC-002`
+- `EH-SPEC-013`
+
+Goal:
+
+Generate or update roadmap stages from a specification while preserving traceability.
+
+Tasks:
+
+1. Extend `plan-goal` or add a dedicated planning command that reads a spec document.
+2. Generate milestones, tasks, acceptance gates, E2E gates, and `spec_refs`.
+
+Acceptance:
+
+- Generated tasks cite spec refs.
+- The planner does not duplicate existing roadmap coverage.
+""",
+        encoding="utf-8",
+    )
+
+    exit_code = cli_main(
+        [
+            "plan-spec",
+            "--project-root",
+            str(project),
+            "--spec",
+            str(spec_plan),
+            "--from-stage",
+            "3",
+            "--json",
+        ]
+    )
+
+    proposal = json.loads(capsys.readouterr().out)
+    refs = ["EH-SPEC-001", "EH-SPEC-002", "EH-SPEC-013"]
+    assert exit_code == 0
+    assert proposal["status"] == "proposed"
+    assert proposal["source_count"] == 1
+    assert proposal["stage_count"] == 1
+    assert proposal["task_count"] == 2
+    stage = proposal["stages"][0]
+    assert stage["source"]["path"] == "docs/spec-plan.md"
+    assert stage["spec_refs"] == refs
+    assert [task["spec_refs"] for task in stage["tasks"]] == [refs, refs]
+    assert stage["tasks"][0]["e2e"][0]["spec_refs"] == refs
+
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap.setdefault("continuation", {"enabled": True, "stages": []}).setdefault("stages", []).append(
+        {
+            "id": "already-covered-spec-planner",
+            "title": "Already Covered Spec Planner",
+            "status": "planned",
+            "spec_refs": refs,
+            "tasks": [
+                {
+                    "id": "already-covered-plan-spec",
+                    "title": "Extend `plan-goal` or add a dedicated planning command that reads a spec document",
+                    "status": "pending",
+                    "spec_refs": refs,
+                    "file_scope": ["src/engineering_harness/**", "tests/**", "docs/**"],
+                    "acceptance": [{"name": "local smoke", "command": "python3 -c \"print('ok')\""}],
+                },
+                {
+                    "id": "already-covered-generated-gates",
+                    "title": "Generate milestones, tasks, acceptance gates, E2E gates, and `spec_refs`",
+                    "status": "pending",
+                    "spec_refs": refs,
+                    "file_scope": ["src/engineering_harness/**", "tests/**", "docs/**"],
+                    "acceptance": [{"name": "local smoke", "command": "python3 -c \"print('ok')\""}],
+                },
+            ],
+        }
+    )
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    assert cli_main(
+        [
+            "plan-spec",
+            "--project-root",
+            str(project),
+            "--spec",
+            str(spec_plan),
+            "--from-stage",
+            "3",
+            "--json",
+        ]
+    ) == 0
+    repeated = json.loads(capsys.readouterr().out)
+    assert repeated["status"] == "proposed"
+    assert repeated["stage_count"] == 0
+    assert repeated["skipped_stage_count"] == 1
+    assert repeated["skipped_stages"][0]["reasons"] == ["existing_stage_semantics"]
+
+
 def test_goal_planner_generates_python_behavioral_and_journey_gates(tmp_path):
     proposal = plan_goal_roadmap(
         project_root=tmp_path / "gated-python-agent",

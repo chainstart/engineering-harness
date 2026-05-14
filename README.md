@@ -449,8 +449,9 @@ engh drive --project-root /path/to/project --rolling
 ## Spec Backlog
 
 For spec-driven projects, the harness can turn Markdown `Stage` / `Tasks` sections into
-continuation stages. By default it reads `spec.development_plan` from `.engineering/roadmap.yaml`.
-Use `--from-stage` when earlier stages are already implemented:
+continuation stages with a dedicated planning command. By default `plan-spec` reads
+`spec.development_plan` from `.engineering/roadmap.yaml`; pass `--spec` to read an explicit local
+document. Use `--from-stage` when earlier stages are already implemented:
 
 Roadmaps can also declare the canonical project specification:
 
@@ -473,23 +474,25 @@ unknown ids. `engh status --json` includes compact spec coverage at top-level `s
 summary.
 
 ```bash
-engh spec-backlog --project-root /path/to/project --from-stage 2
-engh spec-backlog --project-root /path/to/project --from-stage 2 --materialize
+engh plan-spec --project-root /path/to/project --from-stage 2
+engh plan-spec --project-root /path/to/project --from-stage 2 --materialize
 ```
 
 Additional sources can be passed explicitly:
 
 ```bash
-engh spec-backlog \
+engh plan-spec \
   --project-root /path/to/project \
-  --source docs/spec-driven-development-plan.md \
-  --source docs/autonomous-engineering-harness-plan.md \
+  --spec docs/spec-driven-development-plan.md \
+  --spec docs/autonomous-engineering-harness-plan.md \
   --materialize
 ```
 
 Generated tasks include source metadata, `spec_refs` when the source stage declares requirement
 ids, Codex implementation and repair commands, local pytest and validation gates, and status JSON
-E2E evidence. Re-running the command skips stages that are already present.
+E2E evidence. Re-running the command skips stages that are already present or already covered by
+the same spec refs and task semantics. `engh spec-backlog` remains available as a compatibility
+alias and accepts the same inputs.
 
 ## Task Example
 

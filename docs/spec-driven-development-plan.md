@@ -176,5 +176,6 @@ Acceptance:
 
 ## Current Implementation Target
 
-This development pass implements Stage 1. Later stages remain planned until Stage 1 is merged and
-validated.
+Stages 1 and 2 establish traceability and the canonical spec index. Stage 3 starts with the local
+`plan-spec` command, which reads a spec-driven development document and proposes or materializes
+traceable continuation stages without adding duplicate coverage.

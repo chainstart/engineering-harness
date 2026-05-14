@@ -924,7 +924,12 @@ def cmd_spec_backlog(args: argparse.Namespace) -> int:
     harness = Harness(root)
     if args.from_stage < 1:
         raise ValueError("--from-stage must be positive")
-    source_paths = [str(source) for source in args.source] if args.source else None
+    source_args = []
+    for attr in ("source", "spec"):
+        values = getattr(args, attr, None)
+        if values:
+            source_args.extend(values)
+    source_paths = [str(source) for source in source_args] if source_args else None
     if args.materialize:
         result = harness.materialize_spec_backlog(
             source_paths=source_paths,
@@ -4213,6 +4218,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("run", "Run the next or selected task acceptance checks", cmd_run),
         ("advance", "Materialize the next continuation milestone into the roadmap", cmd_advance),
         ("frontend-tasks", "Propose or materialize frontend roadmap tasks from the experience plan", cmd_frontend_tasks),
+        ("plan-spec", "Propose or materialize continuation stages from a specification document", cmd_spec_backlog),
         ("spec-backlog", "Propose or materialize continuation stages from specification task lists", cmd_spec_backlog),
         ("self-iterate", "Assess current state and append the next continuation stage", cmd_self_iterate),
         ("pause", "Pause future drive scheduling for this project", cmd_pause),
@@ -4249,7 +4255,8 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--materialize", action="store_true")
             command.add_argument("--milestone-id", default="frontend-visualization")
             command.add_argument("--reason", default="manual_frontend_task_generation")
-        if name == "spec-backlog":
+        if name in {"plan-spec", "spec-backlog"}:
+            command.add_argument("--spec", type=Path, action="append", default=None)
             command.add_argument("--source", type=Path, action="append", default=None)
             command.add_argument("--include-blueprint", action="store_true")
             command.add_argument("--from-stage", type=int, default=1)
