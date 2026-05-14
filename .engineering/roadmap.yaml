@@ -3714,6 +3714,312 @@
           "generated_at": "2026-05-14T12:29:51Z"
         }
       ]
+    },
+    {
+      "id": "docs-spec-driven-development-plan-stage-2-canonical-spec-index",
+      "title": "Canonical Spec Index",
+      "status": "planned",
+      "objective": "Implement the source specification stage from docs/spec-driven-development-plan.md. Stage goal: Represent the canonical project spec as a machine-readable index that can be validated separately from the roadmap.. Requirement refs: EH-SPEC-001, EH-SPEC-002, EH-SPEC-014.",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-14T12:39:47Z",
+      "tasks": [
+        {
+          "id": "docs-spec-driven-development-plan-stage-2-canonical-spec-index-task-1-add-a-top-level-roadmap-spec-block-with-path-kin",
+          "title": "Add a top-level roadmap `spec` block with `path`, `kind`, and optional `requirements_index`",
+          "status": "pending",
+          "max_attempts": 4,
+          "max_task_iterations": 4,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**",
+            "README.md",
+            "bin/**",
+            ".github/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 5400,
+              "sandbox": "workspace-write",
+              "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 2 - Canonical Spec Index\nRequirement refs: EH-SPEC-001, EH-SPEC-002, EH-SPEC-014\nStage goal: Represent the canonical project spec as a machine-readable index that can be validated separately from the roadmap.\nTask: Add a top-level roadmap `spec` block with `path`, `kind`, and optional `requirements_index`\nStage acceptance summary: A roadmap can declare the canonical spec path.; Invalid references to unknown requirement ids are reported.; `status --json` includes compact spec coverage.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 2700,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 2 - Canonical Spec Index\nTask: Add a top-level roadmap `spec` block with `path`, `kind`, and optional `requirements_index`\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 1500,
+              "spec_refs": [
+                "EH-SPEC-001",
+                "EH-SPEC-002",
+                "EH-SPEC-014"
+              ]
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 300,
+              "spec_refs": [
+                "EH-SPEC-001",
+                "EH-SPEC-002",
+                "EH-SPEC-014"
+              ]
+            }
+          ],
+          "e2e": [
+            {
+              "name": "status remains machine-readable",
+              "command": "bin/engh status --project-root . --json",
+              "required": true,
+              "timeout_seconds": 300,
+              "spec_refs": [
+                "EH-SPEC-001",
+                "EH-SPEC-002",
+                "EH-SPEC-014"
+              ]
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-14T12:39:47Z"
+        },
+        {
+          "id": "docs-spec-driven-development-plan-stage-2-canonical-spec-index-task-2-parse-requirement-ids-from-a-structured-spec-ind",
+          "title": "Parse requirement ids from a structured spec index",
+          "status": "pending",
+          "max_attempts": 4,
+          "max_task_iterations": 4,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**",
+            "README.md",
+            "bin/**",
+            ".github/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 5400,
+              "sandbox": "workspace-write",
+              "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 2 - Canonical Spec Index\nRequirement refs: EH-SPEC-001, EH-SPEC-002, EH-SPEC-014\nStage goal: Represent the canonical project spec as a machine-readable index that can be validated separately from the roadmap.\nTask: Parse requirement ids from a structured spec index\nStage acceptance summary: A roadmap can declare the canonical spec path.; Invalid references to unknown requirement ids are reported.; `status --json` includes compact spec coverage.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 2700,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 2 - Canonical Spec Index\nTask: Parse requirement ids from a structured spec index\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 1500,
+              "spec_refs": [
+                "EH-SPEC-001",
+                "EH-SPEC-002",
+                "EH-SPEC-014"
+              ]
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 300,
+              "spec_refs": [
+                "EH-SPEC-001",
+                "EH-SPEC-002",
+                "EH-SPEC-014"
+              ]
+            }
+          ],
+          "e2e": [
+            {
+              "name": "status remains machine-readable",
+              "command": "bin/engh status --project-root . --json",
+              "required": true,
+              "timeout_seconds": 300,
+              "spec_refs": [
+                "EH-SPEC-001",
+                "EH-SPEC-002",
+                "EH-SPEC-014"
+              ]
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-14T12:39:47Z"
+        },
+        {
+          "id": "docs-spec-driven-development-plan-stage-2-canonical-spec-index-task-3-validate-that-task-spec-refs-point-to-known-requ",
+          "title": "Validate that task `spec_refs` point to known requirement ids when an index is configured",
+          "status": "pending",
+          "max_attempts": 4,
+          "max_task_iterations": 4,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**",
+            "README.md",
+            "bin/**",
+            ".github/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 5400,
+              "sandbox": "workspace-write",
+              "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 2 - Canonical Spec Index\nRequirement refs: EH-SPEC-001, EH-SPEC-002, EH-SPEC-014\nStage goal: Represent the canonical project spec as a machine-readable index that can be validated separately from the roadmap.\nTask: Validate that task `spec_refs` point to known requirement ids when an index is configured\nStage acceptance summary: A roadmap can declare the canonical spec path.; Invalid references to unknown requirement ids are reported.; `status --json` includes compact spec coverage.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 2700,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 2 - Canonical Spec Index\nTask: Validate that task `spec_refs` point to known requirement ids when an index is configured\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 1500,
+              "spec_refs": [
+                "EH-SPEC-001",
+                "EH-SPEC-002",
+                "EH-SPEC-014"
+              ]
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 300,
+              "spec_refs": [
+                "EH-SPEC-001",
+                "EH-SPEC-002",
+                "EH-SPEC-014"
+              ]
+            }
+          ],
+          "e2e": [
+            {
+              "name": "status remains machine-readable",
+              "command": "bin/engh status --project-root . --json",
+              "required": true,
+              "timeout_seconds": 300,
+              "spec_refs": [
+                "EH-SPEC-001",
+                "EH-SPEC-002",
+                "EH-SPEC-014"
+              ]
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-14T12:39:47Z"
+        },
+        {
+          "id": "docs-spec-driven-development-plan-stage-2-canonical-spec-index-task-4-add-cli-output-that-summarizes-spec-coverage",
+          "title": "Add CLI output that summarizes spec coverage",
+          "status": "pending",
+          "max_attempts": 4,
+          "max_task_iterations": 4,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**",
+            "README.md",
+            "bin/**",
+            ".github/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 5400,
+              "sandbox": "workspace-write",
+              "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 2 - Canonical Spec Index\nRequirement refs: EH-SPEC-001, EH-SPEC-002, EH-SPEC-014\nStage goal: Represent the canonical project spec as a machine-readable index that can be validated separately from the roadmap.\nTask: Add CLI output that summarizes spec coverage\nStage acceptance summary: A roadmap can declare the canonical spec path.; Invalid references to unknown requirement ids are reported.; `status --json` includes compact spec coverage.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 2700,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 2 - Canonical Spec Index\nTask: Add CLI output that summarizes spec coverage\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 1500,
+              "spec_refs": [
+                "EH-SPEC-001",
+                "EH-SPEC-002",
+                "EH-SPEC-014"
+              ]
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 300,
+              "spec_refs": [
+                "EH-SPEC-001",
+                "EH-SPEC-002",
+                "EH-SPEC-014"
+              ]
+            }
+          ],
+          "e2e": [
+            {
+              "name": "status remains machine-readable",
+              "command": "bin/engh status --project-root . --json",
+              "required": true,
+              "timeout_seconds": 300,
+              "spec_refs": [
+                "EH-SPEC-001",
+                "EH-SPEC-002",
+                "EH-SPEC-014"
+              ]
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-14T12:39:47Z"
+        }
+      ]
     }
   ],
   "continuation": {
