@@ -491,8 +491,10 @@ engh plan-spec \
 Generated tasks include source metadata, `spec_refs` when the source stage declares requirement
 ids, Codex implementation and repair commands, local pytest and validation gates, and status JSON
 E2E evidence. Re-running the command skips stages that are already present or already covered by
-the same spec refs and task semantics. `engh spec-backlog` remains available as a compatibility
-alias and accepts the same inputs.
+the same spec refs and task semantics. When only some source tasks are already covered, the planner
+keeps the remaining tasks and reports the skipped coverage in `skipped_task_count` and
+`skipped_tasks`. `engh spec-backlog` remains available as a compatibility alias and accepts the
+same inputs.
 
 When generated continuation stages are advanced into active milestones, the harness preserves stage
 source metadata plus task and command `spec_refs`, so manifests and reports still trace back to the

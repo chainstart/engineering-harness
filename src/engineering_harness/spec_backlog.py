@@ -46,8 +46,10 @@ def build_spec_backlog_plan(
     existing_task_ids = _existing_task_ids(roadmap)
     existing_source_stage_keys = _existing_source_stage_keys(roadmap)
     existing_stage_semantic_keys = _existing_stage_semantic_keys(roadmap)
+    existing_task_semantic_index = _existing_task_semantic_index(roadmap)
     stages: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    skipped_tasks: list[dict[str, Any]] = []
     sources: list[dict[str, Any]] = []
 
     for source_value in source_values:
@@ -64,20 +66,24 @@ def build_spec_backlog_plan(
         for parsed_stage in parsed["stages"]:
             stage = build_continuation_stage(parsed_stage)
             stage_id = str(stage["id"])
-            task_ids = [str(task["id"]) for task in stage.get("tasks", [])]
+            stage_tasks = stage.get("tasks", []) if isinstance(stage.get("tasks"), list) else []
+            task_ids = [str(task["id"]) for task in stage_tasks if isinstance(task, dict)]
             source_stage_key = _source_stage_key(stage)
             stage_semantic_key = _stage_semantic_key(stage)
+            task_duplicate_entries = _duplicate_task_entries(
+                stage,
+                existing_task_ids=existing_task_ids,
+                existing_task_semantic_index=existing_task_semantic_index,
+            )
             reasons = []
             if stage_id in existing_stage_ids:
                 reasons.append("existing_stage_id")
-            duplicate_tasks = [task_id for task_id in task_ids if task_id in existing_task_ids]
-            if duplicate_tasks:
-                reasons.append("existing_task_id")
             if source_stage_key and source_stage_key in existing_source_stage_keys:
                 reasons.append("existing_source_stage")
             if stage_semantic_key and stage_semantic_key in existing_stage_semantic_keys:
                 reasons.append("existing_stage_semantics")
             if reasons:
+                skipped_tasks.extend(task_duplicate_entries)
                 skipped.append(
                     {
                         "id": stage_id,
@@ -85,12 +91,48 @@ def build_spec_backlog_plan(
                         "source": parsed_stage["source"],
                         "stage_number": parsed_stage["stage_number"],
                         "reasons": reasons,
-                        "duplicate_task_ids": duplicate_tasks,
+                        "duplicate_task_ids": _duplicate_task_ids(task_duplicate_entries),
+                        "skipped_tasks": task_duplicate_entries,
                     }
                 )
                 continue
+            if task_duplicate_entries:
+                skipped_tasks.extend(task_duplicate_entries)
+                if len(task_duplicate_entries) >= len(stage_tasks):
+                    skipped.append(
+                        {
+                            "id": stage_id,
+                            "title": stage["title"],
+                            "source": parsed_stage["source"],
+                            "stage_number": parsed_stage["stage_number"],
+                            "reasons": _unique_reason_order(task_duplicate_entries),
+                            "duplicate_task_ids": _duplicate_task_ids(task_duplicate_entries),
+                            "skipped_tasks": task_duplicate_entries,
+                        }
+                    )
+                    continue
+                skipped_indexes = {
+                    int(entry["task_index"])
+                    for entry in task_duplicate_entries
+                    if isinstance(entry.get("task_index"), int)
+                }
+                remaining_tasks = [
+                    task
+                    for task_index, task in enumerate(stage_tasks, start=1)
+                    if task_index not in skipped_indexes
+                ]
+                _replace_stage_tasks(
+                    stage,
+                    remaining_tasks,
+                    source_task_count=len(stage_tasks),
+                    skipped_task_count=len(task_duplicate_entries),
+                    skipped_tasks=task_duplicate_entries,
+                )
+                task_ids = [str(task["id"]) for task in remaining_tasks if isinstance(task, dict)]
+                stage_semantic_key = _stage_semantic_key(stage)
             existing_stage_ids.add(stage_id)
             existing_task_ids.update(task_ids)
+            _add_stage_task_semantic_entries(existing_task_semantic_index, stage)
             if source_stage_key:
                 existing_source_stage_keys.add(source_stage_key)
             if stage_semantic_key:
@@ -109,6 +151,8 @@ def build_spec_backlog_plan(
         "task_count": sum(len(stage.get("tasks", [])) for stage in stages),
         "skipped_stage_count": len(skipped),
         "skipped_stages": skipped,
+        "skipped_task_count": len(skipped_tasks),
+        "skipped_tasks": skipped_tasks,
         "stages": stages,
     }
 
@@ -331,12 +375,53 @@ def materialize_spec_backlog_plan(
         continuation_stages = []
         continuation["stages"] = continuation_stages
     existing_stage_ids = _existing_stage_ids(updated)
+    existing_task_ids = _existing_task_ids(updated)
+    existing_stage_semantic_keys = _existing_stage_semantic_keys(updated)
+    existing_task_semantic_index = _existing_task_semantic_index(updated)
     added = 0
     for stage in stages:
-        if str(stage.get("id")) in existing_stage_ids:
+        candidate = deepcopy(stage)
+        stage_id = str(candidate.get("id"))
+        stage_semantic_key = _stage_semantic_key(candidate)
+        if stage_id in existing_stage_ids:
             continue
-        continuation_stages.append(stage)
-        existing_stage_ids.add(str(stage.get("id")))
+        if stage_semantic_key and stage_semantic_key in existing_stage_semantic_keys:
+            continue
+        tasks = candidate.get("tasks", []) if isinstance(candidate.get("tasks"), list) else []
+        task_duplicate_entries = _duplicate_task_entries(
+            candidate,
+            existing_task_ids=existing_task_ids,
+            existing_task_semantic_index=existing_task_semantic_index,
+        )
+        if task_duplicate_entries:
+            if len(task_duplicate_entries) >= len(tasks):
+                continue
+            skipped_indexes = {
+                int(entry["task_index"])
+                for entry in task_duplicate_entries
+                if isinstance(entry.get("task_index"), int)
+            }
+            remaining_tasks = [
+                task
+                for task_index, task in enumerate(tasks, start=1)
+                if task_index not in skipped_indexes
+            ]
+            _replace_stage_tasks(
+                candidate,
+                remaining_tasks,
+                source_task_count=len(tasks),
+                skipped_task_count=len(task_duplicate_entries),
+                skipped_tasks=task_duplicate_entries,
+            )
+            stage_semantic_key = _stage_semantic_key(candidate)
+        continuation_stages.append(candidate)
+        existing_stage_ids.add(stage_id)
+        for task in candidate.get("tasks", []):
+            if isinstance(task, dict) and str(task.get("id", "")).strip():
+                existing_task_ids.add(str(task["id"]))
+        _add_stage_task_semantic_entries(existing_task_semantic_index, candidate)
+        if stage_semantic_key:
+            existing_stage_semantic_keys.add(stage_semantic_key)
         added += 1
     return updated, added
 
@@ -443,6 +528,38 @@ def _existing_stage_semantic_keys(roadmap: dict[str, Any]) -> set[tuple[tuple[st
     return keys
 
 
+def _existing_task_semantic_index(roadmap: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    index: dict[str, list[dict[str, Any]]] = {}
+    for stage in _roadmap_stages(roadmap):
+        _add_stage_task_semantic_entries(index, stage)
+    return index
+
+
+def _add_stage_task_semantic_entries(index: dict[str, list[dict[str, Any]]], stage: dict[str, Any]) -> None:
+    stage_id = str(stage.get("id", "")).strip()
+    inherited_refs = _unique_texts(stage.get("spec_refs"))
+    tasks = stage.get("tasks", [])
+    if not isinstance(tasks, list):
+        return
+    for task_index, task in enumerate(tasks, start=1):
+        if not isinstance(task, dict):
+            continue
+        parts = _task_semantic_parts(task, inherited_refs=inherited_refs)
+        if parts is None:
+            continue
+        refs, semantic_text = parts
+        task_id = str(task.get("id", "")).strip()
+        index.setdefault(semantic_text, []).append(
+            {
+                "stage_id": stage_id,
+                "task_id": task_id,
+                "task_index": task_index,
+                "title": str(task.get("title", "")).strip(),
+                "spec_refs": list(refs),
+            }
+        )
+
+
 def _roadmap_stages(roadmap: dict[str, Any]) -> list[dict[str, Any]]:
     stages: list[dict[str, Any]] = []
     milestones = roadmap.get("milestones", [])
@@ -486,7 +603,130 @@ def _stage_semantic_key(stage: dict[str, Any]) -> tuple[tuple[str, ...], tuple[s
             task_texts.append(normalized)
     if not refs or not task_texts:
         return None
-    return (tuple(sorted(refs)), tuple(task_texts))
+    return (tuple(sorted(refs)), tuple(sorted(task_texts)))
+
+
+def _duplicate_task_entries(
+    stage: dict[str, Any],
+    *,
+    existing_task_ids: set[str],
+    existing_task_semantic_index: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    inherited_refs = _unique_texts(stage.get("spec_refs"))
+    tasks = stage.get("tasks", [])
+    if not isinstance(tasks, list):
+        return entries
+    for task_index, task in enumerate(tasks, start=1):
+        if not isinstance(task, dict):
+            continue
+        reasons: list[str] = []
+        task_id = str(task.get("id", "")).strip()
+        if task_id and task_id in existing_task_ids:
+            reasons.append("existing_task_id")
+        semantic_match = _task_semantic_match(
+            task,
+            inherited_refs=inherited_refs,
+            existing_task_semantic_index=existing_task_semantic_index,
+        )
+        if semantic_match is not None:
+            reasons.append("existing_task_semantics")
+        if not reasons:
+            continue
+        source_task = task.get("source_spec_task") if isinstance(task.get("source_spec_task"), dict) else {}
+        entry: dict[str, Any] = {
+            "stage_id": str(stage.get("id", "")).strip(),
+            "stage_title": str(stage.get("title", "")).strip(),
+            "task_id": task_id,
+            "task_title": str(task.get("title", "")).strip(),
+            "task_index": int(source_task.get("task_index") or task_index),
+            "reasons": reasons,
+        }
+        if semantic_match is not None:
+            entry.update(semantic_match)
+        entries.append(entry)
+    return entries
+
+
+def _task_semantic_match(
+    task: dict[str, Any],
+    *,
+    inherited_refs: list[str],
+    existing_task_semantic_index: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any] | None:
+    parts = _task_semantic_parts(task, inherited_refs=inherited_refs)
+    if parts is None:
+        return None
+    refs, semantic_text = parts
+    ref_set = set(refs)
+    matches = [
+        entry
+        for entry in existing_task_semantic_index.get(semantic_text, [])
+        if ref_set.issubset(set(entry.get("spec_refs", [])))
+    ]
+    if not matches:
+        return None
+    return {
+        "spec_refs": list(refs),
+        "semantic_text": semantic_text,
+        "matched_task_ids": [str(entry.get("task_id", "")).strip() for entry in matches if str(entry.get("task_id", "")).strip()],
+        "matched_stage_ids": [str(entry.get("stage_id", "")).strip() for entry in matches if str(entry.get("stage_id", "")).strip()],
+    }
+
+
+def _task_semantic_parts(
+    task: dict[str, Any],
+    *,
+    inherited_refs: list[str],
+) -> tuple[tuple[str, ...], str] | None:
+    refs = list(inherited_refs)
+    for ref in _unique_texts(task.get("spec_refs")):
+        if ref not in refs:
+            refs.append(ref)
+    source_task = task.get("source_spec_task") if isinstance(task.get("source_spec_task"), dict) else {}
+    task_text = str(source_task.get("task") or task.get("title") or "").rstrip(".")
+    semantic_text = _semantic_text(task_text)
+    if not refs or not semantic_text:
+        return None
+    return (tuple(sorted(refs)), semantic_text)
+
+
+def _replace_stage_tasks(
+    stage: dict[str, Any],
+    tasks: list[dict[str, Any]],
+    *,
+    source_task_count: int,
+    skipped_task_count: int,
+    skipped_tasks: list[dict[str, Any]],
+) -> None:
+    stage["tasks"] = tasks
+    stage["skipped_task_count"] = skipped_task_count
+    stage["skipped_tasks"] = skipped_tasks
+    source = stage.get("source")
+    if isinstance(source, dict):
+        source["task_count"] = len(tasks)
+        if source_task_count != len(tasks):
+            source["source_task_count"] = source_task_count
+
+
+def _duplicate_task_ids(entries: list[dict[str, Any]]) -> list[str]:
+    task_ids: list[str] = []
+    for entry in entries:
+        if "existing_task_id" not in entry.get("reasons", []):
+            continue
+        task_id = str(entry.get("task_id", "")).strip()
+        if task_id and task_id not in task_ids:
+            task_ids.append(task_id)
+    return task_ids
+
+
+def _unique_reason_order(entries: list[dict[str, Any]]) -> list[str]:
+    reasons: list[str] = []
+    for entry in entries:
+        for reason in entry.get("reasons", []):
+            if reason and reason not in reasons:
+                reasons.append(str(reason))
+    return reasons
 
 
 def _unique_texts(value: Any) -> list[str]:
@@ -501,7 +741,8 @@ def _unique_texts(value: Any) -> list[str]:
 
 
 def _semantic_text(value: str) -> str:
-    return re.sub(r"\s+", " ", value).strip().casefold()
+    text = re.sub(r"[`*_]+", "", value)
+    return re.sub(r"\s+", " ", text).strip().rstrip(".").casefold()
 
 
 def _append_sentence(existing: str, text: str) -> str:

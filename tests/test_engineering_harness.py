@@ -808,18 +808,16 @@ Acceptance:
             "spec_refs": refs,
             "tasks": [
                 {
-                    "id": "already-covered-plan-spec",
-                    "title": "Extend `plan-goal` or add a dedicated planning command that reads a spec document",
+                    "id": "already-covered-generated-gates",
+                    "title": "Generate milestones, tasks, acceptance gates, E2E gates, and `spec_refs`",
                     "status": "pending",
-                    "spec_refs": refs,
                     "file_scope": ["src/engineering_harness/**", "tests/**", "docs/**"],
                     "acceptance": [{"name": "local smoke", "command": "python3 -c \"print('ok')\""}],
                 },
                 {
-                    "id": "already-covered-generated-gates",
-                    "title": "Generate milestones, tasks, acceptance gates, E2E gates, and `spec_refs`",
+                    "id": "already-covered-plan-spec",
+                    "title": "Extend `plan-goal` or add a dedicated planning command that reads a spec document",
                     "status": "pending",
-                    "spec_refs": refs,
                     "file_scope": ["src/engineering_harness/**", "tests/**", "docs/**"],
                     "acceptance": [{"name": "local smoke", "command": "python3 -c \"print('ok')\""}],
                 },
@@ -845,6 +843,91 @@ Acceptance:
     assert repeated["stage_count"] == 0
     assert repeated["skipped_stage_count"] == 1
     assert repeated["skipped_stages"][0]["reasons"] == ["existing_stage_semantics"]
+
+
+def test_plan_spec_cli_filters_partially_covered_tasks_by_spec_refs_and_semantics(tmp_path, capsys):
+    project = tmp_path / "partial-plan-spec-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="partial-plan-spec-project")
+    docs_dir = project / "docs"
+    docs_dir.mkdir()
+    spec_plan = docs_dir / "spec-plan.md"
+    spec_plan.write_text(
+        """# Spec Plan
+
+## Stage 3: Spec-To-Roadmap Planner
+
+Requirement refs:
+
+- `EH-SPEC-001`
+- `EH-SPEC-002`
+- `EH-SPEC-013`
+
+Goal:
+
+Generate or update roadmap stages from a specification while preserving traceability.
+
+Tasks:
+
+1. Add duplicate-plan detection based on spec refs and task semantics.
+2. Make self-iteration append continuation stages that cite spec refs.
+
+Acceptance:
+
+- The planner does not duplicate existing roadmap coverage.
+""",
+        encoding="utf-8",
+    )
+    refs = ["EH-SPEC-001", "EH-SPEC-002", "EH-SPEC-013"]
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap.setdefault("continuation", {"enabled": True, "stages": []}).setdefault("stages", []).append(
+        {
+            "id": "already-covered-duplicate-plan-task",
+            "title": "Already Covered Duplicate Plan Task",
+            "status": "planned",
+            "tasks": [
+                {
+                    "id": "already-covered-task-semantics",
+                    "title": "Add duplicate-plan detection based on spec refs and task semantics.",
+                    "status": "pending",
+                    "spec_refs": refs,
+                    "file_scope": ["src/engineering_harness/**", "tests/**", "docs/**"],
+                    "acceptance": [{"name": "local smoke", "command": "python3 -c \"print('ok')\""}],
+                }
+            ],
+        }
+    )
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    exit_code = cli_main(
+        [
+            "plan-spec",
+            "--project-root",
+            str(project),
+            "--spec",
+            str(spec_plan),
+            "--from-stage",
+            "3",
+            "--json",
+        ]
+    )
+
+    proposal = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert proposal["status"] == "proposed"
+    assert proposal["stage_count"] == 1
+    assert proposal["task_count"] == 1
+    assert proposal["skipped_task_count"] == 1
+    assert proposal["skipped_tasks"][0]["reasons"] == ["existing_task_semantics"]
+    assert proposal["skipped_tasks"][0]["matched_task_ids"] == ["already-covered-task-semantics"]
+    stage = proposal["stages"][0]
+    assert stage["source"]["task_count"] == 1
+    assert stage["source"]["source_task_count"] == 2
+    assert stage["skipped_task_count"] == 1
+    assert [task["title"] for task in stage["tasks"]] == [
+        "Make self-iteration append continuation stages that cite spec refs"
+    ]
 
 
 def test_goal_planner_generates_python_behavioral_and_journey_gates(tmp_path):

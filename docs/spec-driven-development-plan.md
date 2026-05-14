@@ -178,6 +178,8 @@ Acceptance:
 
 Stages 1 and 2 establish traceability and the canonical spec index. Stage 3 starts with the local
 `plan-spec` command, which reads a spec-driven development document and proposes or materializes
-traceable continuation stages without adding duplicate coverage. Generated spec traceability is
-kept when those stages advance into active milestones, and self-iteration assessments report which
-requirement refs newly appended stages advance.
+traceable continuation stages without adding duplicate coverage. Duplicate detection compares
+source task semantics with existing roadmap task semantics under the same spec refs, so partially
+covered stages keep only the still-uncovered tasks. Generated spec traceability is kept when those
+stages advance into active milestones, and self-iteration assessments report which requirement refs
+newly appended stages advance.
