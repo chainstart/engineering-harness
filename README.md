@@ -494,6 +494,11 @@ E2E evidence. Re-running the command skips stages that are already present or al
 the same spec refs and task semantics. `engh spec-backlog` remains available as a compatibility
 alias and accepts the same inputs.
 
+When generated continuation stages are advanced into active milestones, the harness preserves stage
+source metadata plus task and command `spec_refs`, so manifests and reports still trace back to the
+source specification. Self-iteration assessments also summarize the requirement refs advanced by
+newly appended stages.
+
 ## Task Example
 
 ```json

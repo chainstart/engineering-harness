@@ -6352,13 +6352,34 @@ def test_advance_materializes_next_continuation_stage(tmp_path):
                 "id": "stage-a",
                 "title": "Stage A",
                 "objective": "Create a generated validation task.",
+                "source": {"path": "docs/spec-plan.md", "stage_number": 3},
+                "spec_refs": ["EH-SPEC-001", "EH-SPEC-013"],
                 "tasks": [
                     {
                         "id": "generated-test",
                         "title": "Generated Test",
+                        "spec_refs": ["EH-SPEC-001", "EH-SPEC-013"],
+                        "source_spec_task": {
+                            "path": "docs/spec-plan.md",
+                            "stage_number": 3,
+                            "task_index": 1,
+                            "task": "Generated Test",
+                        },
                         "file_scope": ["tests/**"],
-                        "acceptance": [{"name": "ok", "command": "python3 -c \"print('ok')\""}],
-                        "e2e": [{"name": "journey ok", "command": "python3 -c \"print('e2e')\""}],
+                        "acceptance": [
+                            {
+                                "name": "ok",
+                                "command": "python3 -c \"print('ok')\"",
+                                "spec_refs": ["EH-SPEC-001"],
+                            }
+                        ],
+                        "e2e": [
+                            {
+                                "name": "journey ok",
+                                "command": "python3 -c \"print('e2e')\"",
+                                "spec_refs": ["EH-SPEC-013"],
+                            }
+                        ],
                     }
                 ],
             }
@@ -6371,8 +6392,14 @@ def test_advance_materializes_next_continuation_stage(tmp_path):
     assert exit_code == 0
     updated = json.loads(roadmap_path.read_text(encoding="utf-8"))
     assert updated["milestones"][0]["id"] == "stage-a"
+    assert updated["milestones"][0]["source"] == {"path": "docs/spec-plan.md", "stage_number": 3}
+    assert updated["milestones"][0]["spec_refs"] == ["EH-SPEC-001", "EH-SPEC-013"]
     assert updated["milestones"][0]["tasks"][0]["id"] == "generated-test"
+    assert updated["milestones"][0]["tasks"][0]["spec_refs"] == ["EH-SPEC-001", "EH-SPEC-013"]
+    assert updated["milestones"][0]["tasks"][0]["source_spec_task"]["task"] == "Generated Test"
+    assert updated["milestones"][0]["tasks"][0]["acceptance"][0]["spec_refs"] == ["EH-SPEC-001"]
     assert updated["milestones"][0]["tasks"][0]["e2e"][0]["name"] == "journey ok"
+    assert updated["milestones"][0]["tasks"][0]["e2e"][0]["spec_refs"] == ["EH-SPEC-013"]
 
 
 def test_validate_allows_materialized_continuation_stage_task_ids(tmp_path):
@@ -7462,6 +7489,39 @@ def test_self_iteration_output_guard_accepts_valid_appended_stage(tmp_path):
     report = Path(project, result["report"]).read_text(encoding="utf-8")
     assert "## Output Validation" in report
     assert "- Status: `passed`" in report
+
+
+def test_self_iteration_reports_new_stage_requirement_refs(tmp_path):
+    project, _roadmap_path = self_iteration_guard_project(tmp_path)
+    refs = ["EH-SPEC-001", "EH-SPEC-013"]
+    stage = valid_self_iteration_stage("spec-guard-stage", "spec-guard-task")
+    stage["spec_refs"] = refs
+    stage["tasks"][0]["spec_refs"] = refs
+    stage["tasks"][0]["acceptance"][0]["spec_refs"] = ["EH-SPEC-001"]
+    stage["tasks"][0]["e2e"] = [
+        {
+            "name": "spec guard e2e",
+            "command": "python3 -c \"print('spec guard e2e ok')\"",
+            "timeout_seconds": 30,
+            "spec_refs": ["EH-SPEC-013"],
+        }
+    ]
+    write_self_iteration_guard_planner(project, [stage])
+
+    result = Harness(project).run_self_iteration(reason="spec-ref-summary")
+
+    assert result["status"] == "planned"
+    requirement_refs = result["validation"]["new_stage_requirement_refs"]
+    assert requirement_refs[0]["stage_id"] == "spec-guard-stage"
+    assert requirement_refs[0]["spec_refs"] == refs
+    assert requirement_refs[0]["tasks"][0]["spec_refs"] == refs
+    assert requirement_refs[0]["tasks"][0]["command_spec_refs"] == refs
+    report = Path(project, result["report"]).read_text(encoding="utf-8")
+    assert "## Requirement Advancement" in report
+    assert "- `spec-guard-stage` advances: `EH-SPEC-001`, `EH-SPEC-013`" in report
+
+    latest = Harness(project).self_iteration_summary()["latest_assessment"]
+    assert latest["validation"]["new_stage_requirement_refs"][0]["spec_refs"] == refs
 
 
 def test_duplicate_plan_guard_rejects_exact_duplicate_stage_under_new_ids(tmp_path):

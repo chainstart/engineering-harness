@@ -3499,6 +3499,7 @@ class Harness:
                 "error_count": validation.get("error_count", 0),
                 "warning_count": validation.get("warning_count", 0),
                 "new_stage_ids": deepcopy(validation.get("new_stage_ids", [])),
+                "new_stage_requirement_refs": deepcopy(validation.get("new_stage_requirement_refs", [])),
             }
         return {key: value for key, value in compact.items() if value is not None}
 
@@ -4248,17 +4249,19 @@ class Harness:
         tasks = stage.get("tasks", [])
         if not isinstance(tasks, list):
             tasks = []
-        return {
+        payload = {
             "id": str(stage.get("id", "")),
             "title": str(stage.get("title", "")),
             "status": str(stage.get("status", "planned")),
             "objective": self._truncate_text(str(stage.get("objective", "")), 500),
+            "spec_refs": self._collect_stage_spec_refs(stage),
             "task_count": len(tasks),
             "tasks": [
                 {
                     "id": str(task.get("id", "")),
                     "title": str(task.get("title", "")),
                     "status": str(task.get("status", "pending")),
+                    "spec_refs": self._collect_task_spec_refs(task),
                     "file_scope": [str(scope) for scope in task.get("file_scope", [])]
                     if isinstance(task.get("file_scope"), list)
                     else [],
@@ -4270,6 +4273,83 @@ class Harness:
             ],
             "task_count_truncated": len(tasks) > 8,
         }
+        return payload
+
+    def _append_unique_spec_refs(self, refs: list[str], value: Any) -> None:
+        for ref in self._normalize_spec_refs(value):
+            if ref not in refs:
+                refs.append(ref)
+
+    def _collect_command_group_spec_refs(self, value: Any) -> list[str]:
+        refs: list[str] = []
+        if not isinstance(value, list):
+            return refs
+        for item in value:
+            if isinstance(item, dict):
+                self._append_unique_spec_refs(refs, item.get("spec_refs"))
+        return refs
+
+    def _collect_task_spec_refs(self, task: dict[str, Any]) -> list[str]:
+        refs: list[str] = []
+        self._append_unique_spec_refs(refs, task.get("spec_refs"))
+        for group_name in ("implementation", "repair", "acceptance", "e2e"):
+            for ref in self._collect_command_group_spec_refs(task.get(group_name)):
+                if ref not in refs:
+                    refs.append(ref)
+        return refs
+
+    def _collect_stage_spec_refs(self, stage: dict[str, Any]) -> list[str]:
+        refs: list[str] = []
+        self._append_unique_spec_refs(refs, stage.get("spec_refs"))
+        tasks = stage.get("tasks", [])
+        if not isinstance(tasks, list):
+            return refs
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            for ref in self._collect_task_spec_refs(task):
+                if ref not in refs:
+                    refs.append(ref)
+        return refs
+
+    def _self_iteration_stage_requirement_ref_summaries(self, stages: list[Any]) -> list[dict[str, Any]]:
+        summaries: list[dict[str, Any]] = []
+        for stage in stages:
+            if not isinstance(stage, dict):
+                continue
+            tasks = stage.get("tasks", [])
+            if not isinstance(tasks, list):
+                tasks = []
+            task_summaries: list[dict[str, Any]] = []
+            for task in tasks[:8]:
+                if not isinstance(task, dict):
+                    continue
+                task_spec_refs = list(self._normalize_spec_refs(task.get("spec_refs")))
+                command_spec_refs: list[str] = []
+                for group_name in ("implementation", "repair", "acceptance", "e2e"):
+                    for ref in self._collect_command_group_spec_refs(task.get(group_name)):
+                        if ref not in command_spec_refs:
+                            command_spec_refs.append(ref)
+                task_summaries.append(
+                    {
+                        "task_id": str(task.get("id", "")),
+                        "title": self._truncate_text(str(task.get("title", "")), 160),
+                        "spec_refs": self._collect_task_spec_refs(task),
+                        "task_spec_refs": task_spec_refs,
+                        "command_spec_refs": command_spec_refs,
+                    }
+                )
+            summaries.append(
+                {
+                    "stage_id": str(stage.get("id", "")),
+                    "title": self._truncate_text(str(stage.get("title", "")), 160),
+                    "spec_refs": self._collect_stage_spec_refs(stage),
+                    "task_count": len(tasks),
+                    "tasks": task_summaries,
+                    "task_count_truncated": len(tasks) > 8,
+                }
+            )
+        return summaries
 
     def _self_iteration_duplicate_plan_summary(self) -> dict[str, Any]:
         continuation = self.roadmap.get("continuation") if isinstance(self.roadmap.get("continuation"), dict) else {}
@@ -5391,6 +5471,7 @@ class Harness:
         expected_new_stage_count: int,
         actual_new_stage_count: int,
         new_stage_ids: list[str],
+        new_stage_requirement_refs: list[dict[str, Any]] | None = None,
         roadmap_validation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return {
@@ -5402,6 +5483,7 @@ class Harness:
             "expected_new_stage_count": expected_new_stage_count,
             "actual_new_stage_count": actual_new_stage_count,
             "new_stage_ids": new_stage_ids,
+            "new_stage_requirement_refs": new_stage_requirement_refs or [],
             "roadmap_validation": roadmap_validation,
         }
 
@@ -5433,6 +5515,7 @@ class Harness:
             if existing_prefix != before_stages:
                 errors.append("planner output mutated existing continuation stages; only appends are allowed")
             new_stages = after_stages[existing_stage_count:]
+        new_stage_requirement_refs = self._self_iteration_stage_requirement_ref_summaries(new_stages)
 
         if self._self_iteration_without_new_stages(after_roadmap, existing_stage_count) != before_roadmap:
             if after_roadmap.get("milestones", []) != before_roadmap.get("milestones", []):
@@ -5507,6 +5590,7 @@ class Harness:
                 expected_new_stage_count=expected_new_stage_count,
                 actual_new_stage_count=len(new_stages),
                 new_stage_ids=new_stage_ids,
+                new_stage_requirement_refs=new_stage_requirement_refs,
             )
 
         current_roadmap = self.roadmap
@@ -5525,6 +5609,7 @@ class Harness:
             expected_new_stage_count=expected_new_stage_count,
             actual_new_stage_count=len(new_stages),
             new_stage_ids=new_stage_ids,
+            new_stage_requirement_refs=new_stage_requirement_refs,
             roadmap_validation=roadmap_validation,
         )
 
@@ -5842,6 +5927,8 @@ Rules:
 - Each new task must include non-empty `file_scope` and local acceptance commands.
 - If code must be written, use an `implementation` entry with `"executor": "codex"` and a focused prompt.
 - Include a `repair` entry with `"executor": "codex"` for every task that has implementation work.
+- When the roadmap or specification uses `spec_refs`, add the relevant requirement refs to new stages,
+  tasks, acceptance commands, and E2E commands so the assessment can explain the requirements advanced.
 - Do not require live operations, private keys, mainnet writes, production deployments, paid services, or external accounts.
 - Prefer the next step that moves the project toward the stated blueprint and vision.
 - Keep scope tight enough that a coding agent can complete the stage in one iteration.
@@ -5996,6 +6083,27 @@ continuation stage(s) were appended.
                 lines.extend(["Warnings:", ""])
                 lines.extend(f"- {warning}" for warning in validation.get("warnings", []))
                 lines.append("")
+            requirement_refs = validation.get("new_stage_requirement_refs")
+            if isinstance(requirement_refs, list) and requirement_refs:
+                lines.extend(["## Requirement Advancement", ""])
+                for item in requirement_refs:
+                    if not isinstance(item, dict):
+                        continue
+                    stage_id = str(item.get("stage_id") or "unknown")
+                    refs = item.get("spec_refs") if isinstance(item.get("spec_refs"), list) else []
+                    ref_text = ", ".join(f"`{ref}`" for ref in refs) if refs else "`none declared`"
+                    lines.append(f"- `{stage_id}` advances: {ref_text}")
+                    tasks = item.get("tasks") if isinstance(item.get("tasks"), list) else []
+                    for task in tasks:
+                        if not isinstance(task, dict):
+                            continue
+                        task_id = str(task.get("task_id") or "unknown")
+                        task_refs = task.get("spec_refs") if isinstance(task.get("spec_refs"), list) else []
+                        task_ref_text = (
+                            ", ".join(f"`{ref}`" for ref in task_refs) if task_refs else "`none declared`"
+                        )
+                        lines.append(f"  - Task `{task_id}`: {task_ref_text}")
+                lines.append("")
         if run.stdout:
             lines.extend(["Stdout:", "", "```text", run.stdout, "```", ""])
         if run.stderr:
@@ -6058,12 +6166,16 @@ continuation stage(s) were appended.
         }
 
     def _continuation_stage_payload(self, stage: dict[str, Any]) -> dict[str, Any]:
-        return {
+        payload = {
             "id": str(stage.get("id", "")),
             "title": str(stage.get("title", stage.get("id", ""))),
             "objective": str(stage.get("objective", "")),
             "task_count": len(stage.get("tasks", []) if isinstance(stage.get("tasks", []), list) else []),
         }
+        refs = self._collect_stage_spec_refs(stage)
+        if refs:
+            payload["spec_refs"] = refs
+        return payload
 
     def _materialize_continuation_stage(
         self,
@@ -6087,25 +6199,25 @@ continuation stage(s) were appended.
             acceptance = task.get("acceptance") or []
             if not isinstance(acceptance, list) or not acceptance:
                 raise ValueError(f"continuation task {task_id} must define acceptance commands")
-            materialized_tasks.append(
-                {
-                    "id": task_id,
-                    "title": str(task.get("title", task_id)),
-                    "status": str(task.get("status", "pending")),
-                    "max_attempts": int(task.get("max_attempts", 2)),
-                    "max_task_iterations": int(task.get("max_task_iterations", 1)),
-                    "manual_approval_required": bool(task.get("manual_approval_required", False)),
-                    "agent_approval_required": bool(task.get("agent_approval_required", False)),
-                    "file_scope": list(task.get("file_scope", [])),
-                    "implementation": task.get("implementation", []),
-                    "repair": task.get("repair", []),
-                    "acceptance": acceptance,
-                    "e2e": task.get("e2e", []),
-                    "generated_by": "engineering-harness-continuation",
-                    "generated_at": utc_now(),
-                }
-            )
-        return {
+            materialized_task = {
+                "id": task_id,
+                "title": str(task.get("title", task_id)),
+                "status": str(task.get("status", "pending")),
+                "max_attempts": int(task.get("max_attempts", 2)),
+                "max_task_iterations": int(task.get("max_task_iterations", 1)),
+                "manual_approval_required": bool(task.get("manual_approval_required", False)),
+                "agent_approval_required": bool(task.get("agent_approval_required", False)),
+                "file_scope": list(task.get("file_scope", [])),
+                "implementation": task.get("implementation", []),
+                "repair": task.get("repair", []),
+                "acceptance": acceptance,
+                "e2e": task.get("e2e", []),
+                "generated_by": "engineering-harness-continuation",
+                "generated_at": utc_now(),
+            }
+            self._copy_traceability_fields(task, materialized_task, fields=("spec_refs", "source_spec_task"))
+            materialized_tasks.append(materialized_task)
+        milestone = {
             "id": stage_id,
             "title": str(stage.get("title", stage_id)),
             "status": str(stage.get("status", "planned")),
@@ -6114,6 +6226,19 @@ continuation stage(s) were appended.
             "generated_at": utc_now(),
             "tasks": materialized_tasks,
         }
+        self._copy_traceability_fields(stage, milestone, fields=("spec_refs", "source"))
+        return milestone
+
+    def _copy_traceability_fields(
+        self,
+        source: dict[str, Any],
+        target: dict[str, Any],
+        *,
+        fields: tuple[str, ...],
+    ) -> None:
+        for field_name in fields:
+            if field_name in source:
+                target[field_name] = deepcopy(source[field_name])
 
     def iter_tasks(self) -> list[HarnessTask]:
         tasks: list[HarnessTask] = []
