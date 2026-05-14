@@ -4326,6 +4326,312 @@
           "generated_at": "2026-05-14T13:04:28Z"
         }
       ]
+    },
+    {
+      "id": "docs-spec-driven-development-plan-stage-4-executor-and-memory-context",
+      "title": "Executor And Memory Context",
+      "status": "planned",
+      "objective": "Implement the source specification stage from docs/spec-driven-development-plan.md. Stage goal: Give executors bounded spec context and make memory auditable.. Requirement refs: EH-SPEC-004, EH-SPEC-005, EH-SPEC-010.",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-14T13:39:15Z",
+      "tasks": [
+        {
+          "id": "docs-spec-driven-development-plan-stage-4-executor-and-memory-context-task-1-include-task-spec-refs-and-requirement-exce",
+          "title": "Include task spec refs and requirement excerpts in agent prompts",
+          "status": "pending",
+          "max_attempts": 4,
+          "max_task_iterations": 4,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**",
+            "README.md",
+            "bin/**",
+            ".github/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 5400,
+              "sandbox": "workspace-write",
+              "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 4 - Executor And Memory Context\nRequirement refs: EH-SPEC-004, EH-SPEC-005, EH-SPEC-010\nStage goal: Give executors bounded spec context and make memory auditable.\nTask: Include task spec refs and requirement excerpts in agent prompts\nStage acceptance summary: Agent prompts include relevant spec refs without loading unbounded documents.; Context packs are persisted and referenced by manifests.; Sensitive values are redacted in context artifacts.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 2700,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 4 - Executor And Memory Context\nTask: Include task spec refs and requirement excerpts in agent prompts\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 1500,
+              "spec_refs": [
+                "EH-SPEC-004",
+                "EH-SPEC-005",
+                "EH-SPEC-010"
+              ]
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 300,
+              "spec_refs": [
+                "EH-SPEC-004",
+                "EH-SPEC-005",
+                "EH-SPEC-010"
+              ]
+            }
+          ],
+          "e2e": [
+            {
+              "name": "status remains machine-readable",
+              "command": "bin/engh status --project-root . --json",
+              "required": true,
+              "timeout_seconds": 300,
+              "spec_refs": [
+                "EH-SPEC-004",
+                "EH-SPEC-005",
+                "EH-SPEC-010"
+              ]
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-14T13:39:15Z"
+        },
+        {
+          "id": "docs-spec-driven-development-plan-stage-4-executor-and-memory-context-task-2-add-a-context-pack-contract-for-spec-roadma",
+          "title": "Add a context-pack contract for spec, roadmap, tests, manifests, and git state",
+          "status": "pending",
+          "max_attempts": 4,
+          "max_task_iterations": 4,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**",
+            "README.md",
+            "bin/**",
+            ".github/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 5400,
+              "sandbox": "workspace-write",
+              "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 4 - Executor And Memory Context\nRequirement refs: EH-SPEC-004, EH-SPEC-005, EH-SPEC-010\nStage goal: Give executors bounded spec context and make memory auditable.\nTask: Add a context-pack contract for spec, roadmap, tests, manifests, and git state\nStage acceptance summary: Agent prompts include relevant spec refs without loading unbounded documents.; Context packs are persisted and referenced by manifests.; Sensitive values are redacted in context artifacts.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 2700,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 4 - Executor And Memory Context\nTask: Add a context-pack contract for spec, roadmap, tests, manifests, and git state\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 1500,
+              "spec_refs": [
+                "EH-SPEC-004",
+                "EH-SPEC-005",
+                "EH-SPEC-010"
+              ]
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 300,
+              "spec_refs": [
+                "EH-SPEC-004",
+                "EH-SPEC-005",
+                "EH-SPEC-010"
+              ]
+            }
+          ],
+          "e2e": [
+            {
+              "name": "status remains machine-readable",
+              "command": "bin/engh status --project-root . --json",
+              "required": true,
+              "timeout_seconds": 300,
+              "spec_refs": [
+                "EH-SPEC-004",
+                "EH-SPEC-005",
+                "EH-SPEC-010"
+              ]
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-14T13:39:15Z"
+        },
+        {
+          "id": "docs-spec-driven-development-plan-stage-4-executor-and-memory-context-task-3-track-model-cost-context-metadata-in-execut",
+          "title": "Track model/cost/context metadata in executor results where available",
+          "status": "pending",
+          "max_attempts": 4,
+          "max_task_iterations": 4,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**",
+            "README.md",
+            "bin/**",
+            ".github/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 5400,
+              "sandbox": "workspace-write",
+              "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 4 - Executor And Memory Context\nRequirement refs: EH-SPEC-004, EH-SPEC-005, EH-SPEC-010\nStage goal: Give executors bounded spec context and make memory auditable.\nTask: Track model/cost/context metadata in executor results where available\nStage acceptance summary: Agent prompts include relevant spec refs without loading unbounded documents.; Context packs are persisted and referenced by manifests.; Sensitive values are redacted in context artifacts.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 2700,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 4 - Executor And Memory Context\nTask: Track model/cost/context metadata in executor results where available\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 1500,
+              "spec_refs": [
+                "EH-SPEC-004",
+                "EH-SPEC-005",
+                "EH-SPEC-010"
+              ]
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 300,
+              "spec_refs": [
+                "EH-SPEC-004",
+                "EH-SPEC-005",
+                "EH-SPEC-010"
+              ]
+            }
+          ],
+          "e2e": [
+            {
+              "name": "status remains machine-readable",
+              "command": "bin/engh status --project-root . --json",
+              "required": true,
+              "timeout_seconds": 300,
+              "spec_refs": [
+                "EH-SPEC-004",
+                "EH-SPEC-005",
+                "EH-SPEC-010"
+              ]
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-14T13:39:15Z"
+        },
+        {
+          "id": "docs-spec-driven-development-plan-stage-4-executor-and-memory-context-task-4-redact-sensitive-values-before-context-and",
+          "title": "Redact sensitive values before context and memory persistence",
+          "status": "pending",
+          "max_attempts": 4,
+          "max_task_iterations": 4,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**",
+            "README.md",
+            "bin/**",
+            ".github/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 5400,
+              "sandbox": "workspace-write",
+              "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 4 - Executor And Memory Context\nRequirement refs: EH-SPEC-004, EH-SPEC-005, EH-SPEC-010\nStage goal: Give executors bounded spec context and make memory auditable.\nTask: Redact sensitive values before context and memory persistence\nStage acceptance summary: Agent prompts include relevant spec refs without loading unbounded documents.; Context packs are persisted and referenced by manifests.; Sensitive values are redacted in context artifacts.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 2700,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 4 - Executor And Memory Context\nTask: Redact sensitive values before context and memory persistence\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 1500,
+              "spec_refs": [
+                "EH-SPEC-004",
+                "EH-SPEC-005",
+                "EH-SPEC-010"
+              ]
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 300,
+              "spec_refs": [
+                "EH-SPEC-004",
+                "EH-SPEC-005",
+                "EH-SPEC-010"
+              ]
+            }
+          ],
+          "e2e": [
+            {
+              "name": "status remains machine-readable",
+              "command": "bin/engh status --project-root . --json",
+              "required": true,
+              "timeout_seconds": 300,
+              "spec_refs": [
+                "EH-SPEC-004",
+                "EH-SPEC-005",
+                "EH-SPEC-010"
+              ]
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-14T13:39:15Z"
+        }
+      ]
     }
   ],
   "continuation": {
