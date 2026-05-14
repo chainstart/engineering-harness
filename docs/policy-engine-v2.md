@@ -53,12 +53,15 @@ command safety classification detects unsafe behavior, or when the selected exec
 inherent unsafe capabilities such as network or browser automation. Allowed decisions mean every
 requested low-risk capability is present in the selected executor metadata. Denied decisions are
 blocking and record `requested_capabilities`, `executor_capabilities`, `unsupported_capabilities`,
-`unsafe_capabilities`, and the known vocabulary in decision metadata. Unsafe requests and detected
-unsafe command behavior are denied rather than approval-gated because the unattended safety contract
-has no current local approval mechanism for network access, secret access, browser automation,
-deployment, or live operations. Inherent unsafe executor capabilities are warning-level audit
-evidence unless another policy gate blocks; this keeps explicitly configured agent executors
-observable without silently changing their adapter-specific enablement gates.
+`unsafe_capabilities`, explicit filesystem/network/secret/deploy class metadata, and the known
+vocabulary in decision metadata. Unsafe requests and detected unsafe command behavior are denied
+rather than approval-gated because the unattended safety contract has no current local approval
+mechanism for network access, secret access, browser automation, deployment, or live operations.
+When an older command allowlist denial already blocks a detected unsafe command, the capability
+policy still emits warning-level audit evidence instead of hiding the unsafe classification.
+Inherent unsafe executor capabilities are also warning-level audit evidence unless another policy
+gate blocks; this keeps explicitly configured agent executors observable without silently changing
+their adapter-specific enablement gates.
 
 The summary shape is intentionally compact:
 

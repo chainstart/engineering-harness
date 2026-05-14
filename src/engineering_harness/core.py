@@ -189,6 +189,7 @@ SENSITIVE_ENV_NAME_PATTERN = (
     r"[A-Z0-9_]*(?:API[-_]?KEY|ACCESS[-_]?KEY|TOKEN|SECRET|PASSWORD|PASS|"
     r"PRIVATE[-_]?KEY|MNEMONIC|SEED(?:[-_]?PHRASE)?|CREDENTIALS?)[A-Z0-9_]*"
 )
+SENSITIVE_ENV_NAME_RE = re.compile(rf"(?i)^{SENSITIVE_ENV_NAME_PATTERN}$")
 SENSITIVE_QUOTED_VALUE_RE = re.compile(
     rf"(?i)\b({SENSITIVE_ENV_NAME_PATTERN})\b(\s*[:=]\s*)(['\"])(.*?)(\3)"
 )
@@ -675,9 +676,31 @@ def redact(text: str) -> str:
     return redacted
 
 
+def sensitive_evidence_key(key: object) -> bool:
+    text = str(key).strip()
+    if not text:
+        return False
+    upper = text.upper()
+    if upper.endswith(("_CONFIGURED", "_PRESENT", "_SET", "_AVAILABLE", "_ENABLED")):
+        return False
+    return bool(SENSITIVE_ENV_NAME_RE.fullmatch(text))
+
+
 def redact_evidence(value: Any) -> Any:
     if isinstance(value, dict):
-        return {str(key): redact_evidence(item) for key, item in value.items()}
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            text_key = str(key)
+            if (
+                sensitive_evidence_key(text_key)
+                and item is not None
+                and not isinstance(item, bool)
+                and not isinstance(item, (dict, list, tuple))
+            ):
+                redacted[text_key] = "[REDACTED]"
+            else:
+                redacted[text_key] = redact_evidence(item)
+        return redacted
     if isinstance(value, list):
         return [redact_evidence(item) for item in value]
     if isinstance(value, tuple):
@@ -685,6 +708,16 @@ def redact_evidence(value: Any) -> Any:
     if isinstance(value, str):
         return redact(value)
     return value
+
+
+def capability_core_classes(capabilities: tuple[str, ...] | list[str]) -> list[str]:
+    classifications = classify_capabilities(capabilities)
+    classes = classifications.get("classes", {}) if isinstance(classifications, dict) else {}
+    return sorted(
+        class_name
+        for class_name in UNSAFE_CAPABILITY_CLASSES
+        if isinstance(classes.get(class_name), list) and classes.get(class_name)
+    )
 
 
 @dataclass(frozen=True)
@@ -9768,13 +9801,20 @@ continuation stage(s) were appended.
         detected = self._normalize_requested_capabilities(safety_classification.get("detected_capabilities"))
         executor = policy_input.executor or {}
         executor_id = str(command.get("executor") or executor.get("id") or "")
+        command_policy_blocks_detected = False
+        command_policy_metadata: dict[str, Any] = {}
         if detected and not requested and executor.get("uses_command_policy"):
-            command_outcome, _reason, _metadata = self._command_policy_match(
+            command_outcome, command_reason, command_metadata = self._command_policy_match(
                 command.get("command"),
                 allow_live=bool(policy_input.live.get("allow_live")),
             )
             if command_outcome == "denied":
-                detected = ()
+                command_policy_blocks_detected = True
+                command_policy_metadata = {
+                    "outcome": command_outcome,
+                    "reason": command_reason,
+                    **command_metadata,
+                }
         executor_capabilities = [
             str(capability)
             for capability in executor.get("capabilities", [])
@@ -9786,14 +9826,21 @@ continuation stage(s) were appended.
             for capability in executor_capabilities
             if capability in UNSAFE_EXECUTOR_CAPABILITIES
         ]
-        executor_classifications = classify_capabilities(executor_unsafe)
-        executor_unsafe_classes = sorted(
-            class_name
-            for class_name in UNSAFE_CAPABILITY_CLASSES
-            if executor_classifications.get("classes", {}).get(class_name)
-        )
+        executor_unsafe_classes = capability_core_classes(executor_unsafe)
         effective_requested = tuple(dict.fromkeys([*requested, *detected]))
         unsafe = [capability for capability in effective_requested if capability in UNSAFE_EXECUTOR_CAPABILITIES]
+        unsafe_classes = sorted(
+            dict.fromkeys(
+                [
+                    *[
+                        str(class_name)
+                        for class_name in safety_classification.get("unsafe_classes", [])
+                        if str(class_name).strip()
+                    ],
+                    *capability_core_classes(unsafe),
+                ]
+            )
+        )
         unsupported = [
             capability
             for capability in requested
@@ -9807,10 +9854,14 @@ continuation stage(s) were appended.
             "executor_capabilities": executor_capabilities,
             "unsupported_capabilities": unsupported,
             "unsafe_capabilities": unsafe,
-            "unsafe_classes": safety_classification.get("unsafe_classes", []),
+            "unsafe_classes": unsafe_classes,
             "executor_unsafe_capabilities": executor_unsafe,
             "executor_unsafe_classes": executor_unsafe_classes,
             "operation_classification": safety_classification,
+            "command_policy_blocked_detected_capabilities": command_policy_blocks_detected,
+            "command_policy_block": command_policy_metadata,
+            "unsafe_capability_classifications": classify_capabilities(unsafe),
+            "effective_requested_capability_classifications": classify_capabilities(effective_requested),
             "executor_capability_classifications": executor.get("capability_classifications")
             if isinstance(executor.get("capability_classifications"), dict)
             else classify_capabilities(executor_capabilities),
@@ -9833,6 +9884,20 @@ continuation stage(s) were appended.
         if not requested and not detected:
             return None
         if unsafe:
+            if command_policy_blocks_detected:
+                return PolicyDecision(
+                    kind="capability_policy",
+                    scope="command",
+                    outcome="warning",
+                    effect="warn",
+                    severity="warning",
+                    reason=(
+                        "unsafe detected command behavior is also denied by command policy: "
+                        f"{', '.join(unsafe)}"
+                    ),
+                    policy_input=policy_input,
+                    metadata=metadata,
+                )
             source = "detected command behavior" if detected else "requested executor capabilities"
             return PolicyDecision(
                 kind="capability_policy",

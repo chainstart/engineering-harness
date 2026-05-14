@@ -13,7 +13,7 @@ import pytest
 from engineering_harness.browser_e2e import browser_user_experience_command
 from engineering_harness.goal_intake import GoalIntakeValidationError, normalize_goal_intake, validate_goal_intake
 from engineering_harness.goal_planner import plan_goal_roadmap
-from engineering_harness.core import Harness, discover_projects, init_project, utc_now
+from engineering_harness.core import Harness, discover_projects, init_project, redact_evidence, utc_now
 from engineering_harness.domain_frontend import (
     DOMAIN_FRONTEND_DECISION_KIND,
     DOMAIN_FRONTEND_GENERATOR_ID,
@@ -1682,6 +1682,11 @@ def test_policy_decision_schema_records_denied_command(tmp_path):
 
     assert result["status"] == "blocked"
     manifest = task_manifest(project, result)
+    capability_policy = policy_decision(manifest, "capability_policy", outcome="warning")
+    assert capability_policy["effect"] == "warn"
+    assert capability_policy["metadata"]["detected_capabilities"] == ["network_access"]
+    assert capability_policy["metadata"]["unsafe_classes"] == ["network"]
+    assert capability_policy["metadata"]["command_policy_blocked_detected_capabilities"] is True
     command_policy = policy_decision(manifest, "command_policy", outcome="denied")
     assert command_policy["effect"] == "deny"
     assert command_policy["severity"] == "error"
@@ -1694,6 +1699,8 @@ def test_policy_decision_schema_records_denied_command(tmp_path):
     report_evidence = report_policy_evidence(project, result)
     assert report_evidence["policy_decision_summary"] == manifest["policy_decision_summary"]
     assert report_evidence["policy_decisions"] == manifest["policy_decisions"]
+    assert manifest["safety_audit"]["unsafe_classes"] == ["network"]
+    assert manifest["safety_audit"]["unsafe_capabilities"] == ["network_access"]
     index = Harness(project).manifest_index()
     assert index["policy_decision_summary"]["blocking"][0]["kind"] == "command_policy"
 
@@ -1788,8 +1795,17 @@ def test_capability_policy_denies_unsupported_executor_capability(tmp_path):
     assert manifest["policy_decision_summary"]["blocking"][0]["kind"] == "capability_policy"
 
 
-@pytest.mark.parametrize("unsafe_capability", ["network", "secret_access", "browser_automation", "deployment", "live_operations"])
-def test_capability_policy_denies_unsafe_executor_capability_requests(tmp_path, unsafe_capability):
+@pytest.mark.parametrize(
+    ("unsafe_capability", "expected_class"),
+    [
+        ("network", "network"),
+        ("secret_access", "secret"),
+        ("browser_automation", "network"),
+        ("deployment", "deploy"),
+        ("live_operations", "deploy"),
+    ],
+)
+def test_capability_policy_denies_unsafe_executor_capability_requests(tmp_path, unsafe_capability, expected_class):
     project = tmp_path / f"capability-unsafe-{unsafe_capability}"
     project.mkdir()
     init_project(project, "python-agent", name=f"capability-unsafe-{unsafe_capability}")
@@ -1807,7 +1823,14 @@ def test_capability_policy_denies_unsafe_executor_capability_requests(tmp_path, 
     decision = policy_decision(manifest, "capability_policy", outcome="denied")
     assert decision["effect"] == "deny"
     assert decision["metadata"]["unsafe_capabilities"] == [unsafe_capability]
+    assert decision["metadata"]["unsafe_classes"] == [expected_class]
+    assert (
+        decision["metadata"]["unsafe_capability_classifications"]["core_classes"][expected_class]["supported"]
+        is True
+    )
     assert "not locally approvable" in decision["reason"]
+    assert manifest["safety_audit"]["unsafe_classes"] == [expected_class]
+    assert manifest["safety_audit"]["unsafe_capabilities"] == [unsafe_capability]
     assert manifest["policy_decision_summary"]["requires_approval"] == []
 
 
@@ -1934,6 +1957,22 @@ def test_policy_blocks_secret_env_access_and_redacts_reports(tmp_path):
     decision = policy_decision(manifest, "capability_policy", outcome="denied")
     assert decision["metadata"]["detected_capabilities"] == ["secret_access"]
     assert decision["metadata"]["unsafe_classes"] == ["secret"]
+
+
+def test_redact_evidence_redacts_structured_sensitive_env_values():
+    payload = {
+        "OPENAI_API_KEY": "plain-env-secret",
+        "nested": {"db_password": "plain-db-secret"},
+        "llm_api_key_configured": True,
+        "safe": "plain text",
+    }
+
+    redacted = redact_evidence(payload)
+
+    assert redacted["OPENAI_API_KEY"] == "[REDACTED]"
+    assert redacted["nested"]["db_password"] == "[REDACTED]"
+    assert redacted["llm_api_key_configured"] is True
+    assert redacted["safe"] == "plain text"
 
 
 def test_policy_blocks_deploy_command_without_requested_capability(tmp_path):
