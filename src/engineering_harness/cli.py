@@ -316,6 +316,28 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_operator_console(args: argparse.Namespace) -> int:
+    root = resolve_project_root(args)
+    harness = Harness(root)
+    payload = harness.write_operator_console_artifact() if args.write else harness.operator_console_summary()
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        queue = payload.get("queue_state", {}) if isinstance(payload.get("queue_state"), dict) else {}
+        failures = payload.get("failures", {}) if isinstance(payload.get("failures"), dict) else {}
+        approvals = payload.get("approvals", {}) if isinstance(payload.get("approvals"), dict) else {}
+        artifact = payload.get("artifact", {}) if isinstance(payload.get("artifact"), dict) else {}
+        print(f"Project: {payload.get('project')}")
+        print(f"Snapshot: {payload.get('snapshot_at') or 'none'}")
+        print(f"Pending tasks: {queue.get('pending_count', 0)}")
+        print(f"Pending approvals: {approvals.get('pending_count', 0)}")
+        print(f"Unresolved failures: {failures.get('unresolved_count', 0)}")
+        if args.write:
+            print(f"Operator console JSON: {artifact.get('json_path')}")
+            print(f"Operator console report: {artifact.get('markdown_path')}")
+    return 0
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     root = resolve_project_root(args)
     harness = Harness(root)
@@ -4152,6 +4174,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     for name, help_text, func in [
         ("status", "Show project or workspace status", cmd_status),
+        ("operator-console", "Generate a bounded local operator console summary", cmd_operator_console),
         ("validate", "Validate the engineering roadmap schema and task commands", cmd_validate),
         ("next", "Show the next selected task", cmd_next),
         ("run", "Run the next or selected task acceptance checks", cmd_run),
@@ -4184,6 +4207,8 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--git-remote", default="origin")
             command.add_argument("--git-branch", default=None)
             command.add_argument("--git-message-template", default="chore(engineering): complete {task_id}")
+        if name == "operator-console":
+            command.add_argument("--write", action="store_true")
         if name == "advance":
             command.add_argument("--max-new-milestones", type=int, default=1)
             command.add_argument("--reason", default="manual_advance")

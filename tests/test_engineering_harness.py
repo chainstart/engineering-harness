@@ -5458,6 +5458,118 @@ def test_runtime_dashboard_approval_failure_goal_gap_payload(tmp_path, capsys):
     assert "resolve-blockers" in action_ids
 
 
+def test_operator_observability_console_payload_is_bounded_deterministic_and_historical(tmp_path, capsys):
+    project = tmp_path / "operator-observability-console-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="operator-observability-console-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"] = [
+        {
+            "id": "first-console-task",
+            "title": "First console task",
+            "status": "pending",
+            "file_scope": ["**"],
+            "acceptance": [
+                {
+                    "name": "first task writes evidence",
+                    "command": "python3 -c \"from pathlib import Path; Path('first-console.txt').write_text('ok')\"",
+                }
+            ],
+        },
+        {
+            "id": "approval-console-task",
+            "title": "Approval blocked console task",
+            "status": "pending",
+            "manual_approval_required": True,
+            "file_scope": ["**"],
+            "acceptance": [
+                {
+                    "name": "approval task writes evidence",
+                    "command": "python3 -c \"from pathlib import Path; Path('approval-console.txt').write_text('ok')\"",
+                }
+            ],
+        },
+    ]
+    roadmap_path.write_text(json.dumps(roadmap, indent=2, sort_keys=True), encoding="utf-8")
+
+    assert cli_main(["drive", "--project-root", str(project), "--max-tasks", "2", "--json"]) == 1
+    drive_payload = json.loads(capsys.readouterr().out)
+    assert drive_payload["status"] == "blocked"
+
+    first = Harness(project).status_summary()["operator_console"]
+    second = Harness(project).status_summary()["operator_console"]
+
+    assert first == second
+    assert first["kind"] == "engineering-harness.operator-console"
+    assert first["local_only"] is True
+    assert first["requires_external_services"] is False
+    assert first["bounds"]["within_limit"] is True
+    assert first["bounds"]["estimated_json_bytes"] <= first["bounds"]["max_json_bytes"]
+    limits = first["limits"]
+    assert len(first["run_history"]["task_runs"]["recent"]) <= limits["recent_task_runs"]
+    assert len(first["run_history"]["drive_runs"]["recent"]) <= limits["recent_drive_runs"]
+    assert len(first["task_timelines"]["timelines"]) <= limits["timeline_tasks"]
+    assert all(len(item["events"]) <= limits["timeline_events_per_task"] for item in first["task_timelines"]["timelines"])
+    assert first["run_history"]["task_runs"]["status_counts"] == {"blocked": 1, "passed": 1}
+    assert {item["status"] for item in first["run_history"]["task_runs"]["trend"]} == {"passed", "blocked"}
+    assert [item["manifest_path"] for item in first["run_history"]["task_runs"]["trend"]]
+    assert first["run_history"]["drive_runs"]["total_count"] == 1
+    assert first["approvals"]["pending_count"] == 1
+    assert first["failures"]["unresolved_count"] == 1
+    assert first["checkpoint_readiness"]["kind"] == "engineering-harness.checkpoint-readiness"
+    assert first["goal_gap_scorecard"]["categories"]
+    assert first["replay_guard"]["kind"] == "engineering-harness.replay-guard-summary"
+    action_ids = {item["id"] for item in first["recommended_actions"]}
+    assert {"recover-isolated-failure", "review-approval-leases"}.issubset(action_ids)
+
+    assert cli_main(["status", "--project-root", str(project), "--json"]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    assert status_payload["operator_console"] == first
+
+
+def test_operator_observability_console_e2e_generates_after_drive(tmp_path, capsys):
+    project = tmp_path / "operator-observability-console-e2e-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="operator-observability-console-e2e-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["acceptance"][0]["command"] = (
+        "python3 -c \"from pathlib import Path; Path('accepted-console.txt').write_text('ok')\""
+    )
+    task["e2e"] = [
+        {
+            "name": "operator console local e2e evidence",
+            "command": (
+                "python3 -c \"from pathlib import Path; import json; "
+                "p=Path('artifacts/browser-e2e/operator-console-e2e.json'); "
+                "p.parent.mkdir(parents=True, exist_ok=True); "
+                "p.write_text(json.dumps({'status':'passed'}, sort_keys=True) + '\\n', encoding='utf-8'); "
+                "print('operator console e2e passed')\""
+            ),
+        }
+    ]
+    roadmap_path.write_text(json.dumps(roadmap, indent=2, sort_keys=True), encoding="utf-8")
+
+    assert cli_main(["drive", "--project-root", str(project), "--json"]) == 0
+    capsys.readouterr()
+
+    assert cli_main(["operator-console", "--project-root", str(project), "--write", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["artifact"]["status"] == "written"
+    assert payload["run_history"]["task_runs"]["status_counts"] == {"passed": 1}
+    assert payload["e2e_artifacts"]["runs"][0]["status"] == "passed"
+    assert payload["e2e_artifacts"]["files"][0]["path"] == "artifacts/browser-e2e/operator-console-e2e.json"
+    json_path = project / payload["artifact"]["json_path"]
+    markdown_path = project / payload["artifact"]["markdown_path"]
+    assert json.loads(json_path.read_text(encoding="utf-8")) == payload
+    markdown = markdown_path.read_text(encoding="utf-8")
+    assert "# Operator Console" in markdown
+    assert "Machine Payload" in markdown
+
+
 @pytest.mark.parametrize(
     ("gate", "approval_kind", "decision_kind", "marker"),
     [

@@ -369,6 +369,7 @@ SELF_ITERATION_ASSESSMENT_SCHEMA_VERSION = 1
 GOAL_GAP_RETROSPECTIVE_SCHEMA_VERSION = 1
 GOAL_GAP_SCORECARD_SCHEMA_VERSION = 1
 RUNTIME_DASHBOARD_SCHEMA_VERSION = 1
+OPERATOR_CONSOLE_SCHEMA_VERSION = 1
 WORKSPACE_DISPATCH_LEASE_SCHEMA_VERSION = 1
 WORKSPACE_DISPATCH_LEASE_DIRNAME = "workspace-dispatch-lease"
 WORKSPACE_DISPATCH_REPORT_LIMIT = 5
@@ -397,6 +398,21 @@ SELF_ITERATION_CONTEXT_LIMITS = {
     "git_commit_count": 8,
     "goal_gap_scorecard_evidence_paths": 8,
     "goal_gap_scorecard_themes": 4,
+}
+OPERATOR_CONSOLE_LIMITS = {
+    "recent_task_runs": 8,
+    "recent_drive_runs": 5,
+    "timeline_tasks": 8,
+    "timeline_events_per_task": 10,
+    "pending_tasks": 12,
+    "approval_items": 12,
+    "failure_items": 8,
+    "replay_guard_items": 8,
+    "e2e_files": 12,
+    "e2e_runs": 8,
+    "recommended_actions": 8,
+    "message_chars": 220,
+    "max_json_bytes": 120_000,
 }
 GOAL_GAP_SCORECARD_CATEGORY_ORDER = (
     "stuck_detection",
@@ -6410,6 +6426,699 @@ continuation stage(s) were appended.
             "goal_gap": self._runtime_goal_gap_payload(summary, latest_reports),
         }
 
+    def operator_console_summary(self, status_summary: dict[str, Any] | None = None) -> dict[str, Any]:
+        if status_summary is None:
+            summary = self.status_summary()
+            if isinstance(summary.get("operator_console"), dict):
+                return deepcopy(summary["operator_console"])
+        else:
+            summary = status_summary
+        state = self.load_state()
+        manifest_index = self.manifest_index()
+        latest_reports = self._runtime_enriched_report_context()
+        drive_history = self._operator_console_drive_history()
+        task_history = self._operator_console_task_run_history(manifest_index)
+        all_approvals = self._approval_queue_summary_from_state(state, status_filter=None)
+        scorecard = (
+            deepcopy(summary.get("goal_gap_scorecard"))
+            if isinstance(summary.get("goal_gap_scorecard"), dict)
+            else self.goal_gap_scorecard(status_summary=summary, latest_reports=latest_reports)
+        )
+        artifact_paths = self.operator_console_artifact_paths()
+        artifact_available = (
+            (self.project_root / artifact_paths["json_path"]).exists()
+            and (self.project_root / artifact_paths["markdown_path"]).exists()
+        )
+        payload = {
+            "schema_version": OPERATOR_CONSOLE_SCHEMA_VERSION,
+            "kind": "engineering-harness.operator-console",
+            "project": summary.get("project"),
+            "root": summary.get("root"),
+            "roadmap": summary.get("roadmap"),
+            "status_source": "engh status --json",
+            "snapshot_at": self._operator_console_snapshot_at(
+                summary=summary,
+                state=state,
+                manifest_index=manifest_index,
+                drive_history=drive_history,
+            ),
+            "local_only": True,
+            "requires_external_services": False,
+            "artifact": {
+                "status": "available" if artifact_available else "not_written",
+                "json_path": artifact_paths["json_path"],
+                "markdown_path": artifact_paths["markdown_path"],
+            },
+            "queue_state": self._operator_console_queue_state(summary, state),
+            "run_history": {
+                "task_runs": task_history,
+                "drive_runs": drive_history,
+            },
+            "task_timelines": self._operator_console_task_timelines(state),
+            "approvals": self._operator_console_approvals(all_approvals),
+            "failures": self._operator_console_failures(summary, manifest_index),
+            "checkpoint_readiness": self._operator_console_checkpoint_readiness(summary),
+            "goal_gap_scorecard": self._operator_console_goal_gap_scorecard(scorecard),
+            "replay_guard": self._operator_console_replay_guard(summary),
+            "e2e_artifacts": self._operator_console_e2e_artifacts(summary, manifest_index),
+            "latest_reports": {
+                "task_reports": deepcopy(latest_reports.get("task_reports", {})),
+                "drive_reports": deepcopy(latest_reports.get("drive_reports", {})),
+            },
+            "recommended_actions": [],
+            "limits": deepcopy(OPERATOR_CONSOLE_LIMITS),
+        }
+        payload["recommended_actions"] = self._operator_console_recommended_actions(payload, summary)
+        return self._operator_console_finalize(payload)
+
+    def operator_console_artifact_paths(self) -> dict[str, str]:
+        report_dir = self.report_dir.parent / "operator-console"
+        json_path = report_dir / "operator-console.json"
+        markdown_path = report_dir / "operator-console.md"
+        return {
+            "json_path": self._project_relative_path(json_path),
+            "markdown_path": self._project_relative_path(markdown_path),
+        }
+
+    def write_operator_console_artifact(
+        self,
+        status_summary: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = self.operator_console_summary(status_summary=status_summary)
+        paths = self.operator_console_artifact_paths()
+        payload["artifact"] = {
+            "status": "written",
+            "json_path": paths["json_path"],
+            "markdown_path": paths["markdown_path"],
+        }
+        payload = self._operator_console_finalize(payload)
+        json_path = self.project_root / paths["json_path"]
+        markdown_path = self.project_root / paths["markdown_path"]
+        write_json(json_path, payload)
+        self._write_operator_console_markdown(markdown_path, payload)
+        return payload
+
+    def _operator_console_finalize(self, payload: dict[str, Any]) -> dict[str, Any]:
+        payload = self._redact_context_value(payload)
+        payload["bounds"] = {
+            "max_json_bytes": OPERATOR_CONSOLE_LIMITS["max_json_bytes"],
+            "estimated_json_bytes": 0,
+            "within_limit": True,
+        }
+        estimated = len(json.dumps(payload, sort_keys=True).encode("utf-8"))
+        payload["bounds"]["estimated_json_bytes"] = estimated
+        payload["bounds"]["within_limit"] = estimated <= OPERATOR_CONSOLE_LIMITS["max_json_bytes"]
+        return payload
+
+    def _write_operator_console_markdown(self, markdown_path: Path, payload: dict[str, Any]) -> None:
+        markdown_path.parent.mkdir(parents=True, exist_ok=True)
+        queue = payload.get("queue_state") if isinstance(payload.get("queue_state"), dict) else {}
+        task_runs = payload.get("run_history", {}).get("task_runs", {}) if isinstance(payload.get("run_history"), dict) else {}
+        drive_runs = payload.get("run_history", {}).get("drive_runs", {}) if isinstance(payload.get("run_history"), dict) else {}
+        approvals = payload.get("approvals") if isinstance(payload.get("approvals"), dict) else {}
+        failures = payload.get("failures") if isinstance(payload.get("failures"), dict) else {}
+        checkpoint = payload.get("checkpoint_readiness") if isinstance(payload.get("checkpoint_readiness"), dict) else {}
+        scorecard = payload.get("goal_gap_scorecard") if isinstance(payload.get("goal_gap_scorecard"), dict) else {}
+        lines = [
+            "# Operator Console",
+            "",
+            f"- Project: `{payload.get('project')}`",
+            f"- Snapshot: `{payload.get('snapshot_at')}`",
+            f"- Pending tasks: `{queue.get('pending_count', 0)}`",
+            f"- Task runs: `{task_runs.get('total_count', 0)}`",
+            f"- Drive runs: `{drive_runs.get('total_count', 0)}`",
+            f"- Pending approvals: `{approvals.get('pending_count', 0)}`",
+            f"- Unresolved failures: `{failures.get('unresolved_count', 0)}`",
+            f"- Checkpoint readiness: `{checkpoint.get('reason')}` blocking=`{str(bool(checkpoint.get('blocking'))).lower()}`",
+            f"- Goal-gap status: `{scorecard.get('overall_status')}`",
+            "",
+            "## Recommended Actions",
+            "",
+        ]
+        actions = payload.get("recommended_actions") if isinstance(payload.get("recommended_actions"), list) else []
+        if not actions:
+            lines.append("- No operator action is currently recommended.")
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            lines.append(f"- `{action.get('id')}` `{action.get('severity')}` - {action.get('title')}")
+        lines.extend(
+            [
+                "",
+                "## Machine Payload",
+                "",
+                "```json",
+                json.dumps(payload, indent=2, sort_keys=True),
+                "```",
+                "",
+            ]
+        )
+        markdown_path.write_text("\n".join(lines), encoding="utf-8")
+
+    def _operator_console_snapshot_at(
+        self,
+        *,
+        summary: dict[str, Any],
+        state: dict[str, Any],
+        manifest_index: dict[str, Any],
+        drive_history: dict[str, Any],
+    ) -> str | None:
+        timestamps: list[str] = []
+        for value in (
+            state.get("updated_at"),
+            manifest_index.get("updated_at"),
+        ):
+            if value:
+                timestamps.append(str(value))
+        drive_control = summary.get("drive_control") if isinstance(summary.get("drive_control"), dict) else {}
+        for key in ("updated_at", "finished_at", "last_heartbeat_at", "started_at"):
+            if drive_control.get(key):
+                timestamps.append(str(drive_control[key]))
+        for run in drive_history.get("recent", []):
+            if isinstance(run, dict):
+                for key in ("finished_at", "started_at"):
+                    if run.get(key):
+                        timestamps.append(str(run[key]))
+        return max(timestamps) if timestamps else None
+
+    def _operator_console_status_counts_for_tasks(self, state: dict[str, Any]) -> dict[str, int]:
+        state_tasks = state.get("tasks", {}) if isinstance(state.get("tasks"), dict) else {}
+        counts: dict[str, int] = {}
+        for task in self.iter_tasks():
+            task_state = state_tasks.get(task.id, {}) if isinstance(state_tasks.get(task.id), dict) else {}
+            status = str(task_state.get("status", task.status))
+            counts[status] = counts.get(status, 0) + 1
+        return dict(sorted(counts.items()))
+
+    def _operator_console_task_brief(self, task: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(task, dict):
+            return None
+        return {
+            "id": task.get("id"),
+            "title": self._truncate_text(str(task.get("title") or ""), OPERATOR_CONSOLE_LIMITS["message_chars"]),
+            "milestone_id": task.get("milestone_id"),
+            "milestone_title": task.get("milestone_title"),
+            "status": task.get("status"),
+            "manual_approval_required": bool(task.get("manual_approval_required", False)),
+            "agent_approval_required": bool(task.get("agent_approval_required", False)),
+            "spec_refs": deepcopy(task.get("spec_refs", [])) if isinstance(task.get("spec_refs"), list) else [],
+        }
+
+    def _operator_console_queue_state(self, summary: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        state_tasks = state.get("tasks", {}) if isinstance(state.get("tasks"), dict) else {}
+        pending_tasks: list[dict[str, Any]] = []
+        blocked_tasks: list[dict[str, Any]] = []
+        for task in self.iter_tasks():
+            task_state = state_tasks.get(task.id, {}) if isinstance(state_tasks.get(task.id), dict) else {}
+            status = str(task_state.get("status", task.status))
+            item = {
+                "id": task.id,
+                "title": self._truncate_text(task.title, OPERATOR_CONSOLE_LIMITS["message_chars"]),
+                "milestone_id": task.milestone_id,
+                "status": status,
+                "manual_approval_required": task.manual_approval_required,
+                "agent_approval_required": task.agent_approval_required,
+            }
+            if status in BLOCKED_STATUSES or status == "failed":
+                blocked_tasks.append(item)
+            elif status not in COMPLETED_STATUSES:
+                pending_tasks.append(item)
+        continuation = summary.get("continuation") if isinstance(summary.get("continuation"), dict) else {}
+        return {
+            "status_counts": self._operator_console_status_counts_for_tasks(state),
+            "milestones": deepcopy(summary.get("milestones", [])),
+            "next_task": self._operator_console_task_brief(
+                summary.get("next_task") if isinstance(summary.get("next_task"), dict) else None
+            ),
+            "pending_count": len(pending_tasks),
+            "blocked_count": len(blocked_tasks),
+            "pending_tasks": pending_tasks[: OPERATOR_CONSOLE_LIMITS["pending_tasks"]],
+            "pending_tasks_truncated": len(pending_tasks) > OPERATOR_CONSOLE_LIMITS["pending_tasks"],
+            "blocked_tasks": blocked_tasks[: OPERATOR_CONSOLE_LIMITS["pending_tasks"]],
+            "blocked_tasks_truncated": len(blocked_tasks) > OPERATOR_CONSOLE_LIMITS["pending_tasks"],
+            "continuation": {
+                key: deepcopy(continuation.get(key))
+                for key in (
+                    "enabled",
+                    "pending_stage_count",
+                    "materialized_stage_count",
+                    "total_stage_count",
+                    "next_stage",
+                )
+                if key in continuation
+            },
+        }
+
+    def _operator_console_task_run_history(self, manifest_index: dict[str, Any]) -> dict[str, Any]:
+        manifests = [
+            item for item in manifest_index.get("manifests", []) if isinstance(item, dict)
+        ]
+        trend = [
+            self._operator_console_task_run_item(item)
+            for item in manifests[-OPERATOR_CONSOLE_LIMITS["recent_task_runs"] :]
+        ]
+        recent = list(reversed(trend))
+        return {
+            "total_count": len(manifests),
+            "included_count": len(recent),
+            "status_counts": deepcopy(manifest_index.get("status_counts", {})),
+            "latest_manifest": manifest_index.get("latest_manifest"),
+            "latest_by_task": deepcopy(manifest_index.get("latest_by_task", {})),
+            "trend": trend,
+            "recent": recent,
+            "truncated": len(manifests) > OPERATOR_CONSOLE_LIMITS["recent_task_runs"],
+        }
+
+    def _operator_console_task_run_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        runs = item.get("runs") if isinstance(item.get("runs"), list) else []
+        return {
+            "task_id": item.get("task_id"),
+            "task_title": self._truncate_text(str(item.get("task_title") or ""), OPERATOR_CONSOLE_LIMITS["message_chars"]),
+            "milestone_id": item.get("milestone_id"),
+            "status": item.get("status"),
+            "message": self._truncate_text(str(item.get("message") or ""), OPERATOR_CONSOLE_LIMITS["message_chars"]),
+            "started_at": item.get("started_at"),
+            "finished_at": item.get("finished_at"),
+            "attempt": item.get("attempt"),
+            "manifest_path": item.get("manifest_path"),
+            "report_path": item.get("report_path"),
+            "run_count": item.get("run_count"),
+            "phases": [
+                {
+                    "phase": run.get("phase"),
+                    "name": run.get("name"),
+                    "executor": run.get("executor"),
+                    "status": run.get("status"),
+                    "returncode": run.get("returncode"),
+                }
+                for run in runs[: OPERATOR_CONSOLE_LIMITS["timeline_events_per_task"]]
+                if isinstance(run, dict)
+            ],
+        }
+
+    def _operator_console_drive_history(self) -> dict[str, Any]:
+        report_dir = self.report_dir / "drives"
+        paths = sorted([path for path in report_dir.glob("*.json") if path.is_file()], key=self._project_relative_path)
+        runs: list[dict[str, Any]] = []
+        status_counts: dict[str, int] = {}
+        for path in paths:
+            try:
+                payload = load_mapping(path)
+            except Exception as exc:
+                item = {
+                    "report_json": self._project_relative_path(path),
+                    "status": "unreadable",
+                    "message": self._truncate_text(str(exc), OPERATOR_CONSOLE_LIMITS["message_chars"]),
+                }
+            else:
+                item = self._operator_console_drive_run_item(path, payload)
+            status = str(item.get("status") or "unknown")
+            status_counts[status] = status_counts.get(status, 0) + 1
+            runs.append(item)
+        trend = runs[-OPERATOR_CONSOLE_LIMITS["recent_drive_runs"] :]
+        return {
+            "total_count": len(runs),
+            "included_count": len(trend),
+            "status_counts": dict(sorted(status_counts.items())),
+            "trend": trend,
+            "recent": list(reversed(trend)),
+            "truncated": len(runs) > OPERATOR_CONSOLE_LIMITS["recent_drive_runs"],
+        }
+
+    def _operator_console_drive_run_item(self, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+        retrospective = (
+            payload.get("goal_gap_retrospective")
+            if isinstance(payload.get("goal_gap_retrospective"), dict)
+            else {}
+        )
+        trigger = retrospective.get("trigger") if isinstance(retrospective.get("trigger"), dict) else {}
+        replay_guard = payload.get("replay_guard") if isinstance(payload.get("replay_guard"), dict) else {}
+        checkpoint = payload.get("checkpoint_readiness") if isinstance(payload.get("checkpoint_readiness"), dict) else {}
+        return {
+            "report_json": self._project_relative_path(path),
+            "report": payload.get("drive_report"),
+            "status": payload.get("status"),
+            "message": self._truncate_text(str(payload.get("message") or ""), OPERATOR_CONSOLE_LIMITS["message_chars"]),
+            "started_at": payload.get("started_at"),
+            "finished_at": payload.get("finished_at"),
+            "result_count": len(payload.get("results", [])) if isinstance(payload.get("results"), list) else 0,
+            "continuation_count": len(payload.get("continuations", [])) if isinstance(payload.get("continuations"), list) else 0,
+            "self_iteration_count": len(payload.get("self_iterations", [])) if isinstance(payload.get("self_iterations"), list) else 0,
+            "checkpoint_reason": checkpoint.get("reason"),
+            "checkpoint_blocking": bool(checkpoint.get("blocking", False)),
+            "replay_guard_status": replay_guard.get("status"),
+            "reused_phase_count": replay_guard.get("reused_phase_count"),
+            "goal_gap_stop_class": trigger.get("stop_class"),
+            "request_self_iteration": (
+                retrospective.get("request_self_iteration", {}).get("recommended")
+                if isinstance(retrospective.get("request_self_iteration"), dict)
+                else None
+            ),
+        }
+
+    def _operator_console_task_timelines(self, state: dict[str, Any]) -> dict[str, Any]:
+        state_tasks = state.get("tasks", {}) if isinstance(state.get("tasks"), dict) else {}
+        timelines: list[dict[str, Any]] = []
+        for task_id, task_state in sorted(state_tasks.items()):
+            if not isinstance(task_state, dict):
+                continue
+            history = [item for item in task_state.get("phase_history", []) if isinstance(item, dict)]
+            history.sort(key=lambda item: (int(item.get("sequence", 0) or 0), str(item.get("recorded_at") or "")))
+            if not history and not task_state.get("status"):
+                continue
+            events = history[-OPERATOR_CONSOLE_LIMITS["timeline_events_per_task"] :]
+            latest = history[-1] if history else {}
+            timelines.append(
+                {
+                    "task_id": str(task_id),
+                    "status": task_state.get("status"),
+                    "attempts": int(task_state.get("attempts", 0) or 0),
+                    "last_report": task_state.get("last_report"),
+                    "last_manifest": task_state.get("last_manifest"),
+                    "latest_event": self._operator_console_phase_event(latest) if latest else None,
+                    "event_count": len(history),
+                    "events": [self._operator_console_phase_event(item) for item in events],
+                    "events_truncated": len(history) > OPERATOR_CONSOLE_LIMITS["timeline_events_per_task"],
+                }
+            )
+        timelines.sort(
+            key=lambda item: (
+                str((item.get("latest_event") or {}).get("recorded_at") or ""),
+                str(item.get("task_id") or ""),
+            ),
+            reverse=True,
+        )
+        return {
+            "included_count": min(len(timelines), OPERATOR_CONSOLE_LIMITS["timeline_tasks"]),
+            "total_count": len(timelines),
+            "timelines": timelines[: OPERATOR_CONSOLE_LIMITS["timeline_tasks"]],
+            "truncated": len(timelines) > OPERATOR_CONSOLE_LIMITS["timeline_tasks"],
+        }
+
+    def _operator_console_phase_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        return {
+            "sequence": event.get("sequence"),
+            "recorded_at": event.get("recorded_at"),
+            "phase": event.get("phase"),
+            "event": event.get("event"),
+            "status": event.get("status"),
+            "message": self._truncate_text(str(event.get("message") or ""), OPERATOR_CONSOLE_LIMITS["message_chars"]),
+            "run_count": len(event.get("runs", [])) if isinstance(event.get("runs"), list) else metadata.get("run_count"),
+            "report_path": metadata.get("report_path"),
+            "manifest_path": metadata.get("manifest_path"),
+        }
+
+    def _operator_console_approvals(self, approval_queue: dict[str, Any]) -> dict[str, Any]:
+        items = [item for item in approval_queue.get("items", []) if isinstance(item, dict)]
+        return {
+            "schema_version": approval_queue.get("schema_version"),
+            "path": approval_queue.get("path"),
+            "lease_ttl_seconds": approval_queue.get("lease_ttl_seconds"),
+            "counts": deepcopy(approval_queue.get("counts", {})),
+            "pending_count": int(approval_queue.get("pending_count", 0) or 0),
+            "approved_count": int(approval_queue.get("approved_count", 0) or 0),
+            "consumed_count": int(approval_queue.get("consumed_count", 0) or 0),
+            "stale_count": int(approval_queue.get("stale_count", 0) or 0),
+            "stale_reasons": deepcopy(approval_queue.get("stale_reasons", {})),
+            "items": [
+                {
+                    "id": item.get("id"),
+                    "task_id": item.get("task_id"),
+                    "milestone_id": item.get("milestone_id"),
+                    "approval_kind": item.get("approval_kind"),
+                    "decision_kind": item.get("decision_kind"),
+                    "phase": item.get("phase"),
+                    "name": item.get("name"),
+                    "executor": item.get("executor"),
+                    "status": item.get("status"),
+                    "created_at": item.get("created_at"),
+                    "lease_expires_at": item.get("lease_expires_at"),
+                    "reason": self._truncate_text(str(item.get("reason") or ""), OPERATOR_CONSOLE_LIMITS["message_chars"]),
+                    "stale_reason": self._truncate_text(str(item.get("stale_reason") or ""), OPERATOR_CONSOLE_LIMITS["message_chars"]),
+                }
+                for item in items[: OPERATOR_CONSOLE_LIMITS["approval_items"]]
+            ],
+            "truncated": len(items) > OPERATOR_CONSOLE_LIMITS["approval_items"],
+        }
+
+    def _operator_console_failures(
+        self,
+        summary: dict[str, Any],
+        manifest_index: dict[str, Any],
+    ) -> dict[str, Any]:
+        failure_isolation = (
+            summary.get("failure_isolation") if isinstance(summary.get("failure_isolation"), dict) else {}
+        )
+        manifests = [item for item in manifest_index.get("manifests", []) if isinstance(item, dict)]
+        failed = [
+            self._operator_console_task_run_item(item)
+            for item in manifests
+            if str(item.get("status")) in {"failed", "blocked", "timeout", "no_progress"}
+        ]
+        failed = failed[-OPERATOR_CONSOLE_LIMITS["failure_items"] :]
+        latest_isolated = [
+            deepcopy(item)
+            for item in failure_isolation.get("latest_isolated_failures", [])
+            if isinstance(item, dict)
+        ]
+        return {
+            "schema_version": failure_isolation.get("schema_version", FAILURE_ISOLATION_SCHEMA_VERSION),
+            "unresolved_count": int(failure_isolation.get("unresolved_count", 0) or 0),
+            "has_unresolved": bool(failure_isolation.get("has_unresolved", False)),
+            "latest_isolated_failures": latest_isolated[: OPERATOR_CONSOLE_LIMITS["failure_items"]],
+            "recent_failed_task_runs": list(reversed(failed)),
+            "recent_failed_task_runs_count": len(failed),
+        }
+
+    def _operator_console_checkpoint_readiness(self, summary: dict[str, Any]) -> dict[str, Any]:
+        readiness = summary.get("checkpoint_readiness") if isinstance(summary.get("checkpoint_readiness"), dict) else {}
+        return {
+            "schema_version": readiness.get("schema_version", CHECKPOINT_READINESS_SCHEMA_VERSION),
+            "kind": readiness.get("kind", "engineering-harness.checkpoint-readiness"),
+            "is_repository": bool(readiness.get("is_repository", False)),
+            "ready": bool(readiness.get("ready", False)),
+            "blocking": bool(readiness.get("blocking", False)),
+            "reason": readiness.get("reason"),
+            "dirty_count": len(readiness.get("dirty_paths", [])) if isinstance(readiness.get("dirty_paths"), list) else 0,
+            "blocking_paths": deepcopy(readiness.get("blocking_paths", [])),
+            "safe_to_checkpoint_paths": deepcopy(readiness.get("safe_to_checkpoint_paths", [])),
+            "recommended_action": readiness.get("recommended_action"),
+            "task": self._operator_console_task_brief(
+                readiness.get("task") if isinstance(readiness.get("task"), dict) else None
+            ),
+        }
+
+    def _operator_console_goal_gap_scorecard(self, scorecard: dict[str, Any]) -> dict[str, Any]:
+        summary = scorecard.get("summary") if isinstance(scorecard.get("summary"), dict) else {}
+        categories = [
+            {
+                "id": category.get("id"),
+                "title": category.get("title"),
+                "status": category.get("status"),
+                "risk_score": category.get("risk_score"),
+                "severity": category.get("severity"),
+                "rationale": self._truncate_text(str(category.get("rationale") or ""), OPERATOR_CONSOLE_LIMITS["message_chars"]),
+                "recommended_next_stage_themes": deepcopy(category.get("recommended_next_stage_themes", [])),
+                "evidence_paths": deepcopy(category.get("evidence_paths", [])),
+            }
+            for category in scorecard.get("categories", [])
+            if isinstance(category, dict)
+        ]
+        return {
+            "schema_version": scorecard.get("schema_version", GOAL_GAP_SCORECARD_SCHEMA_VERSION),
+            "kind": scorecard.get("kind", "engineering-harness.goal-gap-scorecard"),
+            "overall_status": summary.get("overall_status"),
+            "status_counts": deepcopy(summary.get("status_counts", {})),
+            "max_risk_score": summary.get("max_risk_score"),
+            "highest_severity": summary.get("highest_severity"),
+            "category_order": deepcopy(scorecard.get("category_order", [])),
+            "categories": categories,
+            "recommended_next_stage_themes": deepcopy(scorecard.get("recommended_next_stage_themes", [])),
+        }
+
+    def _operator_console_replay_guard(self, summary: dict[str, Any]) -> dict[str, Any]:
+        replay_guard = summary.get("replay_guard") if isinstance(summary.get("replay_guard"), dict) else {}
+        reused = [
+            deepcopy(item)
+            for item in replay_guard.get("reused_phases", [])
+            if isinstance(item, dict)
+        ]
+        return {
+            "schema_version": replay_guard.get("schema_version", REPLAY_GUARD_SCHEMA_VERSION),
+            "kind": replay_guard.get("kind", "engineering-harness.replay-guard-summary"),
+            "status": replay_guard.get("status", "none"),
+            "reused_phase_count": int(replay_guard.get("reused_phase_count", 0) or 0),
+            "reused_phases": reused[: OPERATOR_CONSOLE_LIMITS["replay_guard_items"]],
+            "truncated": len(reused) > OPERATOR_CONSOLE_LIMITS["replay_guard_items"],
+        }
+
+    def _operator_console_e2e_artifacts(
+        self,
+        summary: dict[str, Any],
+        manifest_index: dict[str, Any],
+    ) -> dict[str, Any]:
+        browser = (
+            summary.get("browser_user_experience")
+            if isinstance(summary.get("browser_user_experience"), dict)
+            else {}
+        )
+        runs: list[dict[str, Any]] = []
+        for manifest in manifest_index.get("manifests", []):
+            if not isinstance(manifest, dict):
+                continue
+            for run in manifest.get("runs", []):
+                if not isinstance(run, dict):
+                    continue
+                phase = str(run.get("phase") or "")
+                if phase != "e2e" and not run.get("user_experience_gate"):
+                    continue
+                runs.append(
+                    {
+                        "task_id": manifest.get("task_id"),
+                        "manifest_path": manifest.get("manifest_path"),
+                        "phase": phase,
+                        "name": run.get("name"),
+                        "status": run.get("status"),
+                        "returncode": run.get("returncode"),
+                        "executor": run.get("executor"),
+                        "user_experience_gate": deepcopy(run.get("user_experience_gate", {})),
+                    }
+                )
+        evidence_dir = self.project_root / BROWSER_E2E_EVIDENCE_DIR
+        files = []
+        if evidence_dir.exists():
+            for path in sorted([item for item in evidence_dir.rglob("*") if item.is_file()], key=self._project_relative_path):
+                files.append(
+                    {
+                        "path": self._project_relative_path(path),
+                        "bytes": self._file_size(path),
+                    }
+                )
+        journeys = browser.get("journeys") if isinstance(browser.get("journeys"), list) else []
+        return {
+            "status": browser.get("status", "unknown"),
+            "browser_required": bool(browser.get("browser_required", False)),
+            "journey_count": int(browser.get("journey_count", 0) or 0),
+            "configured_gate_count": int(browser.get("configured_gate_count", 0) or 0),
+            "journeys": [
+                {
+                    "id": journey.get("id"),
+                    "latest_status": journey.get("latest_status"),
+                    "gate_configured": bool(journey.get("gate_configured", False)),
+                    "evidence_paths": deepcopy(journey.get("evidence_paths", {})),
+                }
+                for journey in journeys[: OPERATOR_CONSOLE_LIMITS["e2e_runs"]]
+                if isinstance(journey, dict)
+            ],
+            "runs": list(reversed(runs[-OPERATOR_CONSOLE_LIMITS["e2e_runs"] :])),
+            "runs_truncated": len(runs) > OPERATOR_CONSOLE_LIMITS["e2e_runs"],
+            "files": list(reversed(files[-OPERATOR_CONSOLE_LIMITS["e2e_files"] :])),
+            "files_truncated": len(files) > OPERATOR_CONSOLE_LIMITS["e2e_files"],
+            "evidence_dir": BROWSER_E2E_EVIDENCE_DIR,
+        }
+
+    def _operator_console_recommended_actions(
+        self,
+        payload: dict[str, Any],
+        summary: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        actions: list[dict[str, Any]] = []
+
+        def add(action_id: str, title: str, *, severity: str, source: str, details: dict[str, Any] | None = None) -> None:
+            if any(action.get("id") == action_id for action in actions):
+                return
+            actions.append(
+                {
+                    "id": action_id,
+                    "title": title,
+                    "severity": severity,
+                    "source": source,
+                    "details": details or {},
+                }
+            )
+
+        failures = payload.get("failures") if isinstance(payload.get("failures"), dict) else {}
+        approvals = payload.get("approvals") if isinstance(payload.get("approvals"), dict) else {}
+        checkpoint = payload.get("checkpoint_readiness") if isinstance(payload.get("checkpoint_readiness"), dict) else {}
+        queue = payload.get("queue_state") if isinstance(payload.get("queue_state"), dict) else {}
+        drive_control = summary.get("drive_control") if isinstance(summary.get("drive_control"), dict) else {}
+        scorecard = payload.get("goal_gap_scorecard") if isinstance(payload.get("goal_gap_scorecard"), dict) else {}
+        if int(failures.get("unresolved_count", 0) or 0) > 0:
+            add(
+                "recover-isolated-failure",
+                "Resolve unresolved isolated task failures before extending unattended work.",
+                severity="error",
+                source="failure_isolation",
+                details={"unresolved_count": failures.get("unresolved_count")},
+            )
+        if int(approvals.get("pending_count", 0) or 0) > 0:
+            add(
+                "review-approval-leases",
+                "Review pending local approval leases and approve or adjust the blocked task.",
+                severity="approval",
+                source="approval_queue",
+                details={"pending_count": approvals.get("pending_count")},
+            )
+        if int(approvals.get("stale_count", 0) or 0) > 0:
+            add(
+                "refresh-stale-approvals",
+                "Regenerate or clear stale approval leases before rerunning the blocked task.",
+                severity="warning",
+                source="approval_queue",
+                details={"stale_count": approvals.get("stale_count")},
+            )
+        if bool(checkpoint.get("blocking", False)):
+            add(
+                "clear-checkpoint-blockers",
+                str(checkpoint.get("recommended_action") or "Clear checkpoint blockers before dispatch."),
+                severity="error",
+                source="checkpoint_readiness",
+                details={"blocking_paths": checkpoint.get("blocking_paths", [])},
+            )
+        if drive_control.get("status") == "stale" or bool(drive_control.get("stale", False)):
+            add(
+                "recover-stale-running-drive",
+                "Resume or recover stale drive state before starting another drive.",
+                severity="error",
+                source="drive_control",
+                details={"stale_reason": drive_control.get("stale_reason")},
+            )
+        categories = [item for item in scorecard.get("categories", []) if isinstance(item, dict)]
+        for category in sorted(
+            categories,
+            key=lambda item: (int(item.get("risk_score", 0) or 0), str(item.get("id") or "")),
+            reverse=True,
+        ):
+            if str(category.get("status")) not in {"blocked", "missing", "partial"}:
+                continue
+            add(
+                f"goal-gap-{category.get('id')}",
+                f"Address goal-gap category `{category.get('id')}`: {category.get('rationale')}",
+                severity="warning" if category.get("status") != "blocked" else "error",
+                source="goal_gap_scorecard",
+                details={"status": category.get("status"), "risk_score": category.get("risk_score")},
+            )
+            if len(actions) >= OPERATOR_CONSOLE_LIMITS["recommended_actions"]:
+                break
+        next_task = queue.get("next_task") if isinstance(queue.get("next_task"), dict) else None
+        if next_task and len(actions) < OPERATOR_CONSOLE_LIMITS["recommended_actions"]:
+            add(
+                "run-next-roadmap-task",
+                f"Run or dispatch next roadmap task `{next_task.get('id')}`.",
+                severity="info",
+                source="queue_state",
+                details={"task_id": next_task.get("id")},
+            )
+        if not actions:
+            add(
+                "monitor-next-drive",
+                "Run the next local drive and inspect the generated operator console.",
+                severity="info",
+                source="operator_console",
+            )
+        return actions[: OPERATOR_CONSOLE_LIMITS["recommended_actions"]]
+
     def _runtime_domain_frontend_payload(self, experience: dict[str, Any]) -> dict[str, Any]:
         decision = (
             deepcopy(experience.get("decision_contract"))
@@ -7547,6 +8256,7 @@ continuation stage(s) were appended.
         }
         summary["goal_gap_scorecard"] = self.goal_gap_scorecard(status_summary=summary)
         summary["runtime_dashboard"] = self.runtime_dashboard_summary(summary)
+        summary["operator_console"] = self.operator_console_summary(summary)
         return summary
 
     def drive_goal_gap_retrospective(
