@@ -254,5 +254,7 @@ The traceability contract must:
 - keep roadmaps without `spec_refs` backward compatible.
 
 The requirement index is local-only. It may be a JSON/YAML mapping with `requirements`, `ids`, or
-`requirement_ids`, or an inline roadmap list/mapping containing requirement ids. Markdown spec paths
-with requirement headings are indexed directly when no separate index is provided.
+`requirement_ids`, nested structured groups, or an inline roadmap list/mapping containing
+requirement ids. Exact requirement-id strings and requirement-id mapping keys are de-duplicated.
+Markdown spec paths with requirement headings are indexed directly when no separate index is
+provided.

@@ -9903,14 +9903,9 @@ continuation stage(s) were appended.
             if not isinstance(value, dict):
                 return
 
-            for key in ("id", "requirement_id", "requirement", "spec_ref"):
-                add(value.get(key))
-            for key in value:
+            for key, item in value.items():
                 add(key)
-
-            for key in ("requirements", "requirement_ids", "ids", "spec_refs"):
-                if key in value:
-                    walk(value[key])
+                walk(item)
 
         walk(payload)
         return ids

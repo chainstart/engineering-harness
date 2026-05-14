@@ -465,10 +465,11 @@ Roadmaps can also declare the canonical project specification:
 ```
 
 `requirements_index` is optional. When it is configured, it must be a local JSON/YAML mapping or
-inline list/mapping that exposes requirement ids such as `EH-SPEC-001`; Markdown `spec.path`
-documents with requirement headings are also indexed. Roadmap validation reports task or command
-`spec_refs` that point to unknown ids. `engh status --json` includes compact spec coverage at
-top-level `spec` and under `runtime_dashboard.spec`.
+inline list/mapping that exposes requirement ids such as `EH-SPEC-001`; nested groups and
+requirement-id mapping keys are also indexed. Markdown `spec.path` documents with requirement
+headings are indexed too. Roadmap validation reports task or command `spec_refs` that point to
+unknown ids. `engh status --json` includes compact spec coverage at top-level `spec` and under
+`runtime_dashboard.spec`.
 
 ```bash
 engh spec-backlog --project-root /path/to/project --from-stage 2

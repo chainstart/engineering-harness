@@ -1087,6 +1087,82 @@ def test_roadmap_spec_block_indexes_requirement_coverage(tmp_path):
     assert status["runtime_dashboard"]["spec"]["covered_requirement_count"] == 2
 
 
+def test_roadmap_spec_block_indexes_nested_structured_requirements(tmp_path):
+    project = tmp_path / "nested-indexed-spec-project"
+    project.mkdir()
+    (project / "docs").mkdir()
+    (project / "docs/spec.md").write_text("# Project Spec\n", encoding="utf-8")
+    (project / "docs/spec-index.json").write_text(
+        json.dumps(
+            {
+                "kind": "engineering-harness.spec-index.v1",
+                "groups": [
+                    {
+                        "title": "Core",
+                        "requirements": [
+                            {"id": "EH-SPEC-001", "title": "Intake"},
+                            {"requirement_id": "EH-SPEC-002", "title": "Planning"},
+                        ],
+                    },
+                    {
+                        "title": "Distribution",
+                        "items": {
+                            "EH-SPEC-014": {"title": "Public Distribution"},
+                        },
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    engineering_dir = project / ".engineering"
+    engineering_dir.mkdir()
+    (engineering_dir / "roadmap.yaml").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "project": "nested-indexed-spec-project",
+                "profile": "python-agent",
+                "spec": {
+                    "path": "docs/spec.md",
+                    "kind": "markdown",
+                    "requirements_index": "docs/spec-index.json",
+                },
+                "milestones": [
+                    {
+                        "id": "baseline",
+                        "tasks": [
+                            {
+                                "id": "nested-index-task",
+                                "title": "Nested index task",
+                                "spec_refs": ["EH-SPEC-014"],
+                                "acceptance": [
+                                    {
+                                        "name": "nested index acceptance",
+                                        "command": "python3 -c \"print('ok')\"",
+                                        "spec_refs": ["EH-SPEC-002"],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    validation = Harness(project).validate_roadmap()
+    coverage = Harness(project).status_summary()["spec"]
+
+    assert validation["status"] == "passed"
+    assert validation["spec"]["known_requirement_count"] == 3
+    assert coverage["requirements_source"] == "requirements_index"
+    assert coverage["known_requirement_count"] == 3
+    assert coverage["referenced_requirements"] == ["EH-SPEC-002", "EH-SPEC-014"]
+    assert coverage["unreferenced_requirements"] == ["EH-SPEC-001"]
+
+
 def test_roadmap_spec_block_reports_unknown_requirement_refs(tmp_path):
     project = tmp_path / "unknown-spec-ref-project"
     project.mkdir()
