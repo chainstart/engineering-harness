@@ -4020,6 +4020,312 @@
           "generated_at": "2026-05-14T12:39:47Z"
         }
       ]
+    },
+    {
+      "id": "docs-spec-driven-development-plan-stage-3-spec-to-roadmap-planner",
+      "title": "Spec-To-Roadmap Planner",
+      "status": "planned",
+      "objective": "Implement the source specification stage from docs/spec-driven-development-plan.md. Stage goal: Generate or update roadmap stages from a specification while preserving traceability.. Requirement refs: EH-SPEC-001, EH-SPEC-002, EH-SPEC-013.",
+      "generated_by": "engineering-harness-continuation",
+      "generated_at": "2026-05-14T13:04:28Z",
+      "tasks": [
+        {
+          "id": "docs-spec-driven-development-plan-stage-3-spec-to-roadmap-planner-task-1-extend-plan-goal-or-add-a-dedicated-planning-co",
+          "title": "Extend `plan-goal` or add a dedicated planning command that reads a spec document",
+          "status": "pending",
+          "max_attempts": 4,
+          "max_task_iterations": 4,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**",
+            "README.md",
+            "bin/**",
+            ".github/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 5400,
+              "sandbox": "workspace-write",
+              "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 3 - Spec-To-Roadmap Planner\nRequirement refs: EH-SPEC-001, EH-SPEC-002, EH-SPEC-013\nStage goal: Generate or update roadmap stages from a specification while preserving traceability.\nTask: Extend `plan-goal` or add a dedicated planning command that reads a spec document\nStage acceptance summary: Generated tasks cite spec refs.; The planner does not duplicate existing roadmap coverage.; Self-iteration can explain which requirements the new stage advances.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 2700,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 3 - Spec-To-Roadmap Planner\nTask: Extend `plan-goal` or add a dedicated planning command that reads a spec document\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 1500,
+              "spec_refs": [
+                "EH-SPEC-001",
+                "EH-SPEC-002",
+                "EH-SPEC-013"
+              ]
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 300,
+              "spec_refs": [
+                "EH-SPEC-001",
+                "EH-SPEC-002",
+                "EH-SPEC-013"
+              ]
+            }
+          ],
+          "e2e": [
+            {
+              "name": "status remains machine-readable",
+              "command": "bin/engh status --project-root . --json",
+              "required": true,
+              "timeout_seconds": 300,
+              "spec_refs": [
+                "EH-SPEC-001",
+                "EH-SPEC-002",
+                "EH-SPEC-013"
+              ]
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-14T13:04:28Z"
+        },
+        {
+          "id": "docs-spec-driven-development-plan-stage-3-spec-to-roadmap-planner-task-2-generate-milestones-tasks-acceptance-gates-e2e",
+          "title": "Generate milestones, tasks, acceptance gates, E2E gates, and `spec_refs`",
+          "status": "pending",
+          "max_attempts": 4,
+          "max_task_iterations": 4,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**",
+            "README.md",
+            "bin/**",
+            ".github/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 5400,
+              "sandbox": "workspace-write",
+              "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 3 - Spec-To-Roadmap Planner\nRequirement refs: EH-SPEC-001, EH-SPEC-002, EH-SPEC-013\nStage goal: Generate or update roadmap stages from a specification while preserving traceability.\nTask: Generate milestones, tasks, acceptance gates, E2E gates, and `spec_refs`\nStage acceptance summary: Generated tasks cite spec refs.; The planner does not duplicate existing roadmap coverage.; Self-iteration can explain which requirements the new stage advances.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 2700,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 3 - Spec-To-Roadmap Planner\nTask: Generate milestones, tasks, acceptance gates, E2E gates, and `spec_refs`\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 1500,
+              "spec_refs": [
+                "EH-SPEC-001",
+                "EH-SPEC-002",
+                "EH-SPEC-013"
+              ]
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 300,
+              "spec_refs": [
+                "EH-SPEC-001",
+                "EH-SPEC-002",
+                "EH-SPEC-013"
+              ]
+            }
+          ],
+          "e2e": [
+            {
+              "name": "status remains machine-readable",
+              "command": "bin/engh status --project-root . --json",
+              "required": true,
+              "timeout_seconds": 300,
+              "spec_refs": [
+                "EH-SPEC-001",
+                "EH-SPEC-002",
+                "EH-SPEC-013"
+              ]
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-14T13:04:28Z"
+        },
+        {
+          "id": "docs-spec-driven-development-plan-stage-3-spec-to-roadmap-planner-task-3-add-duplicate-plan-detection-based-on-spec-refs",
+          "title": "Add duplicate-plan detection based on spec refs and task semantics",
+          "status": "pending",
+          "max_attempts": 4,
+          "max_task_iterations": 4,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**",
+            "README.md",
+            "bin/**",
+            ".github/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 5400,
+              "sandbox": "workspace-write",
+              "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 3 - Spec-To-Roadmap Planner\nRequirement refs: EH-SPEC-001, EH-SPEC-002, EH-SPEC-013\nStage goal: Generate or update roadmap stages from a specification while preserving traceability.\nTask: Add duplicate-plan detection based on spec refs and task semantics\nStage acceptance summary: Generated tasks cite spec refs.; The planner does not duplicate existing roadmap coverage.; Self-iteration can explain which requirements the new stage advances.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 2700,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 3 - Spec-To-Roadmap Planner\nTask: Add duplicate-plan detection based on spec refs and task semantics\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 1500,
+              "spec_refs": [
+                "EH-SPEC-001",
+                "EH-SPEC-002",
+                "EH-SPEC-013"
+              ]
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 300,
+              "spec_refs": [
+                "EH-SPEC-001",
+                "EH-SPEC-002",
+                "EH-SPEC-013"
+              ]
+            }
+          ],
+          "e2e": [
+            {
+              "name": "status remains machine-readable",
+              "command": "bin/engh status --project-root . --json",
+              "required": true,
+              "timeout_seconds": 300,
+              "spec_refs": [
+                "EH-SPEC-001",
+                "EH-SPEC-002",
+                "EH-SPEC-013"
+              ]
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-14T13:04:28Z"
+        },
+        {
+          "id": "docs-spec-driven-development-plan-stage-3-spec-to-roadmap-planner-task-4-make-self-iteration-append-continuation-stages",
+          "title": "Make self-iteration append continuation stages that cite spec refs",
+          "status": "pending",
+          "max_attempts": 4,
+          "max_task_iterations": 4,
+          "manual_approval_required": false,
+          "agent_approval_required": true,
+          "file_scope": [
+            "src/engineering_harness/**",
+            "tests/**",
+            "docs/**",
+            "README.md",
+            "bin/**",
+            ".github/**"
+          ],
+          "implementation": [
+            {
+              "name": "Codex implementation",
+              "executor": "codex",
+              "timeout_seconds": 5400,
+              "sandbox": "workspace-write",
+              "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 3 - Spec-To-Roadmap Planner\nRequirement refs: EH-SPEC-001, EH-SPEC-002, EH-SPEC-013\nStage goal: Generate or update roadmap stages from a specification while preserving traceability.\nTask: Make self-iteration append continuation stages that cite spec refs\nStage acceptance summary: Generated tasks cite spec refs.; The planner does not duplicate existing roadmap coverage.; Self-iteration can explain which requirements the new stage advances.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+            }
+          ],
+          "repair": [
+            {
+              "name": "Codex repair",
+              "executor": "codex",
+              "timeout_seconds": 2700,
+              "sandbox": "workspace-write",
+              "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 3 - Spec-To-Roadmap Planner\nTask: Make self-iteration append continuation stages that cite spec refs\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+            }
+          ],
+          "acceptance": [
+            {
+              "name": "full harness tests",
+              "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+              "required": true,
+              "timeout_seconds": 1500,
+              "spec_refs": [
+                "EH-SPEC-001",
+                "EH-SPEC-002",
+                "EH-SPEC-013"
+              ]
+            },
+            {
+              "name": "current roadmap validates",
+              "command": "bin/engh validate --project-root .",
+              "required": true,
+              "timeout_seconds": 300,
+              "spec_refs": [
+                "EH-SPEC-001",
+                "EH-SPEC-002",
+                "EH-SPEC-013"
+              ]
+            }
+          ],
+          "e2e": [
+            {
+              "name": "status remains machine-readable",
+              "command": "bin/engh status --project-root . --json",
+              "required": true,
+              "timeout_seconds": 300,
+              "spec_refs": [
+                "EH-SPEC-001",
+                "EH-SPEC-002",
+                "EH-SPEC-013"
+              ]
+            }
+          ],
+          "generated_by": "engineering-harness-continuation",
+          "generated_at": "2026-05-14T13:04:28Z"
+        }
+      ]
     }
   ],
   "continuation": {
