@@ -3556,7 +3556,7 @@
   ],
   "continuation": {
     "enabled": true,
-    "goal": "长期无人值守可靠性总目标：将 engineering-harness 加固为可以在给定总目标、时间预算和安全约束下长期自动运行的开发母机。它必须能够可靠地自我规划、物化阶段、调用实现智能体、运行 acceptance/E2E、提交推送、记录证据、发现卡死或陈旧运行状态、安全恢复中断、隔离失败、避免重复或越权计划，并在每轮结束后对比当前工程状态与长期无人值守目标的差距，提出下一阶段可验证计划后继续循环。",
+    "goal": "Long-term unattended reliability target: harden engineering-harness into an autonomous development mothership that can run for long periods under a declared goal, time budget, and safety constraints. It must reliably plan its own work, materialize stages, invoke implementation agents, run acceptance and E2E checks, commit and push through controlled checkpoints, record evidence, detect stuck or stale running state, recover interrupted work safely, isolate failures, avoid duplicate or over-privileged plans, compare current engineering state against the long-term unattended target at the end of each loop, propose the next verifiable stage, and continue.",
     "blueprint": "docs/autonomous-engineering-harness-plan.md",
     "stages": [
       {
@@ -6851,7 +6851,7 @@
   },
   "self_iteration": {
     "enabled": true,
-    "objective": "围绕长期无人值守可靠性持续自举。每次自迭代都必须使用 planner context pack、最新 task/drive 报告、manifest、测试结果和 git 状态，评估 engineering-harness 距离“长期自动开发软件和智能体的母智能体”的差距。优先补齐会阻止无人值守长跑的短板：stuck detection/heartbeat/watchdog、陈旧 running 状态恢复、阶段物化与 git checkpoint 边界、失败隔离、重复计划检测、目标差距评分、可观测 dashboard、审批/权限安全、跨项目调度和真实 E2E 体验验证。每次只追加一个安全、局部、可测试、可验收的 continuation stage。",
+    "objective": "Continuously self-bootstrap toward long-term unattended reliability. Each self-iteration must use the planner context pack, latest task and drive reports, manifests, test results, and git state to assess the gap between engineering-harness and the target autonomous meta-agent for long-running software and agent development. Prioritize gaps that block unattended operation: stuck detection, heartbeat and watchdog behavior, stale running-state recovery, stage materialization and git checkpoint boundaries, failure isolation, duplicate-plan detection, goal-gap scoring, observable dashboards, approval and permission safety, cross-project scheduling, and real E2E experience validation. Append exactly one safe, local, testable, and reviewable continuation stage per iteration.",
     "max_stages_per_iteration": 1,
     "file_scope": [
       ".engineering/roadmap.yaml",
