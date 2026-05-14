@@ -6928,6 +6928,1769 @@
             ]
           }
         ]
+      },
+      {
+        "id": "docs-spec-driven-development-plan-stage-2-canonical-spec-index",
+        "title": "Canonical Spec Index",
+        "objective": "Implement the source specification stage from docs/spec-driven-development-plan.md. Stage goal: Represent the canonical project spec as a machine-readable index that can be validated separately from the roadmap.. Requirement refs: EH-SPEC-001, EH-SPEC-002, EH-SPEC-014.",
+        "status": "planned",
+        "generated_by": "engineering-harness-spec-backlog-materializer",
+        "source": {
+          "path": "docs/spec-driven-development-plan.md",
+          "stage_number": 2,
+          "stage_title": "Canonical Spec Index",
+          "task_count": 4
+        },
+        "spec_refs": [
+          "EH-SPEC-001",
+          "EH-SPEC-002",
+          "EH-SPEC-014"
+        ],
+        "tasks": [
+          {
+            "id": "docs-spec-driven-development-plan-stage-2-canonical-spec-index-task-1-add-a-top-level-roadmap-spec-block-with-path-kin",
+            "title": "Add a top-level roadmap `spec` block with `path`, `kind`, and optional `requirements_index`",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**",
+              "README.md",
+              "bin/**",
+              ".github/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 2 - Canonical Spec Index\nRequirement refs: EH-SPEC-001, EH-SPEC-002, EH-SPEC-014\nStage goal: Represent the canonical project spec as a machine-readable index that can be validated separately from the roadmap.\nTask: Add a top-level roadmap `spec` block with `path`, `kind`, and optional `requirements_index`\nStage acceptance summary: A roadmap can declare the canonical spec path.; Invalid references to unknown requirement ids are reported.; `status --json` includes compact spec coverage.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 2 - Canonical Spec Index\nTask: Add a top-level roadmap `spec` block with `path`, `kind`, and optional `requirements_index`\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500,
+                "spec_refs": [
+                  "EH-SPEC-001",
+                  "EH-SPEC-002",
+                  "EH-SPEC-014"
+                ]
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-001",
+                  "EH-SPEC-002",
+                  "EH-SPEC-014"
+                ]
+              }
+            ],
+            "e2e": [
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-001",
+                  "EH-SPEC-002",
+                  "EH-SPEC-014"
+                ]
+              }
+            ],
+            "source_spec_task": {
+              "path": "docs/spec-driven-development-plan.md",
+              "stage_number": 2,
+              "stage_title": "Canonical Spec Index",
+              "task_index": 1,
+              "task": "Add a top-level roadmap `spec` block with `path`, `kind`, and optional `requirements_index`."
+            },
+            "spec_refs": [
+              "EH-SPEC-001",
+              "EH-SPEC-002",
+              "EH-SPEC-014"
+            ]
+          },
+          {
+            "id": "docs-spec-driven-development-plan-stage-2-canonical-spec-index-task-2-parse-requirement-ids-from-a-structured-spec-ind",
+            "title": "Parse requirement ids from a structured spec index",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**",
+              "README.md",
+              "bin/**",
+              ".github/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 2 - Canonical Spec Index\nRequirement refs: EH-SPEC-001, EH-SPEC-002, EH-SPEC-014\nStage goal: Represent the canonical project spec as a machine-readable index that can be validated separately from the roadmap.\nTask: Parse requirement ids from a structured spec index\nStage acceptance summary: A roadmap can declare the canonical spec path.; Invalid references to unknown requirement ids are reported.; `status --json` includes compact spec coverage.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 2 - Canonical Spec Index\nTask: Parse requirement ids from a structured spec index\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500,
+                "spec_refs": [
+                  "EH-SPEC-001",
+                  "EH-SPEC-002",
+                  "EH-SPEC-014"
+                ]
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-001",
+                  "EH-SPEC-002",
+                  "EH-SPEC-014"
+                ]
+              }
+            ],
+            "e2e": [
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-001",
+                  "EH-SPEC-002",
+                  "EH-SPEC-014"
+                ]
+              }
+            ],
+            "source_spec_task": {
+              "path": "docs/spec-driven-development-plan.md",
+              "stage_number": 2,
+              "stage_title": "Canonical Spec Index",
+              "task_index": 2,
+              "task": "Parse requirement ids from a structured spec index."
+            },
+            "spec_refs": [
+              "EH-SPEC-001",
+              "EH-SPEC-002",
+              "EH-SPEC-014"
+            ]
+          },
+          {
+            "id": "docs-spec-driven-development-plan-stage-2-canonical-spec-index-task-3-validate-that-task-spec-refs-point-to-known-requ",
+            "title": "Validate that task `spec_refs` point to known requirement ids when an index is configured",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**",
+              "README.md",
+              "bin/**",
+              ".github/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 2 - Canonical Spec Index\nRequirement refs: EH-SPEC-001, EH-SPEC-002, EH-SPEC-014\nStage goal: Represent the canonical project spec as a machine-readable index that can be validated separately from the roadmap.\nTask: Validate that task `spec_refs` point to known requirement ids when an index is configured\nStage acceptance summary: A roadmap can declare the canonical spec path.; Invalid references to unknown requirement ids are reported.; `status --json` includes compact spec coverage.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 2 - Canonical Spec Index\nTask: Validate that task `spec_refs` point to known requirement ids when an index is configured\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500,
+                "spec_refs": [
+                  "EH-SPEC-001",
+                  "EH-SPEC-002",
+                  "EH-SPEC-014"
+                ]
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-001",
+                  "EH-SPEC-002",
+                  "EH-SPEC-014"
+                ]
+              }
+            ],
+            "e2e": [
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-001",
+                  "EH-SPEC-002",
+                  "EH-SPEC-014"
+                ]
+              }
+            ],
+            "source_spec_task": {
+              "path": "docs/spec-driven-development-plan.md",
+              "stage_number": 2,
+              "stage_title": "Canonical Spec Index",
+              "task_index": 3,
+              "task": "Validate that task `spec_refs` point to known requirement ids when an index is configured."
+            },
+            "spec_refs": [
+              "EH-SPEC-001",
+              "EH-SPEC-002",
+              "EH-SPEC-014"
+            ]
+          },
+          {
+            "id": "docs-spec-driven-development-plan-stage-2-canonical-spec-index-task-4-add-cli-output-that-summarizes-spec-coverage",
+            "title": "Add CLI output that summarizes spec coverage",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**",
+              "README.md",
+              "bin/**",
+              ".github/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 2 - Canonical Spec Index\nRequirement refs: EH-SPEC-001, EH-SPEC-002, EH-SPEC-014\nStage goal: Represent the canonical project spec as a machine-readable index that can be validated separately from the roadmap.\nTask: Add CLI output that summarizes spec coverage\nStage acceptance summary: A roadmap can declare the canonical spec path.; Invalid references to unknown requirement ids are reported.; `status --json` includes compact spec coverage.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 2 - Canonical Spec Index\nTask: Add CLI output that summarizes spec coverage\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500,
+                "spec_refs": [
+                  "EH-SPEC-001",
+                  "EH-SPEC-002",
+                  "EH-SPEC-014"
+                ]
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-001",
+                  "EH-SPEC-002",
+                  "EH-SPEC-014"
+                ]
+              }
+            ],
+            "e2e": [
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-001",
+                  "EH-SPEC-002",
+                  "EH-SPEC-014"
+                ]
+              }
+            ],
+            "source_spec_task": {
+              "path": "docs/spec-driven-development-plan.md",
+              "stage_number": 2,
+              "stage_title": "Canonical Spec Index",
+              "task_index": 4,
+              "task": "Add CLI output that summarizes spec coverage."
+            },
+            "spec_refs": [
+              "EH-SPEC-001",
+              "EH-SPEC-002",
+              "EH-SPEC-014"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "docs-spec-driven-development-plan-stage-3-spec-to-roadmap-planner",
+        "title": "Spec-To-Roadmap Planner",
+        "objective": "Implement the source specification stage from docs/spec-driven-development-plan.md. Stage goal: Generate or update roadmap stages from a specification while preserving traceability.. Requirement refs: EH-SPEC-001, EH-SPEC-002, EH-SPEC-013.",
+        "status": "planned",
+        "generated_by": "engineering-harness-spec-backlog-materializer",
+        "source": {
+          "path": "docs/spec-driven-development-plan.md",
+          "stage_number": 3,
+          "stage_title": "Spec-To-Roadmap Planner",
+          "task_count": 4
+        },
+        "spec_refs": [
+          "EH-SPEC-001",
+          "EH-SPEC-002",
+          "EH-SPEC-013"
+        ],
+        "tasks": [
+          {
+            "id": "docs-spec-driven-development-plan-stage-3-spec-to-roadmap-planner-task-1-extend-plan-goal-or-add-a-dedicated-planning-co",
+            "title": "Extend `plan-goal` or add a dedicated planning command that reads a spec document",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**",
+              "README.md",
+              "bin/**",
+              ".github/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 3 - Spec-To-Roadmap Planner\nRequirement refs: EH-SPEC-001, EH-SPEC-002, EH-SPEC-013\nStage goal: Generate or update roadmap stages from a specification while preserving traceability.\nTask: Extend `plan-goal` or add a dedicated planning command that reads a spec document\nStage acceptance summary: Generated tasks cite spec refs.; The planner does not duplicate existing roadmap coverage.; Self-iteration can explain which requirements the new stage advances.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 3 - Spec-To-Roadmap Planner\nTask: Extend `plan-goal` or add a dedicated planning command that reads a spec document\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500,
+                "spec_refs": [
+                  "EH-SPEC-001",
+                  "EH-SPEC-002",
+                  "EH-SPEC-013"
+                ]
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-001",
+                  "EH-SPEC-002",
+                  "EH-SPEC-013"
+                ]
+              }
+            ],
+            "e2e": [
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-001",
+                  "EH-SPEC-002",
+                  "EH-SPEC-013"
+                ]
+              }
+            ],
+            "source_spec_task": {
+              "path": "docs/spec-driven-development-plan.md",
+              "stage_number": 3,
+              "stage_title": "Spec-To-Roadmap Planner",
+              "task_index": 1,
+              "task": "Extend `plan-goal` or add a dedicated planning command that reads a spec document."
+            },
+            "spec_refs": [
+              "EH-SPEC-001",
+              "EH-SPEC-002",
+              "EH-SPEC-013"
+            ]
+          },
+          {
+            "id": "docs-spec-driven-development-plan-stage-3-spec-to-roadmap-planner-task-2-generate-milestones-tasks-acceptance-gates-e2e",
+            "title": "Generate milestones, tasks, acceptance gates, E2E gates, and `spec_refs`",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**",
+              "README.md",
+              "bin/**",
+              ".github/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 3 - Spec-To-Roadmap Planner\nRequirement refs: EH-SPEC-001, EH-SPEC-002, EH-SPEC-013\nStage goal: Generate or update roadmap stages from a specification while preserving traceability.\nTask: Generate milestones, tasks, acceptance gates, E2E gates, and `spec_refs`\nStage acceptance summary: Generated tasks cite spec refs.; The planner does not duplicate existing roadmap coverage.; Self-iteration can explain which requirements the new stage advances.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 3 - Spec-To-Roadmap Planner\nTask: Generate milestones, tasks, acceptance gates, E2E gates, and `spec_refs`\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500,
+                "spec_refs": [
+                  "EH-SPEC-001",
+                  "EH-SPEC-002",
+                  "EH-SPEC-013"
+                ]
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-001",
+                  "EH-SPEC-002",
+                  "EH-SPEC-013"
+                ]
+              }
+            ],
+            "e2e": [
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-001",
+                  "EH-SPEC-002",
+                  "EH-SPEC-013"
+                ]
+              }
+            ],
+            "source_spec_task": {
+              "path": "docs/spec-driven-development-plan.md",
+              "stage_number": 3,
+              "stage_title": "Spec-To-Roadmap Planner",
+              "task_index": 2,
+              "task": "Generate milestones, tasks, acceptance gates, E2E gates, and `spec_refs`."
+            },
+            "spec_refs": [
+              "EH-SPEC-001",
+              "EH-SPEC-002",
+              "EH-SPEC-013"
+            ]
+          },
+          {
+            "id": "docs-spec-driven-development-plan-stage-3-spec-to-roadmap-planner-task-3-add-duplicate-plan-detection-based-on-spec-refs",
+            "title": "Add duplicate-plan detection based on spec refs and task semantics",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**",
+              "README.md",
+              "bin/**",
+              ".github/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 3 - Spec-To-Roadmap Planner\nRequirement refs: EH-SPEC-001, EH-SPEC-002, EH-SPEC-013\nStage goal: Generate or update roadmap stages from a specification while preserving traceability.\nTask: Add duplicate-plan detection based on spec refs and task semantics\nStage acceptance summary: Generated tasks cite spec refs.; The planner does not duplicate existing roadmap coverage.; Self-iteration can explain which requirements the new stage advances.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 3 - Spec-To-Roadmap Planner\nTask: Add duplicate-plan detection based on spec refs and task semantics\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500,
+                "spec_refs": [
+                  "EH-SPEC-001",
+                  "EH-SPEC-002",
+                  "EH-SPEC-013"
+                ]
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-001",
+                  "EH-SPEC-002",
+                  "EH-SPEC-013"
+                ]
+              }
+            ],
+            "e2e": [
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-001",
+                  "EH-SPEC-002",
+                  "EH-SPEC-013"
+                ]
+              }
+            ],
+            "source_spec_task": {
+              "path": "docs/spec-driven-development-plan.md",
+              "stage_number": 3,
+              "stage_title": "Spec-To-Roadmap Planner",
+              "task_index": 3,
+              "task": "Add duplicate-plan detection based on spec refs and task semantics."
+            },
+            "spec_refs": [
+              "EH-SPEC-001",
+              "EH-SPEC-002",
+              "EH-SPEC-013"
+            ]
+          },
+          {
+            "id": "docs-spec-driven-development-plan-stage-3-spec-to-roadmap-planner-task-4-make-self-iteration-append-continuation-stages",
+            "title": "Make self-iteration append continuation stages that cite spec refs",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**",
+              "README.md",
+              "bin/**",
+              ".github/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 3 - Spec-To-Roadmap Planner\nRequirement refs: EH-SPEC-001, EH-SPEC-002, EH-SPEC-013\nStage goal: Generate or update roadmap stages from a specification while preserving traceability.\nTask: Make self-iteration append continuation stages that cite spec refs\nStage acceptance summary: Generated tasks cite spec refs.; The planner does not duplicate existing roadmap coverage.; Self-iteration can explain which requirements the new stage advances.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 3 - Spec-To-Roadmap Planner\nTask: Make self-iteration append continuation stages that cite spec refs\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500,
+                "spec_refs": [
+                  "EH-SPEC-001",
+                  "EH-SPEC-002",
+                  "EH-SPEC-013"
+                ]
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-001",
+                  "EH-SPEC-002",
+                  "EH-SPEC-013"
+                ]
+              }
+            ],
+            "e2e": [
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-001",
+                  "EH-SPEC-002",
+                  "EH-SPEC-013"
+                ]
+              }
+            ],
+            "source_spec_task": {
+              "path": "docs/spec-driven-development-plan.md",
+              "stage_number": 3,
+              "stage_title": "Spec-To-Roadmap Planner",
+              "task_index": 4,
+              "task": "Make self-iteration append continuation stages that cite spec refs."
+            },
+            "spec_refs": [
+              "EH-SPEC-001",
+              "EH-SPEC-002",
+              "EH-SPEC-013"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "docs-spec-driven-development-plan-stage-4-executor-and-memory-context",
+        "title": "Executor And Memory Context",
+        "objective": "Implement the source specification stage from docs/spec-driven-development-plan.md. Stage goal: Give executors bounded spec context and make memory auditable.. Requirement refs: EH-SPEC-004, EH-SPEC-005, EH-SPEC-010.",
+        "status": "planned",
+        "generated_by": "engineering-harness-spec-backlog-materializer",
+        "source": {
+          "path": "docs/spec-driven-development-plan.md",
+          "stage_number": 4,
+          "stage_title": "Executor And Memory Context",
+          "task_count": 4
+        },
+        "spec_refs": [
+          "EH-SPEC-004",
+          "EH-SPEC-005",
+          "EH-SPEC-010"
+        ],
+        "tasks": [
+          {
+            "id": "docs-spec-driven-development-plan-stage-4-executor-and-memory-context-task-1-include-task-spec-refs-and-requirement-exce",
+            "title": "Include task spec refs and requirement excerpts in agent prompts",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**",
+              "README.md",
+              "bin/**",
+              ".github/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 4 - Executor And Memory Context\nRequirement refs: EH-SPEC-004, EH-SPEC-005, EH-SPEC-010\nStage goal: Give executors bounded spec context and make memory auditable.\nTask: Include task spec refs and requirement excerpts in agent prompts\nStage acceptance summary: Agent prompts include relevant spec refs without loading unbounded documents.; Context packs are persisted and referenced by manifests.; Sensitive values are redacted in context artifacts.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 4 - Executor And Memory Context\nTask: Include task spec refs and requirement excerpts in agent prompts\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500,
+                "spec_refs": [
+                  "EH-SPEC-004",
+                  "EH-SPEC-005",
+                  "EH-SPEC-010"
+                ]
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-004",
+                  "EH-SPEC-005",
+                  "EH-SPEC-010"
+                ]
+              }
+            ],
+            "e2e": [
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-004",
+                  "EH-SPEC-005",
+                  "EH-SPEC-010"
+                ]
+              }
+            ],
+            "source_spec_task": {
+              "path": "docs/spec-driven-development-plan.md",
+              "stage_number": 4,
+              "stage_title": "Executor And Memory Context",
+              "task_index": 1,
+              "task": "Include task spec refs and requirement excerpts in agent prompts."
+            },
+            "spec_refs": [
+              "EH-SPEC-004",
+              "EH-SPEC-005",
+              "EH-SPEC-010"
+            ]
+          },
+          {
+            "id": "docs-spec-driven-development-plan-stage-4-executor-and-memory-context-task-2-add-a-context-pack-contract-for-spec-roadma",
+            "title": "Add a context-pack contract for spec, roadmap, tests, manifests, and git state",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**",
+              "README.md",
+              "bin/**",
+              ".github/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 4 - Executor And Memory Context\nRequirement refs: EH-SPEC-004, EH-SPEC-005, EH-SPEC-010\nStage goal: Give executors bounded spec context and make memory auditable.\nTask: Add a context-pack contract for spec, roadmap, tests, manifests, and git state\nStage acceptance summary: Agent prompts include relevant spec refs without loading unbounded documents.; Context packs are persisted and referenced by manifests.; Sensitive values are redacted in context artifacts.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 4 - Executor And Memory Context\nTask: Add a context-pack contract for spec, roadmap, tests, manifests, and git state\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500,
+                "spec_refs": [
+                  "EH-SPEC-004",
+                  "EH-SPEC-005",
+                  "EH-SPEC-010"
+                ]
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-004",
+                  "EH-SPEC-005",
+                  "EH-SPEC-010"
+                ]
+              }
+            ],
+            "e2e": [
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-004",
+                  "EH-SPEC-005",
+                  "EH-SPEC-010"
+                ]
+              }
+            ],
+            "source_spec_task": {
+              "path": "docs/spec-driven-development-plan.md",
+              "stage_number": 4,
+              "stage_title": "Executor And Memory Context",
+              "task_index": 2,
+              "task": "Add a context-pack contract for spec, roadmap, tests, manifests, and git state."
+            },
+            "spec_refs": [
+              "EH-SPEC-004",
+              "EH-SPEC-005",
+              "EH-SPEC-010"
+            ]
+          },
+          {
+            "id": "docs-spec-driven-development-plan-stage-4-executor-and-memory-context-task-3-track-model-cost-context-metadata-in-execut",
+            "title": "Track model/cost/context metadata in executor results where available",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**",
+              "README.md",
+              "bin/**",
+              ".github/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 4 - Executor And Memory Context\nRequirement refs: EH-SPEC-004, EH-SPEC-005, EH-SPEC-010\nStage goal: Give executors bounded spec context and make memory auditable.\nTask: Track model/cost/context metadata in executor results where available\nStage acceptance summary: Agent prompts include relevant spec refs without loading unbounded documents.; Context packs are persisted and referenced by manifests.; Sensitive values are redacted in context artifacts.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 4 - Executor And Memory Context\nTask: Track model/cost/context metadata in executor results where available\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500,
+                "spec_refs": [
+                  "EH-SPEC-004",
+                  "EH-SPEC-005",
+                  "EH-SPEC-010"
+                ]
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-004",
+                  "EH-SPEC-005",
+                  "EH-SPEC-010"
+                ]
+              }
+            ],
+            "e2e": [
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-004",
+                  "EH-SPEC-005",
+                  "EH-SPEC-010"
+                ]
+              }
+            ],
+            "source_spec_task": {
+              "path": "docs/spec-driven-development-plan.md",
+              "stage_number": 4,
+              "stage_title": "Executor And Memory Context",
+              "task_index": 3,
+              "task": "Track model/cost/context metadata in executor results where available."
+            },
+            "spec_refs": [
+              "EH-SPEC-004",
+              "EH-SPEC-005",
+              "EH-SPEC-010"
+            ]
+          },
+          {
+            "id": "docs-spec-driven-development-plan-stage-4-executor-and-memory-context-task-4-redact-sensitive-values-before-context-and",
+            "title": "Redact sensitive values before context and memory persistence",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**",
+              "README.md",
+              "bin/**",
+              ".github/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 4 - Executor And Memory Context\nRequirement refs: EH-SPEC-004, EH-SPEC-005, EH-SPEC-010\nStage goal: Give executors bounded spec context and make memory auditable.\nTask: Redact sensitive values before context and memory persistence\nStage acceptance summary: Agent prompts include relevant spec refs without loading unbounded documents.; Context packs are persisted and referenced by manifests.; Sensitive values are redacted in context artifacts.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 4 - Executor And Memory Context\nTask: Redact sensitive values before context and memory persistence\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500,
+                "spec_refs": [
+                  "EH-SPEC-004",
+                  "EH-SPEC-005",
+                  "EH-SPEC-010"
+                ]
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-004",
+                  "EH-SPEC-005",
+                  "EH-SPEC-010"
+                ]
+              }
+            ],
+            "e2e": [
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-004",
+                  "EH-SPEC-005",
+                  "EH-SPEC-010"
+                ]
+              }
+            ],
+            "source_spec_task": {
+              "path": "docs/spec-driven-development-plan.md",
+              "stage_number": 4,
+              "stage_title": "Executor And Memory Context",
+              "task_index": 4,
+              "task": "Redact sensitive values before context and memory persistence."
+            },
+            "spec_refs": [
+              "EH-SPEC-004",
+              "EH-SPEC-005",
+              "EH-SPEC-010"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "docs-spec-driven-development-plan-stage-5-production-evaluation-matrix",
+        "title": "Production Evaluation Matrix",
+        "objective": "Implement the source specification stage from docs/spec-driven-development-plan.md. Stage goal: Map requirement types to domain-specific evidence.. Requirement refs: EH-SPEC-007, EH-SPEC-012.",
+        "status": "planned",
+        "generated_by": "engineering-harness-spec-backlog-materializer",
+        "source": {
+          "path": "docs/spec-driven-development-plan.md",
+          "stage_number": 5,
+          "stage_title": "Production Evaluation Matrix",
+          "task_count": 4
+        },
+        "spec_refs": [
+          "EH-SPEC-007",
+          "EH-SPEC-012"
+        ],
+        "tasks": [
+          {
+            "id": "docs-spec-driven-development-plan-stage-5-production-evaluation-matrix-task-1-define-evaluation-templates-for-web-api-cl",
+            "title": "Define evaluation templates for web, API, CLI, agent, embedded, HDL, formal, and DevOps projects",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**",
+              "README.md",
+              "bin/**",
+              ".github/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 5 - Production Evaluation Matrix\nRequirement refs: EH-SPEC-007, EH-SPEC-012\nStage goal: Map requirement types to domain-specific evidence.\nTask: Define evaluation templates for web, API, CLI, agent, embedded, HDL, formal, and DevOps projects\nStage acceptance summary: A task can show requirement coverage by evidence type.; HDL and embedded workflows can model simulator or hardware checks as E2E gates.; Reports distinguish failed implementation from unproven requirement evidence.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 5 - Production Evaluation Matrix\nTask: Define evaluation templates for web, API, CLI, agent, embedded, HDL, formal, and DevOps projects\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500,
+                "spec_refs": [
+                  "EH-SPEC-007",
+                  "EH-SPEC-012"
+                ]
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-007",
+                  "EH-SPEC-012"
+                ]
+              }
+            ],
+            "e2e": [
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-007",
+                  "EH-SPEC-012"
+                ]
+              }
+            ],
+            "source_spec_task": {
+              "path": "docs/spec-driven-development-plan.md",
+              "stage_number": 5,
+              "stage_title": "Production Evaluation Matrix",
+              "task_index": 1,
+              "task": "Define evaluation templates for web, API, CLI, agent, embedded, HDL, formal, and DevOps projects."
+            },
+            "spec_refs": [
+              "EH-SPEC-007",
+              "EH-SPEC-012"
+            ]
+          },
+          {
+            "id": "docs-spec-driven-development-plan-stage-5-production-evaluation-matrix-task-2-add-profile-or-domain-pack-defaults-for-ac",
+            "title": "Add profile or domain-pack defaults for acceptance and E2E commands",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**",
+              "README.md",
+              "bin/**",
+              ".github/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 5 - Production Evaluation Matrix\nRequirement refs: EH-SPEC-007, EH-SPEC-012\nStage goal: Map requirement types to domain-specific evidence.\nTask: Add profile or domain-pack defaults for acceptance and E2E commands\nStage acceptance summary: A task can show requirement coverage by evidence type.; HDL and embedded workflows can model simulator or hardware checks as E2E gates.; Reports distinguish failed implementation from unproven requirement evidence.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 5 - Production Evaluation Matrix\nTask: Add profile or domain-pack defaults for acceptance and E2E commands\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500,
+                "spec_refs": [
+                  "EH-SPEC-007",
+                  "EH-SPEC-012"
+                ]
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-007",
+                  "EH-SPEC-012"
+                ]
+              }
+            ],
+            "e2e": [
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-007",
+                  "EH-SPEC-012"
+                ]
+              }
+            ],
+            "source_spec_task": {
+              "path": "docs/spec-driven-development-plan.md",
+              "stage_number": 5,
+              "stage_title": "Production Evaluation Matrix",
+              "task_index": 2,
+              "task": "Add profile or domain-pack defaults for acceptance and E2E commands."
+            },
+            "spec_refs": [
+              "EH-SPEC-007",
+              "EH-SPEC-012"
+            ]
+          },
+          {
+            "id": "docs-spec-driven-development-plan-stage-5-production-evaluation-matrix-task-3-record-evidence-type-and-artifact-paths-pe",
+            "title": "Record evidence type and artifact paths per spec ref",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**",
+              "README.md",
+              "bin/**",
+              ".github/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 5 - Production Evaluation Matrix\nRequirement refs: EH-SPEC-007, EH-SPEC-012\nStage goal: Map requirement types to domain-specific evidence.\nTask: Record evidence type and artifact paths per spec ref\nStage acceptance summary: A task can show requirement coverage by evidence type.; HDL and embedded workflows can model simulator or hardware checks as E2E gates.; Reports distinguish failed implementation from unproven requirement evidence.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 5 - Production Evaluation Matrix\nTask: Record evidence type and artifact paths per spec ref\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500,
+                "spec_refs": [
+                  "EH-SPEC-007",
+                  "EH-SPEC-012"
+                ]
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-007",
+                  "EH-SPEC-012"
+                ]
+              }
+            ],
+            "e2e": [
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-007",
+                  "EH-SPEC-012"
+                ]
+              }
+            ],
+            "source_spec_task": {
+              "path": "docs/spec-driven-development-plan.md",
+              "stage_number": 5,
+              "stage_title": "Production Evaluation Matrix",
+              "task_index": 3,
+              "task": "Record evidence type and artifact paths per spec ref."
+            },
+            "spec_refs": [
+              "EH-SPEC-007",
+              "EH-SPEC-012"
+            ]
+          },
+          {
+            "id": "docs-spec-driven-development-plan-stage-5-production-evaluation-matrix-task-4-add-failure-summaries-that-identify-which",
+            "title": "Add failure summaries that identify which requirements remain unproven",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**",
+              "README.md",
+              "bin/**",
+              ".github/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 5 - Production Evaluation Matrix\nRequirement refs: EH-SPEC-007, EH-SPEC-012\nStage goal: Map requirement types to domain-specific evidence.\nTask: Add failure summaries that identify which requirements remain unproven\nStage acceptance summary: A task can show requirement coverage by evidence type.; HDL and embedded workflows can model simulator or hardware checks as E2E gates.; Reports distinguish failed implementation from unproven requirement evidence.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 5 - Production Evaluation Matrix\nTask: Add failure summaries that identify which requirements remain unproven\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500,
+                "spec_refs": [
+                  "EH-SPEC-007",
+                  "EH-SPEC-012"
+                ]
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-007",
+                  "EH-SPEC-012"
+                ]
+              }
+            ],
+            "e2e": [
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-007",
+                  "EH-SPEC-012"
+                ]
+              }
+            ],
+            "source_spec_task": {
+              "path": "docs/spec-driven-development-plan.md",
+              "stage_number": 5,
+              "stage_title": "Production Evaluation Matrix",
+              "task_index": 4,
+              "task": "Add failure summaries that identify which requirements remain unproven."
+            },
+            "spec_refs": [
+              "EH-SPEC-007",
+              "EH-SPEC-012"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "docs-spec-driven-development-plan-stage-6-ci-cd-and-operator-workflow",
+        "title": "CI/CD And Operator Workflow",
+        "objective": "Implement the source specification stage from docs/spec-driven-development-plan.md. Stage goal: Connect local autonomous runs to repository-native workflows and operator surfaces.. Requirement refs: EH-SPEC-006, EH-SPEC-009, EH-SPEC-011.",
+        "status": "planned",
+        "generated_by": "engineering-harness-spec-backlog-materializer",
+        "source": {
+          "path": "docs/spec-driven-development-plan.md",
+          "stage_number": 6,
+          "stage_title": "CI/CD And Operator Workflow",
+          "task_count": 4
+        },
+        "spec_refs": [
+          "EH-SPEC-006",
+          "EH-SPEC-009",
+          "EH-SPEC-011"
+        ],
+        "tasks": [
+          {
+            "id": "docs-spec-driven-development-plan-stage-6-ci-cd-and-operator-workflow-task-1-generate-ci-workflows-for-acceptance-and-e2",
+            "title": "Generate CI workflows for acceptance and E2E checks",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**",
+              "README.md",
+              "bin/**",
+              ".github/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 6 - CI/CD And Operator Workflow\nRequirement refs: EH-SPEC-006, EH-SPEC-009, EH-SPEC-011\nStage goal: Connect local autonomous runs to repository-native workflows and operator surfaces.\nTask: Generate CI workflows for acceptance and E2E checks\nStage acceptance summary: CI results can be traced back to roadmap tasks and spec requirements.; Operators can inspect blockers, approvals, and evidence without reading raw logs.; Dashboard data is derived from manifests and durable state.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 6 - CI/CD And Operator Workflow\nTask: Generate CI workflows for acceptance and E2E checks\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500,
+                "spec_refs": [
+                  "EH-SPEC-006",
+                  "EH-SPEC-009",
+                  "EH-SPEC-011"
+                ]
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-006",
+                  "EH-SPEC-009",
+                  "EH-SPEC-011"
+                ]
+              }
+            ],
+            "e2e": [
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-006",
+                  "EH-SPEC-009",
+                  "EH-SPEC-011"
+                ]
+              }
+            ],
+            "source_spec_task": {
+              "path": "docs/spec-driven-development-plan.md",
+              "stage_number": 6,
+              "stage_title": "CI/CD And Operator Workflow",
+              "task_index": 1,
+              "task": "Generate CI workflows for acceptance and E2E checks."
+            },
+            "spec_refs": [
+              "EH-SPEC-006",
+              "EH-SPEC-009",
+              "EH-SPEC-011"
+            ]
+          },
+          {
+            "id": "docs-spec-driven-development-plan-stage-6-ci-cd-and-operator-workflow-task-2-map-ci-failures-back-to-task-ids-and-spec-r",
+            "title": "Map CI failures back to task ids and spec refs",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**",
+              "README.md",
+              "bin/**",
+              ".github/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 6 - CI/CD And Operator Workflow\nRequirement refs: EH-SPEC-006, EH-SPEC-009, EH-SPEC-011\nStage goal: Connect local autonomous runs to repository-native workflows and operator surfaces.\nTask: Map CI failures back to task ids and spec refs\nStage acceptance summary: CI results can be traced back to roadmap tasks and spec requirements.; Operators can inspect blockers, approvals, and evidence without reading raw logs.; Dashboard data is derived from manifests and durable state.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 6 - CI/CD And Operator Workflow\nTask: Map CI failures back to task ids and spec refs\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500,
+                "spec_refs": [
+                  "EH-SPEC-006",
+                  "EH-SPEC-009",
+                  "EH-SPEC-011"
+                ]
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-006",
+                  "EH-SPEC-009",
+                  "EH-SPEC-011"
+                ]
+              }
+            ],
+            "e2e": [
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-006",
+                  "EH-SPEC-009",
+                  "EH-SPEC-011"
+                ]
+              }
+            ],
+            "source_spec_task": {
+              "path": "docs/spec-driven-development-plan.md",
+              "stage_number": 6,
+              "stage_title": "CI/CD And Operator Workflow",
+              "task_index": 2,
+              "task": "Map CI failures back to task ids and spec refs."
+            },
+            "spec_refs": [
+              "EH-SPEC-006",
+              "EH-SPEC-009",
+              "EH-SPEC-011"
+            ]
+          },
+          {
+            "id": "docs-spec-driven-development-plan-stage-6-ci-cd-and-operator-workflow-task-3-publish-pr-comments-or-status-artifacts-fro",
+            "title": "Publish PR comments or status artifacts from manifests",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**",
+              "README.md",
+              "bin/**",
+              ".github/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 6 - CI/CD And Operator Workflow\nRequirement refs: EH-SPEC-006, EH-SPEC-009, EH-SPEC-011\nStage goal: Connect local autonomous runs to repository-native workflows and operator surfaces.\nTask: Publish PR comments or status artifacts from manifests\nStage acceptance summary: CI results can be traced back to roadmap tasks and spec requirements.; Operators can inspect blockers, approvals, and evidence without reading raw logs.; Dashboard data is derived from manifests and durable state.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 6 - CI/CD And Operator Workflow\nTask: Publish PR comments or status artifacts from manifests\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500,
+                "spec_refs": [
+                  "EH-SPEC-006",
+                  "EH-SPEC-009",
+                  "EH-SPEC-011"
+                ]
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-006",
+                  "EH-SPEC-009",
+                  "EH-SPEC-011"
+                ]
+              }
+            ],
+            "e2e": [
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-006",
+                  "EH-SPEC-009",
+                  "EH-SPEC-011"
+                ]
+              }
+            ],
+            "source_spec_task": {
+              "path": "docs/spec-driven-development-plan.md",
+              "stage_number": 6,
+              "stage_title": "CI/CD And Operator Workflow",
+              "task_index": 3,
+              "task": "Publish PR comments or status artifacts from manifests."
+            },
+            "spec_refs": [
+              "EH-SPEC-006",
+              "EH-SPEC-009",
+              "EH-SPEC-011"
+            ]
+          },
+          {
+            "id": "docs-spec-driven-development-plan-stage-6-ci-cd-and-operator-workflow-task-4-build-a-dashboard-ready-data-contract-for-g",
+            "title": "Build a dashboard-ready data contract for goals, tasks, requirements, approvals, and evidence",
+            "status": "pending",
+            "max_attempts": 4,
+            "max_task_iterations": 4,
+            "manual_approval_required": false,
+            "agent_approval_required": true,
+            "file_scope": [
+              "src/engineering_harness/**",
+              "tests/**",
+              "docs/**",
+              "README.md",
+              "bin/**",
+              ".github/**"
+            ],
+            "implementation": [
+              {
+                "name": "Codex implementation",
+                "executor": "codex",
+                "timeout_seconds": 5400,
+                "sandbox": "workspace-write",
+                "prompt": "Implement this specification-derived engineering-harness backlog task.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 6 - CI/CD And Operator Workflow\nRequirement refs: EH-SPEC-006, EH-SPEC-009, EH-SPEC-011\nStage goal: Connect local autonomous runs to repository-native workflows and operator surfaces.\nTask: Build a dashboard-ready data contract for goals, tasks, requirements, approvals, and evidence\nStage acceptance summary: CI results can be traced back to roadmap tasks and spec requirements.; Operators can inspect blockers, approvals, and evidence without reading raw logs.; Dashboard data is derived from manifests and durable state.\n\nUse existing engineering-harness patterns and keep the change local, testable, and reviewable. Add or update focused tests and documentation where the behavior changes. Preserve drive, self-iteration, checkpoint readiness, failure isolation, approval/capability policy, workspace dispatch, runtime dashboard, and local-only execution semantics. Do not require external accounts, private keys, paid services, production deployments, mainnet writes, live trading, or real pushes."
+              }
+            ],
+            "repair": [
+              {
+                "name": "Codex repair",
+                "executor": "codex",
+                "timeout_seconds": 2700,
+                "sandbox": "workspace-write",
+                "prompt": "Fix failing tests or validation for this specification-derived backlog task while preserving the intended source task behavior.\n\nSource: docs/spec-driven-development-plan.md\nStage: Stage 6 - CI/CD And Operator Workflow\nTask: Build a dashboard-ready data contract for goals, tasks, requirements, approvals, and evidence\nKeep repairs scoped, local-only, and compatible with existing harness evidence and safety semantics."
+              }
+            ],
+            "acceptance": [
+              {
+                "name": "full harness tests",
+                "command": "python3 -m pytest tests/test_engineering_harness.py -q",
+                "required": true,
+                "timeout_seconds": 1500,
+                "spec_refs": [
+                  "EH-SPEC-006",
+                  "EH-SPEC-009",
+                  "EH-SPEC-011"
+                ]
+              },
+              {
+                "name": "current roadmap validates",
+                "command": "bin/engh validate --project-root .",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-006",
+                  "EH-SPEC-009",
+                  "EH-SPEC-011"
+                ]
+              }
+            ],
+            "e2e": [
+              {
+                "name": "status remains machine-readable",
+                "command": "bin/engh status --project-root . --json",
+                "required": true,
+                "timeout_seconds": 300,
+                "spec_refs": [
+                  "EH-SPEC-006",
+                  "EH-SPEC-009",
+                  "EH-SPEC-011"
+                ]
+              }
+            ],
+            "source_spec_task": {
+              "path": "docs/spec-driven-development-plan.md",
+              "stage_number": 6,
+              "stage_title": "CI/CD And Operator Workflow",
+              "task_index": 4,
+              "task": "Build a dashboard-ready data contract for goals, tasks, requirements, approvals, and evidence."
+            },
+            "spec_refs": [
+              "EH-SPEC-006",
+              "EH-SPEC-009",
+              "EH-SPEC-011"
+            ]
+          }
+        ]
       }
     ]
   },
