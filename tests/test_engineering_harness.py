@@ -1006,7 +1006,7 @@ def test_roadmap_validation_checks_spec_refs(tmp_path):
     assert "task `spec-task` acceptance[0].spec_refs[0] must be a non-empty string" in result["errors"]
 
 
-def test_roadmap_spec_block_indexes_requirement_coverage(tmp_path):
+def test_roadmap_spec_block_indexes_requirement_coverage(tmp_path, capsys):
     project = tmp_path / "indexed-spec-project"
     project.mkdir()
     (project / "docs").mkdir()
@@ -1085,6 +1085,10 @@ def test_roadmap_spec_block_indexes_requirement_coverage(tmp_path):
     assert coverage["task_with_spec_refs_count"] == 1
     assert coverage["command_with_spec_refs_count"] == 1
     assert status["runtime_dashboard"]["spec"]["covered_requirement_count"] == 2
+
+    assert cli_main(["status", "--project-root", str(project)]) == 0
+    text = capsys.readouterr().out
+    assert "Spec coverage: ok 2/3 covered refs=2 unknown=0 path=docs/spec.md" in text
 
 
 def test_roadmap_spec_block_indexes_nested_structured_requirements(tmp_path):

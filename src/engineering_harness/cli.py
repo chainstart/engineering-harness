@@ -162,6 +162,32 @@ def _goal_text_from_args(args: argparse.Namespace) -> str:
     return str(args.goal or "")
 
 
+def _format_spec_coverage_line(spec: dict) -> str | None:
+    if not isinstance(spec, dict):
+        return None
+    status = str(spec.get("status") or "unknown")
+    configured = bool(spec.get("configured"))
+    if not configured:
+        if status == "unconfigured":
+            return None
+        return f"Spec coverage: {status}"
+
+    known = int(spec.get("known_requirement_count", 0) or 0)
+    covered = int(spec.get("covered_requirement_count", 0) or 0)
+    referenced = int(spec.get("referenced_requirement_count", 0) or 0)
+    unknown = int(spec.get("unknown_requirement_count", 0) or 0)
+    parts = [
+        f"Spec coverage: {status}",
+        f"{covered}/{known} covered",
+        f"refs={referenced}",
+        f"unknown={unknown}",
+    ]
+    path = str(spec.get("path") or "").strip()
+    if path:
+        parts.append(f"path={path}")
+    return " ".join(parts)
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     if getattr(args, "workspace", None) and not getattr(args, "project_root", None) and not getattr(args, "project", None):
         summaries = []
@@ -182,7 +208,11 @@ def cmd_status(args: argparse.Namespace) -> int:
                 next_task = summary.get("next_task")
                 next_id = next_task["id"] if next_task else "none"
                 manifest_count = summary.get("manifest_index", {}).get("manifest_count", 0)
-                print(f"{summary['project']}: next={next_id} manifests={manifest_count} root={summary['root']}")
+                line = f"{summary['project']}: next={next_id} manifests={manifest_count}"
+                spec_line = _format_spec_coverage_line(summary.get("spec", {}))
+                if spec_line:
+                    line = f"{line} spec={spec_line.removeprefix('Spec coverage: ')}"
+                print(f"{line} root={summary['root']}")
         return 0
 
     root = resolve_project_root(args)
@@ -195,6 +225,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"Root: {summary['root']}")
         print(f"Roadmap: {summary['roadmap']}")
         print(f"Run manifests: {summary.get('manifest_index', {}).get('manifest_count', 0)}")
+        spec_line = _format_spec_coverage_line(summary.get("spec", {}))
+        if spec_line:
+            print(spec_line)
         drive_control = summary.get("drive_control", {})
         approval_queue = summary.get("approval_queue", {})
         print(f"Drive control: {drive_control.get('status', 'idle')}")

@@ -469,7 +469,8 @@ inline list/mapping that exposes requirement ids such as `EH-SPEC-001`; nested g
 requirement-id mapping keys are also indexed. Markdown `spec.path` documents with requirement
 headings are indexed too. Roadmap validation reports task or command `spec_refs` that point to
 unknown ids. `engh status --json` includes compact spec coverage at top-level `spec` and under
-`runtime_dashboard.spec`.
+`runtime_dashboard.spec`; plain `engh status` prints the same coverage as a compact one-line
+summary.
 
 ```bash
 engh spec-backlog --project-root /path/to/project --from-stage 2
