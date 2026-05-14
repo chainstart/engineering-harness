@@ -864,6 +864,42 @@ def cmd_frontend_tasks(args: argparse.Namespace) -> int:
     return 0 if result["status"] in {"proposed", "materialized", "skipped"} else 1
 
 
+def cmd_spec_backlog(args: argparse.Namespace) -> int:
+    root = resolve_project_root(args)
+    harness = Harness(root)
+    if args.from_stage < 1:
+        raise ValueError("--from-stage must be positive")
+    source_paths = [str(source) for source in args.source] if args.source else None
+    if args.materialize:
+        result = harness.materialize_spec_backlog(
+            source_paths=source_paths,
+            include_blueprint=args.include_blueprint,
+            from_stage=args.from_stage,
+            reason=args.reason,
+        )
+    else:
+        result = harness.spec_backlog_plan(
+            source_paths=source_paths,
+            include_blueprint=args.include_blueprint,
+            from_stage=args.from_stage,
+        )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(f"Spec backlog: {result['status']} - {result.get('message', 'proposal ready')}")
+        print(f"Sources: {result.get('source_count', 0)}")
+        print(f"Stages: {result.get('stage_count', 0)}")
+        print(f"Tasks: {result.get('task_count', 0)}")
+        skipped = int(result.get("skipped_stage_count", 0) or 0)
+        if skipped:
+            print(f"Skipped existing stages: {skipped}")
+        for stage in result.get("stages", []):
+            print(f"- {stage['id']}: {stage['title']} ({len(stage.get('tasks', []))} task(s))")
+        if not args.materialize:
+            print("Run again with --materialize to append these stages to continuation.stages.")
+    return 0 if result["status"] in {"proposed", "materialized", "up_to_date"} else 1
+
+
 def cmd_self_iterate(args: argparse.Namespace) -> int:
     root = resolve_project_root(args)
     harness = Harness(root)
@@ -4121,6 +4157,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("run", "Run the next or selected task acceptance checks", cmd_run),
         ("advance", "Materialize the next continuation milestone into the roadmap", cmd_advance),
         ("frontend-tasks", "Propose or materialize frontend roadmap tasks from the experience plan", cmd_frontend_tasks),
+        ("spec-backlog", "Propose or materialize continuation stages from specification task lists", cmd_spec_backlog),
         ("self-iterate", "Assess current state and append the next continuation stage", cmd_self_iterate),
         ("pause", "Pause future drive scheduling for this project", cmd_pause),
         ("resume", "Clear pause or cancel state so a drive can continue", cmd_resume),
@@ -4154,6 +4191,12 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--materialize", action="store_true")
             command.add_argument("--milestone-id", default="frontend-visualization")
             command.add_argument("--reason", default="manual_frontend_task_generation")
+        if name == "spec-backlog":
+            command.add_argument("--source", type=Path, action="append", default=None)
+            command.add_argument("--include-blueprint", action="store_true")
+            command.add_argument("--from-stage", type=int, default=1)
+            command.add_argument("--materialize", action="store_true")
+            command.add_argument("--reason", default="manual_spec_backlog_materialization")
         if name == "self-iterate":
             command.add_argument("--reason", default="manual_self_iteration")
             command.add_argument("--allow-live", action="store_true")

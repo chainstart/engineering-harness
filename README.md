@@ -446,6 +446,31 @@ Advance automatically during a drive:
 engh drive --project-root /path/to/project --rolling
 ```
 
+## Spec Backlog
+
+For spec-driven projects, the harness can turn Markdown `Stage` / `Tasks` sections into
+continuation stages. By default it reads `spec.development_plan` from `.engineering/roadmap.yaml`.
+Use `--from-stage` when earlier stages are already implemented:
+
+```bash
+engh spec-backlog --project-root /path/to/project --from-stage 2
+engh spec-backlog --project-root /path/to/project --from-stage 2 --materialize
+```
+
+Additional sources can be passed explicitly:
+
+```bash
+engh spec-backlog \
+  --project-root /path/to/project \
+  --source docs/spec-driven-development-plan.md \
+  --source docs/autonomous-engineering-harness-plan.md \
+  --materialize
+```
+
+Generated tasks include source metadata, `spec_refs` when the source stage declares requirement
+ids, Codex implementation and repair commands, local pytest and validation gates, and status JSON
+E2E evidence. Re-running the command skips stages that are already present.
+
 ## Task Example
 
 ```json

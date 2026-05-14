@@ -50,6 +50,11 @@ from .browser_e2e import (
 )
 from .io import append_jsonl, load_mapping, write_json, write_mapping
 from .profiles import command_policy, default_roadmap
+from .spec_backlog import (
+    SPEC_BACKLOG_GENERATOR_ID,
+    build_spec_backlog_plan,
+    materialize_spec_backlog_plan,
+)
 
 
 COMPLETED_STATUSES = {"done", "passed", "skipped"}
@@ -8255,6 +8260,70 @@ continuation stage(s) were appended.
             "tasks": tasks,
             "tasks_added": 0,
         }
+
+    def spec_backlog_plan(
+        self,
+        *,
+        source_paths: list[str] | None = None,
+        include_blueprint: bool = False,
+        from_stage: int = 1,
+    ) -> dict[str, Any]:
+        return build_spec_backlog_plan(
+            project_root=self.project_root,
+            roadmap=self.roadmap,
+            source_paths=source_paths,
+            include_blueprint=include_blueprint,
+            from_stage=from_stage,
+        )
+
+    def materialize_spec_backlog(
+        self,
+        *,
+        source_paths: list[str] | None = None,
+        include_blueprint: bool = False,
+        from_stage: int = 1,
+        reason: str = "manual_spec_backlog_materialization",
+    ) -> dict[str, Any]:
+        plan = self.spec_backlog_plan(
+            source_paths=source_paths,
+            include_blueprint=include_blueprint,
+            from_stage=from_stage,
+        )
+        stages = plan.get("stages", []) if isinstance(plan.get("stages"), list) else []
+        if not stages:
+            plan["status"] = "up_to_date"
+            plan["materialized"] = False
+            plan["message"] = "no new specification backlog stages to materialize"
+            return plan
+
+        updated, added_stage_count = materialize_spec_backlog_plan(self.roadmap, stages)
+        if added_stage_count <= 0:
+            plan["status"] = "up_to_date"
+            plan["materialized"] = False
+            plan["message"] = "no new specification backlog stages to materialize"
+            return plan
+
+        self.roadmap = updated
+        self.save_roadmap()
+        added_stages = stages[:added_stage_count]
+        added_tasks = sum(len(stage.get("tasks", [])) for stage in added_stages)
+        event = {
+            "at": utc_now(),
+            "event": "spec_backlog_materialization",
+            "reason": reason,
+            "generator": SPEC_BACKLOG_GENERATOR_ID,
+            "stage_count": added_stage_count,
+            "task_count": added_tasks,
+            "sources": plan.get("sources", []),
+        }
+        append_jsonl(self.decision_log_path, event)
+        plan["status"] = "materialized"
+        plan["materialized"] = True
+        plan["message"] = f"materialized {added_stage_count} specification backlog stage(s)"
+        plan["stage_count"] = added_stage_count
+        plan["task_count"] = added_tasks
+        plan["stages"] = added_stages
+        return plan
 
     def materialize_frontend_tasks(
         self,

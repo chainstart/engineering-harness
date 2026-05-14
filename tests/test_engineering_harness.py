@@ -622,6 +622,121 @@ def test_plan_goal_cli_materializes_goal_file_roadmap_and_validates(tmp_path, ca
     ) == 2
 
 
+def test_spec_backlog_cli_proposes_and_materializes_remaining_spec_stages(tmp_path, capsys):
+    project = tmp_path / "spec-backlog-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="spec-backlog-project")
+    docs_dir = project / "docs"
+    docs_dir.mkdir()
+    spec_plan = docs_dir / "spec-plan.md"
+    spec_plan.write_text(
+        """# Spec Plan
+
+## Stage 1: Completed Foundation
+
+Requirement refs:
+
+- `EH-SPEC-001`
+
+Goal:
+
+Already complete.
+
+Tasks:
+
+1. Keep the completed foundation.
+
+Acceptance:
+
+- Existing behavior remains stable.
+
+## Stage 2: Canonical Index
+
+Requirement refs:
+
+- `EH-SPEC-002`
+- `EH-SPEC-014`
+
+Goal:
+
+Add a canonical spec index.
+
+Tasks:
+
+1. Add a top-level roadmap spec block.
+2. Summarize spec coverage in status JSON.
+
+Acceptance:
+
+- Invalid refs are reported.
+- Status includes compact spec coverage.
+""",
+        encoding="utf-8",
+    )
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["spec"] = {"schema_version": 1, "development_plan": "docs/spec-plan.md"}
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    exit_code = cli_main(
+        [
+            "spec-backlog",
+            "--project-root",
+            str(project),
+            "--from-stage",
+            "2",
+            "--json",
+        ]
+    )
+
+    proposal = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert proposal["status"] == "proposed"
+    assert proposal["materialized"] is False
+    assert proposal["source_count"] == 1
+    assert proposal["stage_count"] == 1
+    assert proposal["task_count"] == 2
+    stage = proposal["stages"][0]
+    assert stage["id"] == "docs-spec-plan-stage-2-canonical-index"
+    assert stage["spec_refs"] == ["EH-SPEC-002", "EH-SPEC-014"]
+    assert [task["spec_refs"] for task in stage["tasks"]] == [["EH-SPEC-002", "EH-SPEC-014"]] * 2
+    assert stage["tasks"][0]["implementation"][0]["executor"] == "codex"
+
+    assert cli_main(
+        [
+            "spec-backlog",
+            "--project-root",
+            str(project),
+            "--from-stage",
+            "2",
+            "--materialize",
+            "--json",
+        ]
+    ) == 0
+    materialized = json.loads(capsys.readouterr().out)
+    updated = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    continuation = updated["continuation"]["stages"]
+
+    assert materialized["status"] == "materialized"
+    assert continuation[-1]["id"] == "docs-spec-plan-stage-2-canonical-index"
+    assert Harness(project).validate_roadmap()["status"] == "passed"
+
+    assert cli_main(
+        [
+            "spec-backlog",
+            "--project-root",
+            str(project),
+            "--from-stage",
+            "2",
+            "--materialize",
+            "--json",
+        ]
+    ) == 0
+    repeated = json.loads(capsys.readouterr().out)
+    assert repeated["status"] == "up_to_date"
+    assert repeated["skipped_stage_count"] == 1
+
+
 def test_goal_planner_generates_python_behavioral_and_journey_gates(tmp_path):
     proposal = plan_goal_roadmap(
         project_root=tmp_path / "gated-python-agent",
