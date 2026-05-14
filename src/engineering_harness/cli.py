@@ -219,6 +219,27 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(f"Drive task: {current_task.get('id', 'unknown')}")
         if drive_control.get("last_progress_message"):
             print(f"Drive progress: {drive_control.get('last_progress_message')}")
+        executor_diagnostics = (
+            summary.get("executor_diagnostics")
+            if isinstance(summary.get("executor_diagnostics"), dict)
+            else {}
+        )
+        if executor_diagnostics:
+            print(
+                "Executors: "
+                f"ready={executor_diagnostics.get('ready_count', 0)} "
+                f"action_required={executor_diagnostics.get('action_required_count', 0)}"
+            )
+            openhands = next(
+                (
+                    item
+                    for item in executor_diagnostics.get("executors", [])
+                    if isinstance(item, dict) and item.get("id") == "openhands"
+                ),
+                None,
+            )
+            if openhands:
+                print(f"OpenHands executor: {openhands.get('status', 'unknown')}")
         print(f"Pending approvals: {approval_queue.get('pending_count', 0)}")
         print(f"Stale approvals: {approval_queue.get('stale_count', 0)}")
         runtime_dashboard = summary.get("runtime_dashboard") if isinstance(summary.get("runtime_dashboard"), dict) else {}

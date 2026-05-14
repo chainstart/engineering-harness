@@ -80,6 +80,8 @@ Inspect these fields first:
   running, otherwise the next roadmap task when one is selectable.
 - `runtime_dashboard.executor_no_progress`: configured no-progress thresholds, current executor
   watchdog evidence, and the latest unresolved no-progress failure.
+- `runtime_dashboard.executor_diagnostics`: local readiness for registered executors, including
+  OpenHands/Dagger enablement, binary discovery, and unsafe capability warnings.
 - `runtime_dashboard.approval_leases`: pending, approved, consumed, and stale approval lease counts
   plus compact pending approval records.
 - `runtime_dashboard.failure_isolation`: unresolved isolated task failures and their local recovery
@@ -283,6 +285,9 @@ Built-in subprocess executors run in an owned local process group. The harness r
 watchdog metadata for implementation, repair, acceptance, E2E, and self-iteration planner
 subprocesses: phase, executor id, command name, pid, start time, last output/progress time,
 `timeout_seconds`, configured no-progress threshold, and termination evidence when a watchdog fires.
+Executors that expose structured stdout events can also attach compact `executor_event` payloads to
+the same progress stream. The built-in OpenHands adapter uses this for JSONL output and persists the
+latest event plus a short event history in drive control state.
 
 Runtime timeout uses each command's `timeout_seconds`. No-progress detection is disabled by default
 to preserve short local tests, and can be enabled locally in the roadmap:

@@ -16,6 +16,7 @@ from typing import Any
 
 from .executors import (
     EXECUTOR_RESULT_CONTRACT_VERSION,
+    EXECUTOR_DIAGNOSTICS_SCHEMA_VERSION,
     EXECUTOR_WATCHDOG_CONTRACT_VERSION,
     ExecutorInvocation,
     ExecutorRegistry,
@@ -102,6 +103,7 @@ LOCAL_CAPABILITY_VOCABULARY = {
     "filesystem_escape",
     "host_filesystem_write",
     "local_dagger_cli",
+    "local_openhands_cli",
     "local_process",
     "requires_explicit_configuration",
     "stderr",
@@ -1149,6 +1151,11 @@ class Harness:
         control.setdefault("current_activity", None)
         control.setdefault("current_task", None)
         control.setdefault("executor_watchdog", None)
+        control.setdefault("latest_executor_event", None)
+        control.setdefault("executor_event_count", 0)
+        executor_event_history = control.setdefault("executor_event_history", [])
+        if not isinstance(executor_event_history, list):
+            control["executor_event_history"] = []
         control.setdefault("last_progress_message", None)
         control.setdefault("stale_reason", None)
         control.setdefault("stale_detected_at", None)
@@ -6284,6 +6291,11 @@ continuation stage(s) were appended.
         capability_policy = (
             summary.get("capability_policy") if isinstance(summary.get("capability_policy"), dict) else {}
         )
+        executor_diagnostics = (
+            summary.get("executor_diagnostics")
+            if isinstance(summary.get("executor_diagnostics"), dict)
+            else self.executor_diagnostics_summary()
+        )
         checkpoint_readiness = (
             summary.get("checkpoint_readiness") if isinstance(summary.get("checkpoint_readiness"), dict) else {}
         )
@@ -6336,6 +6348,7 @@ continuation stage(s) were appended.
             ),
             "approval_leases": self._runtime_approval_leases_payload(approval_queue),
             "capability_policy": deepcopy(capability_policy),
+            "executor_diagnostics": deepcopy(executor_diagnostics),
             "failure_isolation": deepcopy(failure_isolation),
             "replay_guard": deepcopy(replay_guard),
             "checkpoint_readiness": deepcopy(checkpoint_readiness),
@@ -6404,6 +6417,10 @@ continuation stage(s) were appended.
             "heartbeat_count": int(drive_control.get("heartbeat_count", 0) or 0),
             "current_activity": drive_control.get("current_activity"),
             "last_progress_message": drive_control.get("last_progress_message"),
+            "latest_executor_event": deepcopy(drive_control.get("latest_executor_event"))
+            if isinstance(drive_control.get("latest_executor_event"), dict)
+            else None,
+            "executor_event_count": int(drive_control.get("executor_event_count", 0) or 0),
             "stale_running_recovery": stale_running_recovery,
             "stale_running_preflight": stale_running_preflight,
             "stale_running_block": stale_running_block,
@@ -7330,6 +7347,83 @@ continuation stage(s) were appended.
             "requires_approval": requires_approval,
         }
 
+    def executor_diagnostics_summary(self) -> dict[str, Any]:
+        executors: list[dict[str, Any]] = []
+        by_status: dict[str, int] = {}
+        action_required_count = 0
+        warning_count = 0
+        for executor_id in self.executor_registry.ids():
+            executor = self.executor_registry.get(executor_id)
+            metadata = self.executor_registry.metadata_for(executor_id)
+            diagnostics: dict[str, Any] = {}
+            if executor is not None:
+                diagnostics_fn = getattr(executor, "diagnostics", None)
+                if callable(diagnostics_fn):
+                    try:
+                        raw = diagnostics_fn(project_root=self.project_root)
+                        diagnostics = raw if isinstance(raw, dict) else {}
+                    except Exception as exc:
+                        diagnostics = {
+                            "schema_version": EXECUTOR_DIAGNOSTICS_SCHEMA_VERSION,
+                            "id": executor_id,
+                            "status": "error",
+                            "configured": False,
+                            "enabled": False,
+                            "error": str(exc),
+                            "recommended_action": "Inspect the executor diagnostics failure.",
+                        }
+            capabilities = [
+                str(capability)
+                for capability in metadata.get("capabilities", [])
+                if str(capability).strip()
+            ]
+            unsafe_capabilities = [
+                capability
+                for capability in capabilities
+                if capability in UNSAFE_EXECUTOR_CAPABILITIES
+            ]
+            unsafe_classifications = classify_capabilities(unsafe_capabilities)
+            unsafe_classes = sorted(
+                class_name
+                for class_name in UNSAFE_CAPABILITY_CLASSES
+                if unsafe_classifications.get("classes", {}).get(class_name)
+            )
+            status = str(diagnostics.get("status") or "registered")
+            by_status[status] = by_status.get(status, 0) + 1
+            warnings = diagnostics.get("warnings") if isinstance(diagnostics.get("warnings"), list) else []
+            warning_count += len(warnings)
+            if diagnostics.get("recommended_action"):
+                action_required_count += 1
+            executors.append(
+                {
+                    "schema_version": EXECUTOR_DIAGNOSTICS_SCHEMA_VERSION,
+                    "id": executor_id,
+                    "name": metadata.get("name"),
+                    "kind": metadata.get("kind"),
+                    "adapter": metadata.get("adapter"),
+                    "status": status,
+                    "configured": bool(diagnostics.get("configured", status in {"ready", "registered"})),
+                    "enabled": bool(diagnostics.get("enabled", True)),
+                    "requires_agent_approval": metadata.get("requires_agent_approval"),
+                    "uses_command_policy": metadata.get("uses_command_policy"),
+                    "capabilities": capabilities,
+                    "unsafe_capabilities": unsafe_capabilities,
+                    "unsafe_classes": unsafe_classes,
+                    "diagnostics": diagnostics,
+                }
+            )
+        return {
+            "schema_version": EXECUTOR_DIAGNOSTICS_SCHEMA_VERSION,
+            "kind": "engineering-harness.executor-diagnostics",
+            "executor_count": len(executors),
+            "by_status": dict(sorted(by_status.items())),
+            "ready_count": by_status.get("ready", 0),
+            "configured_count": sum(1 for item in executors if item["configured"]),
+            "action_required_count": action_required_count,
+            "warning_count": warning_count,
+            "executors": executors,
+        }
+
     def status_summary(self, *, refresh_approvals: bool = True) -> dict[str, Any]:
         state = self.load_state()
         state_tasks = state.get("tasks", {})
@@ -7367,6 +7461,7 @@ continuation stage(s) were appended.
         )
         manifest_index = self.manifest_index_summary()
         capability_policy = self.capability_policy_summary(manifest_index)
+        executor_diagnostics = self.executor_diagnostics_summary()
         safety_audit = manifest_index.get("safety_audit", {}) if isinstance(manifest_index, dict) else {}
         failure_isolation = self.latest_isolated_failures_summary()
         replay_guard = self.replay_guard_summary()
@@ -7394,6 +7489,7 @@ continuation stage(s) were appended.
             "approval_queue": approval_queue,
             "manifest_index": manifest_index,
             "capability_policy": capability_policy,
+            "executor_diagnostics": executor_diagnostics,
             "safety_audit": safety_audit,
             "failure_isolation": failure_isolation,
             "replay_guard": replay_guard,
@@ -9622,14 +9718,23 @@ continuation stage(s) were appended.
             )
             if command_outcome == "denied":
                 detected = ()
-        if not requested and not detected:
-            return None
         executor_capabilities = [
             str(capability)
             for capability in executor.get("capabilities", [])
             if str(capability).strip()
         ]
         executor_capability_set = set(executor_capabilities)
+        executor_unsafe = [
+            capability
+            for capability in executor_capabilities
+            if capability in UNSAFE_EXECUTOR_CAPABILITIES
+        ]
+        executor_classifications = classify_capabilities(executor_unsafe)
+        executor_unsafe_classes = sorted(
+            class_name
+            for class_name in UNSAFE_CAPABILITY_CLASSES
+            if executor_classifications.get("classes", {}).get(class_name)
+        )
         effective_requested = tuple(dict.fromkeys([*requested, *detected]))
         unsafe = [capability for capability in effective_requested if capability in UNSAFE_EXECUTOR_CAPABILITIES]
         unsupported = [
@@ -9646,12 +9751,30 @@ continuation stage(s) were appended.
             "unsupported_capabilities": unsupported,
             "unsafe_capabilities": unsafe,
             "unsafe_classes": safety_classification.get("unsafe_classes", []),
+            "executor_unsafe_capabilities": executor_unsafe,
+            "executor_unsafe_classes": executor_unsafe_classes,
             "operation_classification": safety_classification,
             "executor_capability_classifications": executor.get("capability_classifications")
             if isinstance(executor.get("capability_classifications"), dict)
             else classify_capabilities(executor_capabilities),
             "known_capabilities": sorted(self._known_capability_names()),
         }
+        if not requested and not detected and executor_unsafe:
+            return PolicyDecision(
+                kind="capability_policy",
+                scope="command",
+                outcome="warning",
+                effect="warn",
+                severity="warning",
+                reason=(
+                    f"executor `{executor_id}` declares unsafe capabilities that require explicit "
+                    f"executor configuration: {', '.join(executor_unsafe)}"
+                ),
+                policy_input=policy_input,
+                metadata=metadata,
+            )
+        if not requested and not detected:
+            return None
         if unsafe:
             source = "detected command behavior" if detected else "requested executor capabilities"
             return PolicyDecision(
@@ -11319,6 +11442,8 @@ continuation stage(s) were appended.
                     "last_output_at",
                     "stdout_bytes",
                     "stderr_bytes",
+                    "stream",
+                    "executor_event",
                     "termination",
                     "process_returncode",
                 }
@@ -11336,6 +11461,17 @@ continuation stage(s) were appended.
                 executor_watchdog=watchdog,
             )
             if control is not None:
+                executor_event = watchdog.get("executor_event")
+                if isinstance(executor_event, dict):
+                    compact_event = deepcopy(executor_event)
+                    control["latest_executor_event"] = compact_event
+                    control["executor_event_count"] = int(control.get("executor_event_count", 0) or 0) + 1
+                    history = control.setdefault("executor_event_history", [])
+                    if not isinstance(history, list):
+                        history = []
+                        control["executor_event_history"] = history
+                    history.append(compact_event)
+                    del history[:-10]
                 self.save_state(state)
 
         return callback
@@ -12038,19 +12174,31 @@ continuation stage(s) were appended.
                 else {}
             )
             classes = [str(item) for item in metadata.get("unsafe_classes", []) if str(item).strip()]
+            executor_classes = [
+                str(item)
+                for item in metadata.get("executor_unsafe_classes", [])
+                if str(item).strip()
+            ]
             capabilities = [
                 str(item)
                 for item in metadata.get("unsafe_capabilities", [])
                 if str(item).strip()
             ]
-            unsafe_classes.update(classes)
-            unsafe_capabilities.update(capabilities)
-            if decision.get("effect") in {"deny", "requires_approval"} or operation.get("unsafe"):
+            executor_capabilities = [
+                str(item)
+                for item in metadata.get("executor_unsafe_capabilities", [])
+                if str(item).strip()
+            ]
+            unsafe_classes.update([*classes, *executor_classes])
+            unsafe_capabilities.update([*capabilities, *executor_capabilities])
+            if decision.get("effect") in {"deny", "requires_approval"} or operation.get("unsafe") or executor_capabilities:
                 unsafe_decisions.append(
                     {
                         **self._compact_policy_decision(decision),
                         "unsafe_classes": classes,
                         "unsafe_capabilities": capabilities,
+                        "executor_unsafe_classes": executor_classes,
+                        "executor_unsafe_capabilities": executor_capabilities,
                         "detected_capabilities": metadata.get("detected_capabilities", []),
                         "requested_capabilities": metadata.get("requested_capabilities", []),
                         "operation_classification": operation,
@@ -12103,6 +12251,7 @@ continuation stage(s) were appended.
             blocking_policy_decisions=blocking,
         )
         failure_kind = self._failure_isolation_kind(
+            task=task,
             status=status,
             phase=phase,
             runs=runs,
@@ -12176,6 +12325,7 @@ continuation stage(s) were appended.
     def _failure_isolation_kind(
         self,
         *,
+        task: HarnessTask,
         status: str,
         phase: str,
         runs: list[CommandRun],
@@ -12193,12 +12343,22 @@ continuation stage(s) were appended.
                 return "executor_no_progress"
             if run.phase == phase and run.status == "timeout":
                 return "executor_timeout"
-            if run.phase == phase and self._run_has_user_experience_marker(run):
+            if run.phase == phase and (
+                self._run_has_user_experience_marker(run)
+                or self._run_is_user_experience_gate(task, run)
+            ):
                 return "user_experience_gate_failure"
         phase_root = phase.split("-", 1)[0]
         if phase_root in {"implementation", "acceptance", "repair", "e2e"}:
             return f"{phase_root}_failure"
         return "task_failure"
+
+    def _run_is_user_experience_gate(self, task: HarnessTask, run: CommandRun) -> bool:
+        metadata = self._configured_command_metadata(task, run)
+        gate = metadata.get("user_experience_gate") if isinstance(metadata, dict) else {}
+        if isinstance(gate, dict) and str(gate.get("kind") or "").strip() == BROWSER_USER_EXPERIENCE_GATE_KIND:
+            return True
+        return "engineering_harness.browser_e2e" in str(run.command or "")
 
     def _failure_isolation_executor_watchdog(
         self,

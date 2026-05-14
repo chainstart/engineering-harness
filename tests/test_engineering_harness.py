@@ -21,11 +21,14 @@ from engineering_harness.domain_frontend import (
 )
 from engineering_harness.executors import (
     DAGGER_ENABLE_ENV,
+    OPENHANDS_BINARY_ENV,
+    OPENHANDS_ENABLE_ENV,
     DaggerExecutorAdapter,
     ExecutorInvocation,
     ExecutorMetadata,
     ExecutorRegistry,
     ExecutorResult,
+    OpenHandsExecutorAdapter,
     ShellExecutorAdapter,
     default_executor_registry,
 )
@@ -1226,6 +1229,322 @@ def test_dagger_executor_invokes_local_cli_when_enabled(tmp_path, monkeypatch):
     assert result.metadata["watchdog"]["executor_id"] == "dagger"
     assert result.metadata["watchdog"]["status"] == "passed"
     assert json.loads(args_path.read_text(encoding="utf-8")) == ["call", "smoke", "--source=."]
+
+
+def test_openhands_executor_is_discoverable_and_validates_prompt_payload(tmp_path):
+    registry = default_executor_registry()
+    assert "openhands" in registry.ids()
+    metadata = registry.metadata_for("openhands")
+    assert metadata["adapter"] == "builtin.openhands"
+    assert metadata["requires_agent_approval"] is True
+    assert "local_openhands_cli" in metadata["capabilities"]
+
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0] = {
+        "name": "openhands smoke",
+        "executor": "openhands",
+        "prompt": "Inspect the project and report blockers.",
+    }
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    assert Harness(project).validate_roadmap()["status"] == "passed"
+
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0].pop("prompt")
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+    invalid = Harness(project).validate_roadmap()
+
+    assert invalid["status"] == "failed"
+    assert any("openhands prompt is required" in error for error in invalid["errors"])
+
+
+def test_openhands_executor_selection_blocks_until_explicitly_enabled(tmp_path, monkeypatch):
+    monkeypatch.delenv(OPENHANDS_ENABLE_ENV, raising=False)
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0] = {
+        "name": "openhands smoke",
+        "executor": "openhands",
+        "prompt": "Do not change files.",
+    }
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    result = harness.run_task(harness.next_task(), allow_agent=True)
+
+    assert result["status"] == "blocked"
+    assert OPENHANDS_ENABLE_ENV in result["message"]
+    run = result["runs"][0]
+    assert run["executor"] == "openhands"
+    assert run["command"] == "openhands --headless --json --override-with-envs -t <task:tests>"
+    assert run["executor_metadata"]["kind"] == "agent"
+    assert "browser_automation" in run["executor_metadata"]["capabilities"]
+    assert run["executor_result"]["status"] == "blocked"
+    metadata = run["executor_result"]["metadata"]
+    assert metadata["configured"] is False
+    assert metadata["required_environment"] == OPENHANDS_ENABLE_ENV
+    assert metadata["health"]["binary"] == "openhands"
+    assert "binary_found" in metadata["health"]
+
+
+def test_openhands_unsafe_executor_capabilities_are_audited_without_blocking_config_gate(tmp_path, monkeypatch):
+    monkeypatch.delenv(OPENHANDS_ENABLE_ENV, raising=False)
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0] = {
+        "name": "openhands smoke",
+        "executor": "openhands",
+        "prompt": "Do not change files.",
+    }
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    result = Harness(project).run_task(Harness(project).next_task(), allow_agent=True)
+
+    assert result["status"] == "blocked"
+    assert OPENHANDS_ENABLE_ENV in result["message"]
+    manifest = task_manifest(project, result)
+    warning = policy_decision(manifest, "capability_policy", outcome="warning")
+    assert warning["effect"] == "warn"
+    assert warning["severity"] == "warning"
+    assert warning["metadata"]["executor_unsafe_classes"] == ["network"]
+    assert warning["metadata"]["executor_unsafe_capabilities"] == ["network_access", "browser_automation"]
+    assert manifest["safety_audit"]["unsafe_decision_count"] == 1
+    assert manifest["safety_audit"]["unsafe_classes"] == ["network"]
+    assert manifest["safety_audit"]["unsafe_capabilities"] == ["browser_automation", "network_access"]
+
+
+def test_openhands_executor_invokes_local_cli_when_enabled(tmp_path, monkeypatch):
+    args_path = tmp_path / "openhands-args.json"
+    openhands_bin = tmp_path / "openhands"
+    openhands_bin.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import json",
+                "import os",
+                "import pathlib",
+                "import sys",
+                "payload = {",
+                "    'args': sys.argv[1:],",
+                "    'cwd': os.getcwd(),",
+                "    'llm_model': os.environ.get('LLM_MODEL'),",
+                "    'engineering_harness': os.environ.get('ENGINEERING_HARNESS'),",
+                "}",
+                "pathlib.Path(os.environ['OPENHANDS_ARGS_PATH']).write_text(json.dumps(payload))",
+                "print(json.dumps({'type': 'action', 'action': 'write', 'path': 'app.py'}))",
+                "print(json.dumps({'type': 'observation', 'status': 'ok', 'message': 'done sk-progress-secret'}))",
+                "print('plain status line')",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    openhands_bin.chmod(0o755)
+    monkeypatch.setenv(OPENHANDS_ENABLE_ENV, "1")
+    monkeypatch.setenv("OPENHANDS_ARGS_PATH", str(args_path))
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}")
+    progress_events = []
+    invocation = ExecutorInvocation(
+        project_root=tmp_path,
+        task_id="openhands-task",
+        name="agent smoke",
+        command=None,
+        prompt="Inspect the project.",
+        timeout_seconds=15,
+        model="anthropic/test-model",
+        progress_callback=progress_events.append,
+    )
+
+    result = OpenHandsExecutorAdapter().execute(invocation)
+
+    assert result.status == "passed"
+    assert result.stdout.splitlines()[-1] == "plain status line"
+    assert result.metadata["configured"] is True
+    assert result.metadata["binary"] == "openhands"
+    assert result.metadata["health"]["binary_found"] is True
+    assert result.metadata["health"]["llm_model_configured"] is True
+    assert result.metadata["watchdog"]["executor_id"] == "openhands"
+    assert result.metadata["watchdog"]["status"] == "passed"
+    assert result.metadata["openhands_jsonl"]["parsed_event_count"] == 2
+    assert result.metadata["openhands_jsonl"]["non_json_line_count"] == 1
+    assert result.metadata["openhands_jsonl"]["event_counts"] == {"action": 1, "observation": 1}
+    assert result.metadata["openhands_jsonl"]["touched_paths"] == ["app.py"]
+    assert result.metadata["openhands_jsonl"]["recent_events"][0]["action"] == "write"
+    assert result.metadata["openhands_jsonl"]["recent_events"][1]["message"] == "done [REDACTED]"
+    executor_events = [
+        event["executor_event"]
+        for event in progress_events
+        if event.get("event") == "executor_event" and isinstance(event.get("executor_event"), dict)
+    ]
+    assert [event["type"] for event in executor_events] == ["action", "observation"]
+    assert executor_events[0]["source"] == "openhands_jsonl"
+    assert executor_events[0]["path"] == "app.py"
+    assert executor_events[1]["message"] == "done [REDACTED]"
+    assert "sk-progress-secret" not in json.dumps(progress_events)
+    payload = json.loads(args_path.read_text(encoding="utf-8"))
+    assert payload["args"] == [
+        "--headless",
+        "--json",
+        "--override-with-envs",
+        "-t",
+        "Inspect the project.",
+    ]
+    assert payload["cwd"] == str(tmp_path)
+    assert payload["llm_model"] == "anthropic/test-model"
+    assert payload["engineering_harness"] == "1"
+
+
+def test_openhands_executor_reports_missing_local_cli_when_enabled(tmp_path, monkeypatch):
+    monkeypatch.setenv(OPENHANDS_ENABLE_ENV, "1")
+    monkeypatch.setenv("PATH", str(tmp_path))
+    invocation = ExecutorInvocation(
+        project_root=tmp_path,
+        task_id="openhands-task",
+        name="agent smoke",
+        command=None,
+        prompt="Inspect the project.",
+        timeout_seconds=15,
+        environment={"ENGINEERING_HARNESS_OPENHANDS_BINARY": "missing-openhands"},
+    )
+
+    result = OpenHandsExecutorAdapter().execute(invocation)
+
+    assert result.status == "blocked"
+    assert result.returncode is None
+    assert result.metadata["configured"] is True
+    assert result.metadata["missing_binary"] == "missing-openhands"
+    assert result.metadata["health"]["binary"] == "missing-openhands"
+    assert result.metadata["health"]["binary_found"] is False
+
+
+def test_executor_diagnostics_status_reports_openhands_disabled(tmp_path, monkeypatch):
+    monkeypatch.delenv(OPENHANDS_ENABLE_ENV, raising=False)
+    monkeypatch.delenv(OPENHANDS_BINARY_ENV, raising=False)
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+
+    status = Harness(project).status_summary()
+    diagnostics = status["executor_diagnostics"]
+    openhands = next(item for item in diagnostics["executors"] if item["id"] == "openhands")
+
+    assert diagnostics["executor_count"] >= 4
+    assert diagnostics["action_required_count"] >= 1
+    assert openhands["status"] == "disabled"
+    assert openhands["configured"] is False
+    assert openhands["diagnostics"]["required_environment"] == OPENHANDS_ENABLE_ENV
+    assert openhands["unsafe_capabilities"] == ["network_access", "browser_automation"]
+    assert openhands["unsafe_classes"] == ["network"]
+    assert status["runtime_dashboard"]["executor_diagnostics"] == diagnostics
+
+
+def test_executor_diagnostics_status_reports_openhands_missing_binary_when_enabled(tmp_path, monkeypatch):
+    monkeypatch.setenv(OPENHANDS_ENABLE_ENV, "1")
+    monkeypatch.setenv(OPENHANDS_BINARY_ENV, "missing-openhands-for-diagnostics")
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+
+    diagnostics = Harness(project).status_summary()["executor_diagnostics"]
+    openhands = next(item for item in diagnostics["executors"] if item["id"] == "openhands")
+
+    assert openhands["status"] == "missing_binary"
+    assert openhands["configured"] is False
+    assert openhands["enabled"] is True
+    assert openhands["diagnostics"]["health"]["binary"] == "missing-openhands-for-diagnostics"
+    assert openhands["diagnostics"]["health"]["binary_found"] is False
+    assert "Install OpenHands CLI" in openhands["diagnostics"]["recommended_action"]
+
+
+def test_executor_diagnostics_status_reports_openhands_ready_with_model_env(tmp_path, monkeypatch):
+    openhands_bin = tmp_path / "openhands"
+    openhands_bin.write_text("#!/usr/bin/env sh\nexit 0\n", encoding="utf-8")
+    openhands_bin.chmod(0o755)
+    monkeypatch.setenv(OPENHANDS_ENABLE_ENV, "1")
+    monkeypatch.setenv(OPENHANDS_BINARY_ENV, str(openhands_bin))
+    monkeypatch.setenv("LLM_MODEL", "anthropic/test-model")
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+
+    diagnostics = Harness(project).status_summary()["executor_diagnostics"]
+    openhands = next(item for item in diagnostics["executors"] if item["id"] == "openhands")
+
+    assert openhands["status"] == "ready"
+    assert openhands["configured"] is True
+    assert openhands["enabled"] is True
+    assert openhands["diagnostics"]["health"]["binary_found"] is True
+    assert openhands["diagnostics"]["health"]["binary_path"] == str(openhands_bin)
+    assert openhands["diagnostics"]["health"]["llm_model_configured"] is True
+    assert openhands["diagnostics"]["warnings"] == []
+
+
+def test_openhands_jsonl_progress_is_persisted_to_drive_control(tmp_path, monkeypatch):
+    openhands_bin = tmp_path / "openhands"
+    openhands_bin.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import json",
+                "print(json.dumps({'type': 'action', 'action': 'write', 'path': 'src/app.py'}))",
+                "print(json.dumps({'type': 'observation', 'status': 'ok', 'message': 'finished sk-drive-secret'}))",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    openhands_bin.chmod(0o755)
+    monkeypatch.setenv(OPENHANDS_ENABLE_ENV, "1")
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    project = tmp_path / "agent-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-project")
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["milestones"][0]["tasks"][0]["acceptance"][0] = {
+        "name": "openhands smoke",
+        "executor": "openhands",
+        "prompt": "Do not change files.",
+    }
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project)
+    state = harness.load_state()
+    control = harness._drive_control(state)
+    now = utc_now()
+    control.update(
+        {
+            "status": "running",
+            "active": True,
+            "pid": os.getpid(),
+            "started_at": now,
+            "last_heartbeat_at": now,
+        }
+    )
+    harness.save_state(state)
+
+    result = harness.run_task(harness.next_task(), allow_agent=True)
+
+    assert result["status"] == "passed"
+    state = harness.load_state()
+    control = state["drive_control"]
+    assert control["executor_event_count"] >= 2
+    assert control["latest_executor_event"]["type"] == "observation"
+    assert control["latest_executor_event"]["message"] == "finished [REDACTED]"
+    assert control["executor_event_history"][-2]["path"] == "src/app.py"
+    assert "sk-drive-secret" not in json.dumps(control)
+    status_payload = Harness(project).status_summary()
+    dashboard_drive = status_payload["runtime_dashboard"]["drive_control"]
+    assert dashboard_drive["latest_executor_event"]["type"] == "observation"
+    assert dashboard_drive["executor_event_count"] >= 2
 
 
 def test_manifest_index_keeps_repeated_task_runs_with_same_slug(tmp_path, monkeypatch):

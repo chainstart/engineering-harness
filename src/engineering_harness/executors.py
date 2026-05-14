@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import select
 import shlex
+import shutil
 import signal
 import subprocess
 import time
@@ -14,10 +16,14 @@ from typing import Any, Callable, Protocol
 
 
 EXECUTOR_CONTRACT_VERSION = 1
+EXECUTOR_DIAGNOSTICS_SCHEMA_VERSION = 1
 EXECUTOR_RESULT_CONTRACT_VERSION = 1
 EXECUTOR_WATCHDOG_CONTRACT_VERSION = 1
 CAPABILITY_CLASSIFICATION_SCHEMA_VERSION = 1
 DAGGER_ENABLE_ENV = "ENGINEERING_HARNESS_ENABLE_DAGGER"
+OPENHANDS_ENABLE_ENV = "ENGINEERING_HARNESS_ENABLE_OPENHANDS"
+OPENHANDS_BINARY_ENV = "ENGINEERING_HARNESS_OPENHANDS_BINARY"
+HARNESS_SOURCE_ROOT = Path(__file__).resolve().parents[1]
 PROCESS_TERMINATION_GRACE_SECONDS = 0.5
 SENSITIVE_ENV_NAME_PATTERN = (
     r"[A-Z0-9_]*(?:API[-_]?KEY|ACCESS[-_]?KEY|TOKEN|SECRET|PASSWORD|PASS|"
@@ -43,6 +49,7 @@ CAPABILITY_CLASS_BY_NAME = {
     "live": "deploy",
     "live_operations": "deploy",
     "local_dagger_cli": "process",
+    "local_openhands_cli": "process",
     "local_process": "process",
     "network": "network",
     "network_access": "network",
@@ -141,7 +148,13 @@ class ExecutorInvocation:
     progress_callback: Callable[[dict[str, Any]], None] | None = field(default=None, repr=False, compare=False)
 
     def env(self) -> dict[str, str]:
-        return {**os.environ, **self.environment, "ENGINEERING_HARNESS": "1"}
+        env = {**os.environ, **self.environment, "ENGINEERING_HARNESS": "1"}
+        pythonpath_entries = [
+            str(HARNESS_SOURCE_ROOT),
+            *(entry for entry in str(env.get("PYTHONPATH", "")).split(os.pathsep) if entry),
+        ]
+        env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(pythonpath_entries))
+        return env
 
 
 @dataclass(frozen=True)
@@ -199,6 +212,25 @@ def _emit_progress(invocation: ExecutorInvocation, payload: dict[str, Any]) -> N
         invocation.progress_callback(payload)
     except Exception:
         return
+
+
+def _env_flag_enabled(env: dict[str, str], name: str) -> bool:
+    return str(env.get(name, "")).lower() in {"1", "true", "yes", "on"}
+
+
+def _compact_json_preview(value: Any, *, limit: int = 200) -> str:
+    text = value if isinstance(value, str) else json.dumps(value, sort_keys=True)
+    return redact(text[:limit])
+
+
+def _diagnostic_env(environment: dict[str, str] | None = None) -> dict[str, str]:
+    return {**os.environ, **(environment or {}), "ENGINEERING_HARNESS": "1"}
+
+
+def _binary_diagnostic_status(*, enabled: bool, binary_found: bool) -> str:
+    if not enabled:
+        return "disabled"
+    return "ready" if binary_found else "missing_binary"
 
 
 def _terminate_owned_process_tree(
@@ -280,6 +312,7 @@ def _run_subprocess_with_watchdog(
     shell: bool = False,
     executable: str | None = None,
     metadata: dict[str, Any] | None = None,
+    output_event_parser: Callable[[str, bytes], list[dict[str, Any]]] | None = None,
 ) -> ExecutorResult:
     started_at = _utc_now()
     started_monotonic = time.monotonic()
@@ -422,6 +455,22 @@ def _run_subprocess_with_watchdog(
                         "bytes": len(data),
                     },
                 )
+                if output_event_parser is not None:
+                    try:
+                        output_events = output_event_parser(stream_name, data)
+                    except Exception:
+                        output_events = []
+                    for output_event in output_events:
+                        if not isinstance(output_event, dict):
+                            continue
+                        _emit_progress(
+                            invocation,
+                            {
+                                **watchdog_payload(event="executor_event"),
+                                "stream": stream_name,
+                                "executor_event": output_event,
+                            },
+                        )
         else:
             time.sleep(0.02)
 
@@ -521,6 +570,25 @@ class ShellExecutorAdapter:
     def display_command(self, invocation: ExecutorInvocation) -> str:
         return invocation.command or ""
 
+    def diagnostics(
+        self,
+        *,
+        project_root: Path,
+        environment: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        binary = "/bin/bash"
+        return {
+            "schema_version": EXECUTOR_DIAGNOSTICS_SCHEMA_VERSION,
+            "id": self.metadata.id,
+            "status": "ready" if Path(binary).exists() else "missing_binary",
+            "configured": Path(binary).exists(),
+            "enabled": True,
+            "binary": binary,
+            "binary_found": Path(binary).exists(),
+            "binary_path": binary if Path(binary).exists() else None,
+            "recommended_action": None if Path(binary).exists() else "Install /bin/bash or select a different shell executor.",
+        }
+
     def execute(self, invocation: ExecutorInvocation) -> ExecutorResult:
         return _run_subprocess_with_watchdog(
             invocation,
@@ -579,12 +647,345 @@ class CodexExecutorAdapter:
             f"-C {invocation.project_root} <task:{invocation.task_id}>"
         )
 
+    def diagnostics(
+        self,
+        *,
+        project_root: Path,
+        environment: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        env = _diagnostic_env(environment)
+        binary = str(env.get("ENGINEERING_HARNESS_CODEX_BINARY") or "codex").strip() or "codex"
+        binary_path = shutil.which(binary, path=env.get("PATH"))
+        return {
+            "schema_version": EXECUTOR_DIAGNOSTICS_SCHEMA_VERSION,
+            "id": self.metadata.id,
+            "status": "ready" if binary_path else "missing_binary",
+            "configured": bool(binary_path),
+            "enabled": True,
+            "binary": binary,
+            "binary_found": bool(binary_path),
+            "binary_path": binary_path,
+            "requires_agent_approval": self.metadata.requires_agent_approval,
+            "recommended_action": None if binary_path else "Install Codex CLI or remove Codex executor tasks from the local roadmap.",
+        }
+
     def execute(self, invocation: ExecutorInvocation) -> ExecutorResult:
         args = ["codex", "exec", "--full-auto", "--sandbox", invocation.sandbox, "-C", str(invocation.project_root)]
         if invocation.model:
             args.extend(["--model", invocation.model])
         args.append(invocation.prompt or invocation.command or "")
         return _run_subprocess_with_watchdog(invocation, args=args, executor_id=self.metadata.id)
+
+
+class OpenHandsExecutorAdapter:
+    metadata = ExecutorMetadata(
+        id="openhands",
+        name="OpenHands",
+        kind="agent",
+        adapter="builtin.openhands",
+        input_mode="prompt",
+        capabilities=(
+            "agent",
+            "local_openhands_cli",
+            "workspace_write",
+            "network_access",
+            "browser_automation",
+            "exit_code",
+            "stdout",
+            "stderr",
+            "requires_explicit_configuration",
+        ),
+        requires_agent_approval=True,
+    )
+
+    def prepare_invocation(
+        self,
+        invocation: ExecutorInvocation,
+        task_context: ExecutorTaskContext,
+    ) -> ExecutorInvocation:
+        prompt = invocation.prompt or invocation.command or task_context.title
+        acceptance = "\n".join(f"- {item.name}: {item.summary()}" for item in task_context.acceptance)
+        e2e = "\n".join(f"- {item.name}: {item.summary()}" for item in task_context.e2e)
+        file_scope = "\n".join(f"- {scope}" for scope in task_context.file_scope) or "- repository-scoped, but keep changes minimal"
+        verification = acceptance if not e2e else f"{acceptance}\n\nE2E/user-experience commands:\n{e2e}"
+        expanded_prompt = (
+            "You are executing one roadmap task for an autonomous engineering harness through OpenHands headless mode.\n\n"
+            f"Project root: {task_context.project_root}\n"
+            f"Milestone: {task_context.milestone_id} - {task_context.milestone_title}\n"
+            f"Task: {task_context.task_id} - {task_context.title}\n\n"
+            "Goal:\n"
+            f"{prompt}\n\n"
+            "Allowed file scope:\n"
+            f"{file_scope}\n\n"
+            "Verification commands that must pass after your changes:\n"
+            f"{verification}\n\n"
+            "Constraints:\n"
+            "- Edit files directly in the working tree.\n"
+            "- Do not commit or push; the harness handles git checkpoints.\n"
+            "- Do not use private keys, paid live deployment, or live trading.\n"
+            "- Prefer focused, test-driven changes that satisfy the acceptance commands.\n"
+            "- If the task cannot be completed locally, write a clear blocker into the relevant project docs.\n"
+        )
+        return replace(invocation, prompt=expanded_prompt)
+
+    def display_command(self, invocation: ExecutorInvocation) -> str:
+        binary = self._binary(invocation)
+        return f"{shlex.quote(binary)} --headless --json --override-with-envs -t <task:{invocation.task_id}>"
+
+    def diagnostics(
+        self,
+        *,
+        project_root: Path,
+        environment: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        env = _diagnostic_env(environment)
+        binary = str(env.get(OPENHANDS_BINARY_ENV) or "openhands").strip() or "openhands"
+        enabled = _env_flag_enabled(env, OPENHANDS_ENABLE_ENV)
+        health = self._health(binary, env)
+        warnings: list[dict[str, Any]] = []
+        if enabled and health["binary_found"] and not (
+            health["llm_model_configured"] or health["agent_settings_file_exists"]
+        ):
+            warnings.append(
+                {
+                    "id": "openhands_model_config_not_detected",
+                    "message": "No LLM_MODEL env var or ~/.openhands/agent_settings.json file was detected.",
+                }
+            )
+        status = _binary_diagnostic_status(enabled=enabled, binary_found=bool(health["binary_found"]))
+        recommended_action = None
+        if status == "disabled":
+            recommended_action = f"Set {OPENHANDS_ENABLE_ENV}=1 to enable local OpenHands execution."
+        elif status == "missing_binary":
+            recommended_action = "Install OpenHands CLI or set ENGINEERING_HARNESS_OPENHANDS_BINARY to a valid binary."
+        elif warnings:
+            recommended_action = "Configure OpenHands model settings before running agent tasks."
+        return {
+            "schema_version": EXECUTOR_DIAGNOSTICS_SCHEMA_VERSION,
+            "id": self.metadata.id,
+            "status": status,
+            "configured": bool(enabled and health["binary_found"]),
+            "enabled": enabled,
+            "required_environment": OPENHANDS_ENABLE_ENV,
+            "binary_environment": OPENHANDS_BINARY_ENV,
+            "health": health,
+            "warnings": warnings,
+            "warning_count": len(warnings),
+            "recommended_action": recommended_action,
+        }
+
+    def execute(self, invocation: ExecutorInvocation) -> ExecutorResult:
+        started_at = _utc_now()
+        environment = dict(invocation.environment)
+        if invocation.model:
+            environment["LLM_MODEL"] = invocation.model
+        prepared = replace(invocation, environment=environment)
+        env = prepared.env()
+        binary = self._binary(prepared)
+        health = self._health(binary, env)
+        if not _env_flag_enabled(env, OPENHANDS_ENABLE_ENV):
+            return ExecutorResult(
+                status="blocked",
+                returncode=None,
+                started_at=started_at,
+                finished_at=_utc_now(),
+                stdout="",
+                stderr=(
+                    "OpenHands executor is disabled. Set "
+                    f"{OPENHANDS_ENABLE_ENV}=1 to enable local OpenHands CLI execution."
+                ),
+                metadata={
+                    "configured": False,
+                    "required_environment": OPENHANDS_ENABLE_ENV,
+                    "health": health,
+                },
+            )
+        if not health["binary_found"]:
+            return ExecutorResult(
+                status="blocked",
+                returncode=None,
+                started_at=started_at,
+                finished_at=_utc_now(),
+                stdout="",
+                stderr=f"OpenHands CLI was not found on PATH: {binary}",
+                metadata={
+                    "configured": True,
+                    "missing_binary": binary,
+                    "health": health,
+                },
+            )
+        args = [
+            binary,
+            "--headless",
+            "--json",
+            "--override-with-envs",
+            "-t",
+            prepared.prompt or prepared.command or "",
+        ]
+        try:
+            result = _run_subprocess_with_watchdog(
+                prepared,
+                args=args,
+                executor_id=self.metadata.id,
+                metadata={
+                    "configured": True,
+                    "binary": binary,
+                    "json_output": True,
+                    "headless": True,
+                    "health": health,
+                },
+                output_event_parser=self._jsonl_progress_parser(),
+            )
+            metadata = dict(result.metadata)
+            metadata["openhands_jsonl"] = self._summarize_jsonl(result.stdout)
+            return replace(result, metadata=metadata)
+        except FileNotFoundError:
+            return ExecutorResult(
+                status="blocked",
+                returncode=None,
+                started_at=started_at,
+                finished_at=_utc_now(),
+                stdout="",
+                stderr=f"OpenHands CLI was not found on PATH: {binary}",
+                metadata={"configured": True, "missing_binary": binary, "health": health},
+            )
+
+    def _binary(self, invocation: ExecutorInvocation) -> str:
+        binary = str(
+            invocation.environment.get(OPENHANDS_BINARY_ENV)
+            or os.environ.get(OPENHANDS_BINARY_ENV)
+            or "openhands"
+        ).strip()
+        return binary or "openhands"
+
+    def _health(self, binary: str, env: dict[str, str]) -> dict[str, Any]:
+        binary_path = shutil.which(binary, path=env.get("PATH"))
+        home = env.get("HOME")
+        settings_path = str(Path(home) / ".openhands" / "agent_settings.json") if home else None
+        return {
+            "binary": binary,
+            "binary_found": bool(binary_path),
+            "binary_path": binary_path,
+            "llm_model_configured": bool(str(env.get("LLM_MODEL", "")).strip()),
+            "llm_api_key_configured": bool(str(env.get("LLM_API_KEY", "")).strip()),
+            "llm_base_url_configured": bool(str(env.get("LLM_BASE_URL", "")).strip()),
+            "agent_settings_file": settings_path,
+            "agent_settings_file_exists": bool(settings_path and Path(settings_path).exists()),
+        }
+
+    def _summarize_jsonl(self, output: str) -> dict[str, Any]:
+        lines = output.splitlines()
+        event_counts: dict[str, int] = {}
+        touched_paths: list[str] = []
+        recent_events: list[dict[str, Any]] = []
+        parse_errors: list[dict[str, Any]] = []
+        parsed_event_count = 0
+        non_json_line_count = 0
+        last_event_type: str | None = None
+
+        for line_number, line in enumerate(lines, start=1):
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                event = json.loads(text)
+            except json.JSONDecodeError as exc:
+                non_json_line_count += 1
+                if len(parse_errors) < 5:
+                    parse_errors.append(
+                        {
+                            "line": line_number,
+                            "error": exc.msg,
+                            "preview": redact(text[:200]),
+                        }
+                    )
+                continue
+            if not isinstance(event, dict):
+                non_json_line_count += 1
+                if len(parse_errors) < 5:
+                    parse_errors.append(
+                        {
+                            "line": line_number,
+                            "error": "JSONL event is not an object",
+                            "preview": _compact_json_preview(event),
+                        }
+                    )
+                continue
+            parsed_event_count += 1
+            event_type = str(event.get("type") or event.get("event") or event.get("kind") or "unknown")
+            last_event_type = event_type
+            event_counts[event_type] = event_counts.get(event_type, 0) + 1
+            compact = self._compact_event(event, line_number=line_number, event_type=event_type)
+            if compact.get("path"):
+                touched_paths.append(str(compact["path"]))
+            recent_events.append(compact)
+            recent_events = recent_events[-10:]
+
+        return {
+            "schema_version": 1,
+            "line_count": len(lines),
+            "parsed_event_count": parsed_event_count,
+            "non_json_line_count": non_json_line_count,
+            "event_counts": dict(sorted(event_counts.items())),
+            "last_event_type": last_event_type,
+            "touched_paths": sorted(dict.fromkeys(touched_paths)),
+            "recent_events": recent_events,
+            "parse_errors": parse_errors,
+        }
+
+    def _compact_event(self, event: dict[str, Any], *, line_number: int, event_type: str) -> dict[str, Any]:
+        compact: dict[str, Any] = {
+            "line": line_number,
+            "type": event_type,
+        }
+        for key in ("action", "observation", "status", "path", "command"):
+            if key in event and event[key] is not None:
+                compact[key] = _compact_json_preview(event[key])
+        if "message" in event and event["message"] is not None:
+            compact["message"] = _compact_json_preview(event["message"])
+        return compact
+
+    def _jsonl_progress_parser(self) -> Callable[[str, bytes], list[dict[str, Any]]]:
+        buffers: dict[str, str] = {}
+        line_numbers: dict[str, int] = {}
+
+        def parser(stream_name: str, data: bytes) -> list[dict[str, Any]]:
+            if stream_name != "stdout":
+                return []
+            text = data.decode("utf-8", errors="replace")
+            pending = f"{buffers.get(stream_name, '')}{text}"
+            raw_lines = pending.splitlines(keepends=True)
+            if raw_lines and not raw_lines[-1].endswith(("\n", "\r")):
+                buffers[stream_name] = raw_lines.pop()
+            else:
+                buffers[stream_name] = ""
+            events: list[dict[str, Any]] = []
+            for raw_line in raw_lines:
+                line_numbers[stream_name] = line_numbers.get(stream_name, 0) + 1
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                event_type = str(event.get("type") or event.get("event") or event.get("kind") or "unknown")
+                events.append(
+                    {
+                        "schema_version": 1,
+                        "source": "openhands_jsonl",
+                        **self._compact_event(
+                            event,
+                            line_number=line_numbers[stream_name],
+                            event_type=event_type,
+                        ),
+                    }
+                )
+            return events
+
+        return parser
 
 
 class DaggerExecutorAdapter:
@@ -619,10 +1020,39 @@ class DaggerExecutorAdapter:
             return f"dagger {command} <task:{invocation.task_id}>"
         return f"dagger <task:{invocation.task_id}>"
 
+    def diagnostics(
+        self,
+        *,
+        project_root: Path,
+        environment: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        env = _diagnostic_env(environment)
+        binary = "dagger"
+        binary_path = shutil.which(binary, path=env.get("PATH"))
+        enabled = _env_flag_enabled(env, DAGGER_ENABLE_ENV)
+        status = _binary_diagnostic_status(enabled=enabled, binary_found=bool(binary_path))
+        recommended_action = None
+        if status == "disabled":
+            recommended_action = f"Set {DAGGER_ENABLE_ENV}=1 to enable local Dagger CLI execution."
+        elif status == "missing_binary":
+            recommended_action = "Install Dagger CLI and ensure it is on PATH."
+        return {
+            "schema_version": EXECUTOR_DIAGNOSTICS_SCHEMA_VERSION,
+            "id": self.metadata.id,
+            "status": status,
+            "configured": bool(enabled and binary_path),
+            "enabled": enabled,
+            "required_environment": DAGGER_ENABLE_ENV,
+            "binary": binary,
+            "binary_found": bool(binary_path),
+            "binary_path": binary_path,
+            "recommended_action": recommended_action,
+        }
+
     def execute(self, invocation: ExecutorInvocation) -> ExecutorResult:
         started_at = _utc_now()
         env = invocation.env()
-        if env.get(DAGGER_ENABLE_ENV, "").lower() not in {"1", "true", "yes", "on"}:
+        if not _env_flag_enabled(env, DAGGER_ENABLE_ENV):
             return ExecutorResult(
                 status="blocked",
                 returncode=None,
@@ -690,6 +1120,7 @@ class DaggerExecutorAdapter:
 
 ShellExecutor = ShellExecutorAdapter
 CodexExecutor = CodexExecutorAdapter
+OpenHandsExecutor = OpenHandsExecutorAdapter
 DaggerExecutor = DaggerExecutorAdapter
 
 
@@ -722,4 +1153,11 @@ class ExecutorRegistry:
 
 
 def default_executor_registry() -> ExecutorRegistry:
-    return ExecutorRegistry((ShellExecutorAdapter(), CodexExecutorAdapter(), DaggerExecutorAdapter()))
+    return ExecutorRegistry(
+        (
+            ShellExecutorAdapter(),
+            CodexExecutorAdapter(),
+            OpenHandsExecutorAdapter(),
+            DaggerExecutorAdapter(),
+        )
+    )
