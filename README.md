@@ -452,6 +452,24 @@ For spec-driven projects, the harness can turn Markdown `Stage` / `Tasks` sectio
 continuation stages. By default it reads `spec.development_plan` from `.engineering/roadmap.yaml`.
 Use `--from-stage` when earlier stages are already implemented:
 
+Roadmaps can also declare the canonical project specification:
+
+```json
+{
+  "spec": {
+    "path": "docs/engineering-harness-system-spec.md",
+    "kind": "markdown",
+    "requirements_index": "docs/spec-index.json"
+  }
+}
+```
+
+`requirements_index` is optional. When it is configured, it must be a local JSON/YAML mapping or
+inline list/mapping that exposes requirement ids such as `EH-SPEC-001`; Markdown `spec.path`
+documents with requirement headings are also indexed. Roadmap validation reports task or command
+`spec_refs` that point to unknown ids. `engh status --json` includes compact spec coverage at
+top-level `spec` and under `runtime_dashboard.spec`.
+
 ```bash
 engh spec-backlog --project-root /path/to/project --from-stage 2
 engh spec-backlog --project-root /path/to/project --from-stage 2 --materialize

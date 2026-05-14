@@ -229,12 +229,30 @@ Roadmap tasks and commands may declare:
 }
 ```
 
-The first implementation of this contract must:
+Roadmaps may declare the canonical local specification and, optionally, a structured requirement
+index:
+
+```json
+{
+  "spec": {
+    "path": "docs/engineering-harness-system-spec.md",
+    "kind": "markdown",
+    "requirements_index": "docs/spec-index.json"
+  }
+}
+```
+
+The traceability contract must:
 
 - validate `spec_refs` as a list of non-empty unique strings;
+- validate the top-level `spec` block when provided;
+- validate task and command `spec_refs` against known requirement ids when a requirements index or
+  parseable canonical spec path is configured;
 - preserve task-level and command-level spec references in task payloads;
 - include spec references in policy input, manifests, reports, and executor task context;
+- expose compact spec coverage in `status --json`;
 - keep roadmaps without `spec_refs` backward compatible.
 
-Future versions should validate that referenced requirement ids exist in the canonical spec document
-or structured spec index.
+The requirement index is local-only. It may be a JSON/YAML mapping with `requirements`, `ids`, or
+`requirement_ids`, or an inline roadmap list/mapping containing requirement ids. Markdown spec paths
+with requirement headings are indexed directly when no separate index is provided.

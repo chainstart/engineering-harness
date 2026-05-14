@@ -369,6 +369,7 @@ SELF_ITERATION_ASSESSMENT_SCHEMA_VERSION = 1
 GOAL_GAP_RETROSPECTIVE_SCHEMA_VERSION = 1
 GOAL_GAP_SCORECARD_SCHEMA_VERSION = 1
 RUNTIME_DASHBOARD_SCHEMA_VERSION = 1
+SPEC_COVERAGE_SCHEMA_VERSION = 1
 OPERATOR_CONSOLE_SCHEMA_VERSION = 1
 WORKSPACE_DISPATCH_LEASE_SCHEMA_VERSION = 1
 WORKSPACE_DISPATCH_LEASE_DIRNAME = "workspace-dispatch-lease"
@@ -487,6 +488,12 @@ SELF_ITERATION_UNSAFE_REQUIREMENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], .
         ),
     ),
     ("paid service", re.compile(r"\bpaid[- ]?(?:service|services|account|accounts|hosting|deployment|api|subscription)\b")),
+)
+SPEC_REQUIREMENT_ID_PATTERN = r"[A-Z][A-Z0-9]+(?:-[A-Z0-9]+)+-\d+"
+SPEC_REQUIREMENT_ID_RE = re.compile(rf"\b{SPEC_REQUIREMENT_ID_PATTERN}\b")
+SPEC_MARKDOWN_HEADING_RE = re.compile(
+    rf"^#{{1,6}}\s+(?P<id>{SPEC_REQUIREMENT_ID_PATTERN})(?:\b|:)",
+    re.MULTILINE,
 )
 FRONTEND_KIND_LABELS = {
     "app-specific": "app-specific frontend",
@@ -6424,6 +6431,11 @@ continuation stage(s) were appended.
             if isinstance(summary.get("browser_user_experience"), dict)
             else self.browser_user_experience_summary()
         )
+        spec_coverage = (
+            deepcopy(summary.get("spec"))
+            if isinstance(summary.get("spec"), dict)
+            else self.spec_coverage_summary()
+        )
         return {
             "schema_version": RUNTIME_DASHBOARD_SCHEMA_VERSION,
             "kind": "engineering-harness.runtime-dashboard",
@@ -6431,6 +6443,7 @@ continuation stage(s) were appended.
             "project": summary.get("project"),
             "root": summary.get("root"),
             "status_source": "engh status --json",
+            "spec": spec_coverage,
             "frontend_experience": frontend_experience,
             "domain_frontend": self._runtime_domain_frontend_payload(frontend_experience),
             "browser_user_experience": browser_user_experience,
@@ -8260,12 +8273,14 @@ continuation stage(s) were appended.
         daemon_supervisor_runtime = self._runtime_daemon_supervisor_summary()
         experience = self.frontend_experience_plan()
         browser_user_experience = self.browser_user_experience_summary()
+        spec_coverage = self.spec_coverage_summary()
         summary = {
             "project": self.roadmap.get("project", self.project_root.name),
             "profile": self.roadmap.get("profile"),
             "root": str(self.project_root),
             "roadmap": str(self.roadmap_path),
             "state": str(self.state_path),
+            "spec": spec_coverage,
             "milestones": list(milestones.values()),
             "next_task": redact_evidence(self.task_payload(next_task)),
             "checkpoint_readiness": checkpoint_readiness,
@@ -9807,9 +9822,336 @@ continuation stage(s) were appended.
             return str(path.relative_to(self.project_root))
         return str(path)
 
+    def _spec_kind_for_path(self, value: str | None) -> str | None:
+        suffix = Path(str(value or "")).suffix.lower()
+        if suffix in {".md", ".markdown"}:
+            return "markdown"
+        if suffix == ".json":
+            return "json"
+        if suffix in {".yaml", ".yml"}:
+            return "yaml"
+        return None
+
+    def _spec_kind_family(self, kind: str | None, path: str | None = None) -> str | None:
+        normalized = str(kind or "").strip().lower()
+        if "markdown" in normalized or normalized in {"md", "text"}:
+            return "markdown"
+        if "json" in normalized or "yaml" in normalized or "yml" in normalized or "index" in normalized:
+            return "structured"
+        inferred = self._spec_kind_for_path(path)
+        if inferred == "markdown":
+            return "markdown"
+        if inferred in {"json", "yaml"}:
+            return "structured"
+        return None
+
+    def _resolve_project_config_path(
+        self,
+        value: Any,
+        *,
+        location: str,
+        errors: list[str],
+    ) -> Path | None:
+        text = str(value).strip() if isinstance(value, str) else ""
+        if not text:
+            errors.append(f"{location} must be a non-empty string")
+            return None
+        candidate = Path(text)
+        resolved = (candidate if candidate.is_absolute() else self.project_root / candidate).resolve()
+        if not resolved.is_relative_to(self.project_root):
+            errors.append(f"{location} must resolve inside the project root")
+            return None
+        return resolved
+
+    def _load_spec_index_mapping(
+        self,
+        path: Path,
+        *,
+        location: str,
+        errors: list[str],
+    ) -> dict[str, Any] | None:
+        if not path.exists():
+            errors.append(f"{location} file does not exist: {self._project_relative_path(path)}")
+            return None
+        try:
+            return load_mapping(path)
+        except Exception as exc:
+            errors.append(f"{location} file is not a readable mapping: {exc}")
+            return None
+
+    def _requirement_ids_from_index_payload(self, payload: Any) -> list[str]:
+        ids: list[str] = []
+        seen: set[str] = set()
+
+        def add(value: Any) -> None:
+            text = str(value).strip() if isinstance(value, str) else ""
+            if not text or text in seen:
+                return
+            if not SPEC_REQUIREMENT_ID_RE.fullmatch(text):
+                return
+            seen.add(text)
+            ids.append(text)
+
+        def walk(value: Any) -> None:
+            if isinstance(value, str):
+                add(value)
+                return
+            if isinstance(value, list):
+                for item in value:
+                    walk(item)
+                return
+            if not isinstance(value, dict):
+                return
+
+            for key in ("id", "requirement_id", "requirement", "spec_ref"):
+                add(value.get(key))
+            for key in value:
+                add(key)
+
+            for key in ("requirements", "requirement_ids", "ids", "spec_refs"):
+                if key in value:
+                    walk(value[key])
+
+        walk(payload)
+        return ids
+
+    def _requirement_ids_from_markdown(self, path: Path, *, errors: list[str]) -> list[str]:
+        if not path.exists():
+            errors.append(f"spec.path file does not exist: {self._project_relative_path(path)}")
+            return []
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            errors.append(f"spec.path file is not readable: {exc}")
+            return []
+        heading_ids = [match.group("id") for match in SPEC_MARKDOWN_HEADING_RE.finditer(text)]
+        if heading_ids:
+            return list(dict.fromkeys(heading_ids))
+        return list(dict.fromkeys(SPEC_REQUIREMENT_ID_RE.findall(text)))
+
+    def spec_index_summary(self) -> dict[str, Any]:
+        errors: list[str] = []
+        warnings: list[str] = []
+        spec = self.roadmap.get("spec")
+        payload: dict[str, Any] = {
+            "schema_version": SPEC_COVERAGE_SCHEMA_VERSION,
+            "configured": False,
+            "path": None,
+            "path_exists": False,
+            "kind": None,
+            "kind_source": None,
+            "requirements_index": None,
+            "requirements_source": None,
+            "known_requirements": [],
+            "known_requirement_count": 0,
+            "errors": errors,
+            "warnings": warnings,
+        }
+        if spec is None:
+            return payload
+        if not isinstance(spec, dict):
+            errors.append("top-level `spec` must be a mapping")
+            return payload
+
+        spec_path_value = spec.get("path")
+        spec_kind_value = spec.get("kind")
+        requirements_index_value = spec.get("requirements_index")
+        development_plan = spec.get("development_plan")
+        if isinstance(development_plan, str) and development_plan.strip():
+            payload["development_plan"] = development_plan.strip()
+
+        spec_path: Path | None = None
+        if spec_path_value is not None:
+            spec_path = self._resolve_project_config_path(spec_path_value, location="spec.path", errors=errors)
+            if spec_path is not None:
+                payload["configured"] = True
+                payload["path"] = self._project_relative_path(spec_path)
+                payload["path_exists"] = spec_path.exists()
+                if not spec_path.exists():
+                    errors.append(f"spec.path file does not exist: {self._project_relative_path(spec_path)}")
+
+        if spec_kind_value is None:
+            inferred_kind = self._spec_kind_for_path(str(spec_path_value or ""))
+            if inferred_kind:
+                payload["kind"] = inferred_kind
+                payload["kind_source"] = "inferred_from_path"
+        else:
+            kind = str(spec_kind_value).strip() if isinstance(spec_kind_value, str) else ""
+            if not kind:
+                errors.append("spec.kind must be a non-empty string")
+            else:
+                payload["kind"] = kind
+                payload["kind_source"] = "roadmap"
+                payload["configured"] = True
+
+        if (spec_kind_value is not None or requirements_index_value is not None) and spec_path_value is None:
+            errors.append("spec.path is required when spec.kind or spec.requirements_index is configured")
+
+        known_requirements: list[str] = []
+        if requirements_index_value is not None:
+            payload["configured"] = True
+            if isinstance(requirements_index_value, str):
+                index_path = self._resolve_project_config_path(
+                    requirements_index_value,
+                    location="spec.requirements_index",
+                    errors=errors,
+                )
+                if index_path is not None:
+                    payload["requirements_index"] = self._project_relative_path(index_path)
+                    index_payload = self._load_spec_index_mapping(
+                        index_path,
+                        location="spec.requirements_index",
+                        errors=errors,
+                    )
+                    if index_payload is not None:
+                        known_requirements = self._requirement_ids_from_index_payload(index_payload)
+                        payload["requirements_source"] = "requirements_index"
+            elif isinstance(requirements_index_value, (dict, list)):
+                payload["requirements_index"] = "inline"
+                known_requirements = self._requirement_ids_from_index_payload(requirements_index_value)
+                payload["requirements_source"] = "requirements_index"
+            else:
+                errors.append("spec.requirements_index must be a path string, mapping, or list")
+
+            if not known_requirements and not any(error.startswith("spec.requirements_index") for error in errors):
+                errors.append("spec.requirements_index must define at least one requirement id")
+
+        if not known_requirements and spec_path is not None and spec_path.exists():
+            family = self._spec_kind_family(payload.get("kind"), payload.get("path"))
+            if family == "markdown":
+                known_requirements = self._requirement_ids_from_markdown(spec_path, errors=errors)
+                payload["requirements_source"] = "spec.path"
+            elif family == "structured":
+                index_payload = self._load_spec_index_mapping(spec_path, location="spec.path", errors=errors)
+                if index_payload is not None:
+                    known_requirements = self._requirement_ids_from_index_payload(index_payload)
+                    payload["requirements_source"] = "spec.path"
+
+        payload["known_requirements"] = sorted(known_requirements)
+        payload["known_requirement_count"] = len(payload["known_requirements"])
+        return payload
+
+    def _roadmap_spec_ref_entries(self) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        materialized_stage_ids = {
+            str(milestone.get("id", "")).strip()
+            for milestone in self.roadmap.get("milestones", [])
+            if isinstance(milestone, dict)
+        }
+
+        def add_refs(value: Any, *, location: str, scope: str, task_id: str | None = None) -> None:
+            for ref in self._normalize_spec_refs(value):
+                entries.append(
+                    {
+                        "id": ref,
+                        "location": location,
+                        "scope": scope,
+                        "task_id": task_id,
+                    }
+                )
+
+        def visit_task(task: Any, *, stage_location: str) -> None:
+            if not isinstance(task, dict):
+                return
+            task_id = str(task.get("id", "")).strip()
+            task_location = f"{stage_location} task `{task_id or '<missing>'}`"
+            add_refs(task.get("spec_refs"), location=task_location, scope="task", task_id=task_id or None)
+            for group_name in ("implementation", "repair", "acceptance", "e2e"):
+                group = task.get(group_name, [])
+                if not isinstance(group, list):
+                    continue
+                for command_index, item in enumerate(group):
+                    if not isinstance(item, dict):
+                        continue
+                    command_name = str(item.get("name") or item.get("command") or item.get("prompt") or command_index)
+                    add_refs(
+                        item.get("spec_refs"),
+                        location=f"{task_location} {group_name}[{command_index}] `{command_name}`",
+                        scope=f"{group_name}_command",
+                        task_id=task_id or None,
+                    )
+
+        for milestone in self.roadmap.get("milestones", []):
+            if not isinstance(milestone, dict):
+                continue
+            milestone_id = str(milestone.get("id", "")).strip()
+            tasks = milestone.get("tasks", [])
+            if not isinstance(tasks, list):
+                continue
+            for task in tasks:
+                visit_task(task, stage_location=f"milestone `{milestone_id or '<missing>'}`")
+
+        continuation = self.roadmap.get("continuation") if isinstance(self.roadmap.get("continuation"), dict) else {}
+        stages = continuation.get("stages", []) if isinstance(continuation, dict) else []
+        if isinstance(stages, list):
+            for stage in stages:
+                if not isinstance(stage, dict):
+                    continue
+                stage_id = str(stage.get("id", "")).strip()
+                if stage_id in materialized_stage_ids:
+                    continue
+                tasks = stage.get("tasks", [])
+                if not isinstance(tasks, list):
+                    continue
+                for task in tasks:
+                    visit_task(task, stage_location=f"continuation stage `{stage_id or '<missing>'}`")
+
+        return entries
+
+    def spec_coverage_summary(self) -> dict[str, Any]:
+        index = self.spec_index_summary()
+        entries = self._roadmap_spec_ref_entries()
+        known = set(index.get("known_requirements", []))
+        referenced = {str(entry.get("id")) for entry in entries if entry.get("id")}
+        unknown = sorted(referenced - known) if known else []
+        unreferenced = sorted(known - referenced) if known else []
+        task_ids_with_refs = sorted({str(entry.get("task_id")) for entry in entries if entry.get("task_id")})
+        command_entries = [entry for entry in entries if str(entry.get("scope", "")).endswith("_command")]
+        if index.get("errors"):
+            status = "invalid"
+        elif not index.get("configured"):
+            status = "unconfigured"
+        elif not known:
+            status = "unindexed"
+        elif unknown:
+            status = "unknown_refs"
+        else:
+            status = "ok"
+        coverage_ratio = None
+        if known:
+            coverage_ratio = round((len(known) - len(unreferenced)) / len(known), 4)
+        return {
+            "schema_version": SPEC_COVERAGE_SCHEMA_VERSION,
+            "status": status,
+            "configured": bool(index.get("configured")),
+            "path": index.get("path"),
+            "kind": index.get("kind"),
+            "kind_source": index.get("kind_source"),
+            "requirements_index": index.get("requirements_index"),
+            "requirements_source": index.get("requirements_source"),
+            "known_requirement_count": len(known),
+            "referenced_requirement_count": len(referenced),
+            "covered_requirement_count": len(known & referenced) if known else 0,
+            "unknown_requirement_count": len(unknown),
+            "unreferenced_requirement_count": len(unreferenced),
+            "task_with_spec_refs_count": len(task_ids_with_refs),
+            "command_with_spec_refs_count": len(command_entries),
+            "reference_count": len(entries),
+            "coverage_ratio": coverage_ratio,
+            "referenced_requirements": sorted(referenced),
+            "unknown_requirements": unknown[:25],
+            "unreferenced_requirements": unreferenced[:25],
+            "errors": list(index.get("errors", [])),
+            "warnings": list(index.get("warnings", [])),
+        }
+
     def validate_roadmap(self) -> dict[str, Any]:
         errors: list[str] = []
         warnings: list[str] = []
+        spec_index = self.spec_index_summary()
+        errors.extend(spec_index.get("errors", []))
+        warnings.extend(spec_index.get("warnings", []))
+        known_requirement_ids = set(spec_index.get("known_requirements", []))
 
         if int(self.roadmap.get("version", 0) or 0) <= 0:
             warnings.append("top-level `version` is missing or not positive")
@@ -9845,6 +10187,7 @@ continuation stage(s) were appended.
                     task,
                     location=f"milestone `{milestone_id}` task[{task_index}]",
                     seen_task_ids=seen_task_ids,
+                    known_requirement_ids=known_requirement_ids,
                     errors=errors,
                     warnings=warnings,
                 )
@@ -9882,6 +10225,7 @@ continuation stage(s) were appended.
                                 task,
                                 location=f"continuation stage `{stage_id}` task[{task_index}]",
                                 seen_task_ids=task_ids_for_stage,
+                                known_requirement_ids=known_requirement_ids,
                                 errors=errors,
                                 warnings=warnings,
                             )
@@ -9893,6 +10237,7 @@ continuation stage(s) were appended.
             "warning_count": len(warnings),
             "errors": errors,
             "warnings": warnings,
+            "spec": self.spec_coverage_summary(),
         }
 
     def _validate_experience_payload(
@@ -10080,6 +10425,7 @@ continuation stage(s) were appended.
         value: Any,
         *,
         location: str,
+        known_requirement_ids: set[str] | None = None,
         errors: list[str],
     ) -> None:
         if value is None:
@@ -10099,6 +10445,8 @@ continuation stage(s) were appended.
             if text in seen:
                 errors.append(f"{location} contains duplicate spec ref `{text}`")
             seen.add(text)
+            if known_requirement_ids and text not in known_requirement_ids:
+                errors.append(f"{location}[{ref_index}] references unknown requirement id `{text}`")
 
     def _validate_requested_capabilities(
         self,
@@ -10139,6 +10487,7 @@ continuation stage(s) were appended.
         *,
         location: str,
         seen_task_ids: set[str],
+        known_requirement_ids: set[str] | None,
         errors: list[str],
         warnings: list[str],
     ) -> None:
@@ -10154,7 +10503,12 @@ continuation stage(s) were appended.
         seen_task_ids.add(task_id)
         if not str(task.get("title", task_id)).strip():
             warnings.append(f"task `{task_id}` title is empty")
-        self._validate_spec_refs(task.get("spec_refs"), location=f"task `{task_id}` spec_refs", errors=errors)
+        self._validate_spec_refs(
+            task.get("spec_refs"),
+            location=f"task `{task_id}` spec_refs",
+            known_requirement_ids=known_requirement_ids,
+            errors=errors,
+        )
         file_scope = task.get("file_scope", [])
         if file_scope is not None and not isinstance(file_scope, list):
             errors.append(f"task `{task_id}` file_scope must be a list")
@@ -10171,6 +10525,7 @@ continuation stage(s) were appended.
                 self._validate_command_payload(
                     item,
                     location=f"task `{task_id}` {group_name}[{command_index}]",
+                    known_requirement_ids=known_requirement_ids,
                     errors=errors,
                     warnings=warnings,
                 )
@@ -10185,13 +10540,19 @@ continuation stage(s) were appended.
         item: Any,
         *,
         location: str,
+        known_requirement_ids: set[str] | None,
         errors: list[str],
         warnings: list[str],
     ) -> None:
         if not isinstance(item, dict):
             errors.append(f"{location} must be a mapping")
             return
-        self._validate_spec_refs(item.get("spec_refs"), location=f"{location}.spec_refs", errors=errors)
+        self._validate_spec_refs(
+            item.get("spec_refs"),
+            location=f"{location}.spec_refs",
+            known_requirement_ids=known_requirement_ids,
+            errors=errors,
+        )
         user_experience_gate = item.get("user_experience_gate")
         if user_experience_gate is not None:
             if not isinstance(user_experience_gate, dict):

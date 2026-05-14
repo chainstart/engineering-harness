@@ -1006,6 +1006,145 @@ def test_roadmap_validation_checks_spec_refs(tmp_path):
     assert "task `spec-task` acceptance[0].spec_refs[0] must be a non-empty string" in result["errors"]
 
 
+def test_roadmap_spec_block_indexes_requirement_coverage(tmp_path):
+    project = tmp_path / "indexed-spec-project"
+    project.mkdir()
+    (project / "docs").mkdir()
+    (project / "docs/spec.md").write_text(
+        "# Project Spec\n\n### EH-SPEC-001: Intake\n\n### EH-SPEC-002: Planning\n",
+        encoding="utf-8",
+    )
+    (project / "docs/spec-index.json").write_text(
+        json.dumps(
+            {
+                "kind": "engineering-harness.spec-index.v1",
+                "requirements": [
+                    {"id": "EH-SPEC-001", "title": "Intake"},
+                    {"id": "EH-SPEC-002", "title": "Planning"},
+                    {"id": "EH-SPEC-014", "title": "Distribution"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    engineering_dir = project / ".engineering"
+    engineering_dir.mkdir()
+    roadmap_path = engineering_dir / "roadmap.yaml"
+    roadmap_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "project": "indexed-spec-project",
+                "profile": "python-agent",
+                "spec": {
+                    "path": "docs/spec.md",
+                    "kind": "markdown",
+                    "requirements_index": "docs/spec-index.json",
+                },
+                "milestones": [
+                    {
+                        "id": "baseline",
+                        "title": "Baseline",
+                        "tasks": [
+                            {
+                                "id": "indexed-spec-task",
+                                "title": "Indexed spec task",
+                                "spec_refs": ["EH-SPEC-001"],
+                                "file_scope": ["**"],
+                                "acceptance": [
+                                    {
+                                        "name": "spec acceptance",
+                                        "command": "python3 -c \"print('ok')\"",
+                                        "spec_refs": ["EH-SPEC-002"],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    validation = Harness(project).validate_roadmap()
+    status = Harness(project).status_summary()
+    coverage = status["spec"]
+
+    assert validation["status"] == "passed"
+    assert validation["spec"]["known_requirement_count"] == 3
+    assert coverage["status"] == "ok"
+    assert coverage["path"] == "docs/spec.md"
+    assert coverage["kind"] == "markdown"
+    assert coverage["requirements_index"] == "docs/spec-index.json"
+    assert coverage["known_requirement_count"] == 3
+    assert coverage["referenced_requirement_count"] == 2
+    assert coverage["covered_requirement_count"] == 2
+    assert coverage["unknown_requirement_count"] == 0
+    assert coverage["unreferenced_requirements"] == ["EH-SPEC-014"]
+    assert coverage["task_with_spec_refs_count"] == 1
+    assert coverage["command_with_spec_refs_count"] == 1
+    assert status["runtime_dashboard"]["spec"]["covered_requirement_count"] == 2
+
+
+def test_roadmap_spec_block_reports_unknown_requirement_refs(tmp_path):
+    project = tmp_path / "unknown-spec-ref-project"
+    project.mkdir()
+    (project / "docs").mkdir()
+    (project / "docs/spec.md").write_text("# Project Spec\n", encoding="utf-8")
+    (project / "docs/spec-index.json").write_text(
+        json.dumps({"requirements": [{"id": "EH-SPEC-001"}]}),
+        encoding="utf-8",
+    )
+    engineering_dir = project / ".engineering"
+    engineering_dir.mkdir()
+    (engineering_dir / "roadmap.yaml").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "project": "unknown-spec-ref-project",
+                "profile": "python-agent",
+                "spec": {
+                    "path": "docs/spec.md",
+                    "kind": "markdown",
+                    "requirements_index": "docs/spec-index.json",
+                },
+                "milestones": [
+                    {
+                        "id": "baseline",
+                        "tasks": [
+                            {
+                                "id": "unknown-ref-task",
+                                "spec_refs": ["EH-SPEC-999"],
+                                "acceptance": [
+                                    {
+                                        "name": "unknown command ref",
+                                        "command": "python3 -c \"print('ok')\"",
+                                        "spec_refs": ["EH-SPEC-998"],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    validation = Harness(project).validate_roadmap()
+    coverage = Harness(project).status_summary()["spec"]
+
+    assert validation["status"] == "failed"
+    assert "task `unknown-ref-task` spec_refs[0] references unknown requirement id `EH-SPEC-999`" in validation["errors"]
+    assert (
+        "task `unknown-ref-task` acceptance[0].spec_refs[0] references unknown requirement id `EH-SPEC-998`"
+        in validation["errors"]
+    )
+    assert coverage["status"] == "unknown_refs"
+    assert coverage["unknown_requirements"] == ["EH-SPEC-998", "EH-SPEC-999"]
+
+
 def test_spec_refs_are_preserved_in_manifest_policy_input_and_report(tmp_path):
     project = tmp_path / "agent-project"
     project.mkdir()
