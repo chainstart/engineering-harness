@@ -400,6 +400,14 @@ SELF_ITERATION_CONTEXT_LIMITS = {
     "goal_gap_scorecard_evidence_paths": 8,
     "goal_gap_scorecard_themes": 4,
 }
+AGENT_CONTEXT_PACK_SCHEMA_VERSION = 1
+AGENT_CONTEXT_PACK_DIRNAME = "agent-context-packs"
+AGENT_CONTEXT_PACK_LIMITS = {
+    "requirement_count": 12,
+    "requirement_excerpt_chars": 1200,
+    "prompt_chars": 1200,
+    "verification_command_count": 20,
+}
 OPERATOR_CONSOLE_LIMITS = {
     "recent_task_runs": 8,
     "recent_drive_runs": 5,
@@ -491,6 +499,10 @@ SELF_ITERATION_UNSAFE_REQUIREMENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], .
 )
 SPEC_REQUIREMENT_ID_PATTERN = r"[A-Z][A-Z0-9]+(?:-[A-Z0-9]+)+-\d+"
 SPEC_REQUIREMENT_ID_RE = re.compile(rf"\b{SPEC_REQUIREMENT_ID_PATTERN}\b")
+SPEC_MARKDOWN_ANY_HEADING_RE = re.compile(r"^(?P<marks>#{1,6})\s+")
+SPEC_MARKDOWN_REQUIREMENT_HEADING_RE = re.compile(
+    rf"^(?P<marks>#{{1,6}})\s+(?P<id>{SPEC_REQUIREMENT_ID_PATTERN})(?P<title>(?:\b|:).*)?$"
+)
 SPEC_MARKDOWN_HEADING_RE = re.compile(
     rf"^#{{1,6}}\s+(?P<id>{SPEC_REQUIREMENT_ID_PATTERN})(?:\b|:)",
     re.MULTILINE,
@@ -807,6 +819,7 @@ class CommandRun:
     executor: str = "shell"
     executor_metadata: dict[str, Any] = field(default_factory=dict)
     result_metadata: dict[str, Any] = field(default_factory=dict)
+    context_pack: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -10262,6 +10275,360 @@ continuation stage(s) were appended.
         payload["known_requirement_count"] = len(payload["known_requirements"])
         return payload
 
+    def _safe_context_slug(self, value: Any, *, fallback: str = "item") -> str:
+        slug = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "").strip()).strip("-._")
+        return slug[:80] or fallback
+
+    def _agent_context_pack_refs(self, task: HarnessTask, command: AcceptanceCommand) -> tuple[list[str], bool]:
+        refs: list[str] = []
+
+        def add(values: Any) -> None:
+            for ref in self._normalize_spec_refs(values):
+                if ref not in refs:
+                    refs.append(ref)
+
+        add(list(task.spec_refs))
+        add(list(command.spec_refs))
+        for item in (*task.implementation, *task.repair, *task.acceptance, *task.e2e):
+            add(list(item.spec_refs))
+        limit = int(AGENT_CONTEXT_PACK_LIMITS["requirement_count"])
+        return refs[:limit], len(refs) > limit
+
+    def _agent_context_pack_command_payload(self, command: AcceptanceCommand) -> dict[str, Any]:
+        payload = {
+            "name": command.name,
+            "executor": command.executor,
+            "required": command.required,
+            "timeout_seconds": command.timeout_seconds,
+            "model": command.model,
+            "sandbox": command.sandbox,
+            "spec_refs": list(command.spec_refs),
+            "requested_capabilities": list(command.requested_capabilities),
+        }
+        if command.command:
+            payload["command_excerpt"] = self._truncate_text(
+                command.command,
+                int(AGENT_CONTEXT_PACK_LIMITS["prompt_chars"]),
+            )
+        if command.prompt:
+            payload["prompt_excerpt"] = self._truncate_text(
+                command.prompt,
+                int(AGENT_CONTEXT_PACK_LIMITS["prompt_chars"]),
+            )
+        return payload
+
+    def _agent_context_pack_verification_payload(self, task: HarnessTask) -> tuple[list[dict[str, Any]], bool]:
+        commands: list[tuple[str, AcceptanceCommand]] = [
+            *[("acceptance", command) for command in task.acceptance],
+            *[("e2e", command) for command in task.e2e],
+        ]
+        limit = int(AGENT_CONTEXT_PACK_LIMITS["verification_command_count"])
+        return (
+            [
+                {
+                    "phase": phase,
+                    **self._agent_context_pack_command_payload(command),
+                }
+                for phase, command in commands[:limit]
+            ],
+            len(commands) > limit,
+        )
+
+    def _requirement_heading_title(self, raw_title: str | None) -> str:
+        title = str(raw_title or "").strip()
+        if title.startswith(":"):
+            title = title[1:].strip()
+        return title
+
+    def _requirement_excerpts_from_markdown(
+        self,
+        path: Path,
+        refs: list[str],
+        *,
+        errors: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        targets = set(refs)
+        if not targets:
+            return {}
+        if not path.exists():
+            errors.append(f"spec.path file does not exist: {self._project_relative_path(path)}")
+            return {}
+        limit = int(AGENT_CONTEXT_PACK_LIMITS["requirement_excerpt_chars"])
+        found: dict[str, dict[str, Any]] = {}
+        active_id: str | None = None
+        active_title = ""
+        active_level = 0
+        active_lines: list[str] = []
+        active_chars = 0
+        capture_limit = limit + 1
+
+        def finish_active() -> None:
+            nonlocal active_id, active_title, active_level, active_lines, active_chars
+            if active_id is not None:
+                found[active_id] = {
+                    "id": active_id,
+                    "title": active_title,
+                    "source_kind": "markdown",
+                    "source_path": self._project_relative_path(path),
+                    "excerpt": self._truncate_text("\n".join(active_lines).strip(), limit),
+                }
+            active_id = None
+            active_title = ""
+            active_level = 0
+            active_lines = []
+            active_chars = 0
+
+        try:
+            with path.open(encoding="utf-8") as handle:
+                for raw_line in handle:
+                    line = raw_line.rstrip("\n")
+                    heading = SPEC_MARKDOWN_ANY_HEADING_RE.match(line)
+                    requirement_heading = SPEC_MARKDOWN_REQUIREMENT_HEADING_RE.match(line)
+                    if active_id is not None and heading is not None and len(heading.group("marks")) <= active_level:
+                        finish_active()
+                    if requirement_heading is not None:
+                        requirement_id = requirement_heading.group("id")
+                        if requirement_id in targets:
+                            active_id = requirement_id
+                            active_title = self._requirement_heading_title(requirement_heading.group("title"))
+                            active_level = len(requirement_heading.group("marks"))
+                            active_lines = [line.strip()]
+                            active_chars = len(active_lines[0])
+                            continue
+                    if active_id is not None:
+                        if active_chars < capture_limit:
+                            remaining = capture_limit - active_chars
+                            piece = line[:remaining]
+                            active_lines.append(piece)
+                            active_chars += len(piece) + 1
+            finish_active()
+        except OSError as exc:
+            errors.append(f"spec.path file is not readable: {exc}")
+        return found
+
+    def _structured_requirement_text(self, value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        if not isinstance(value, dict):
+            return ""
+        parts: list[str] = []
+        for key in ("summary", "description", "text", "requirement", "body", "acceptance", "acceptance_evidence"):
+            item = value.get(key)
+            if isinstance(item, str) and item.strip():
+                parts.append(item.strip())
+            elif isinstance(item, list):
+                parts.extend(str(entry).strip() for entry in item if str(entry).strip())
+        return "\n".join(parts)
+
+    def _requirement_excerpts_from_structured_payload(
+        self,
+        payload: Any,
+        refs: list[str],
+        *,
+        source_path: str,
+    ) -> dict[str, dict[str, Any]]:
+        targets = set(refs)
+        if not targets:
+            return {}
+        limit = int(AGENT_CONTEXT_PACK_LIMITS["requirement_excerpt_chars"])
+        found: dict[str, dict[str, Any]] = {}
+
+        def add(requirement_id: str, value: Any) -> None:
+            if requirement_id not in targets:
+                return
+            title = ""
+            if isinstance(value, dict):
+                title = str(value.get("title") or value.get("name") or "").strip()
+            text = self._structured_requirement_text(value)
+            found[requirement_id] = {
+                "id": requirement_id,
+                "title": title,
+                "source_kind": "structured",
+                "source_path": source_path,
+                "excerpt": self._truncate_text(text, limit) if text else "",
+            }
+
+        def walk(value: Any) -> None:
+            if isinstance(value, list):
+                for item in value:
+                    walk(item)
+                return
+            if not isinstance(value, dict):
+                return
+            direct_id = value.get("id") or value.get("requirement_id")
+            if isinstance(direct_id, str) and SPEC_REQUIREMENT_ID_RE.fullmatch(direct_id.strip()):
+                add(direct_id.strip(), value)
+            for key, item in value.items():
+                if isinstance(key, str) and SPEC_REQUIREMENT_ID_RE.fullmatch(key.strip()):
+                    add(key.strip(), item)
+                walk(item)
+
+        walk(payload)
+        return found
+
+    def _requirement_excerpts_for_refs(self, refs: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
+        if not refs:
+            return [], []
+        errors: list[str] = []
+        found: dict[str, dict[str, Any]] = {}
+        spec = self.roadmap.get("spec") if isinstance(self.roadmap.get("spec"), dict) else {}
+        spec_path: Path | None = None
+        spec_path_value = spec.get("path") if isinstance(spec, dict) else None
+        if spec_path_value is not None:
+            spec_path = self._resolve_project_config_path(spec_path_value, location="spec.path", errors=errors)
+            if spec_path is not None and spec_path.exists():
+                family = self._spec_kind_family(str(spec.get("kind") or ""), self._project_relative_path(spec_path))
+                if family == "markdown":
+                    found.update(self._requirement_excerpts_from_markdown(spec_path, refs, errors=errors))
+                elif family == "structured":
+                    index_payload = self._load_spec_index_mapping(spec_path, location="spec.path", errors=errors)
+                    if index_payload is not None:
+                        found.update(
+                            self._requirement_excerpts_from_structured_payload(
+                                index_payload,
+                                refs,
+                                source_path=self._project_relative_path(spec_path),
+                            )
+                        )
+
+        requirements_index_value = spec.get("requirements_index") if isinstance(spec, dict) else None
+        if requirements_index_value is not None:
+            index_payload: Any | None = None
+            source_path = "inline"
+            if isinstance(requirements_index_value, str):
+                index_path = self._resolve_project_config_path(
+                    requirements_index_value,
+                    location="spec.requirements_index",
+                    errors=errors,
+                )
+                if index_path is not None:
+                    source_path = self._project_relative_path(index_path)
+                    index_payload = self._load_spec_index_mapping(
+                        index_path,
+                        location="spec.requirements_index",
+                        errors=errors,
+                    )
+            elif isinstance(requirements_index_value, (dict, list)):
+                index_payload = requirements_index_value
+            if index_payload is not None:
+                structured = self._requirement_excerpts_from_structured_payload(
+                    index_payload,
+                    refs,
+                    source_path=source_path,
+                )
+                for requirement_id, entry in structured.items():
+                    existing = found.get(requirement_id)
+                    if existing is None:
+                        found[requirement_id] = entry
+                        continue
+                    if not existing.get("title") and entry.get("title"):
+                        existing["title"] = entry["title"]
+                    if not existing.get("excerpt") and entry.get("excerpt"):
+                        existing["excerpt"] = entry["excerpt"]
+
+        requirements: list[dict[str, Any]] = []
+        for ref in refs:
+            entry = found.get(ref)
+            if entry is None:
+                requirements.append(
+                    {
+                        "id": ref,
+                        "title": "",
+                        "source_kind": None,
+                        "source_path": None,
+                        "excerpt": "",
+                        "message": "No bounded requirement excerpt found for this spec ref.",
+                    }
+                )
+            else:
+                requirements.append(entry)
+        return requirements, errors
+
+    def _write_agent_context_pack(
+        self,
+        task: HarnessTask,
+        command: AcceptanceCommand,
+        *,
+        phase: str | None,
+        executor_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        refs, refs_truncated = self._agent_context_pack_refs(task, command)
+        requirements, requirement_errors = self._requirement_excerpts_for_refs(refs)
+        verification, verification_truncated = self._agent_context_pack_verification_payload(task)
+        context_dir = self.report_dir / AGENT_CONTEXT_PACK_DIRNAME
+        fingerprint = hashlib.sha256(
+            f"{task.id}\0{phase or ''}\0{command.name}\0{time.time_ns()}".encode("utf-8")
+        ).hexdigest()[:10]
+        context_path = context_dir / (
+            f"{slug_now()}-{self._safe_context_slug(task.id, fallback='task')}-"
+            f"{self._safe_context_slug(phase or 'phase', fallback='phase')}-"
+            f"{self._safe_context_slug(command.name, fallback='command')}-{fingerprint}.json"
+        )
+        spec_summary = self.spec_index_summary()
+        payload = {
+            "schema_version": AGENT_CONTEXT_PACK_SCHEMA_VERSION,
+            "kind": "engineering-harness.agent-context-pack",
+            "created_at": utc_now(),
+            "project": {
+                "name": str(self.roadmap.get("project", self.project_root.name)),
+                "root": str(self.project_root),
+                "profile": self.roadmap.get("profile"),
+                "roadmap_path": self._project_relative_path(self.roadmap_path),
+            },
+            "task": {
+                "id": task.id,
+                "title": task.title,
+                "milestone_id": task.milestone_id,
+                "milestone_title": task.milestone_title,
+                "file_scope": list(task.file_scope),
+                "spec_refs": list(task.spec_refs),
+            },
+            "phase": phase,
+            "command": self._agent_context_pack_command_payload(command),
+            "executor": executor_metadata,
+            "spec_refs": refs,
+            "spec_refs_truncated": refs_truncated,
+            "spec": {
+                "configured": spec_summary.get("configured", False),
+                "path": spec_summary.get("path"),
+                "kind": spec_summary.get("kind"),
+                "requirements_index": spec_summary.get("requirements_index"),
+                "requirements_source": spec_summary.get("requirements_source"),
+                "known_requirement_count": spec_summary.get("known_requirement_count", 0),
+            },
+            "requirements": requirements,
+            "requirement_errors": requirement_errors,
+            "verification": verification,
+            "verification_truncated": verification_truncated,
+            "limits": dict(AGENT_CONTEXT_PACK_LIMITS),
+        }
+        redacted_payload = self._redact_context_value(payload)
+        write_json(context_path, redacted_payload)
+        encoded = context_path.read_bytes()
+        relative_path = self._project_relative_path(context_path)
+        summary = {
+            "schema_version": AGENT_CONTEXT_PACK_SCHEMA_VERSION,
+            "kind": "engineering-harness.agent-context-pack",
+            "path": relative_path,
+            "sha256": hashlib.sha256(encoded).hexdigest(),
+            "spec_refs": refs,
+            "spec_refs_truncated": refs_truncated,
+            "requirement_count": len(requirements),
+            "requirement_error_count": len(requirement_errors),
+            "limits": dict(AGENT_CONTEXT_PACK_LIMITS),
+            "requirements": [
+                {
+                    "id": requirement.get("id"),
+                    "title": requirement.get("title"),
+                    "source_path": requirement.get("source_path"),
+                    "excerpt": requirement.get("excerpt"),
+                    "message": requirement.get("message"),
+                }
+                for requirement in requirements
+            ],
+        }
+        return self._redact_context_value(summary)
+
     def _roadmap_spec_ref_entries(self) -> list[dict[str, Any]]:
         entries: list[dict[str, Any]] = []
         materialized_stage_ids = {
@@ -12899,6 +13266,7 @@ continuation stage(s) were appended.
         *,
         phase: str | None = None,
         progress_callback: Any = None,
+        context_pack: dict[str, Any] | None = None,
     ) -> ExecutorInvocation:
         invocation = ExecutorInvocation(
             project_root=self.project_root,
@@ -12911,6 +13279,7 @@ continuation stage(s) were appended.
             sandbox=command.sandbox,
             phase=phase,
             no_progress_timeout_seconds=self._executor_no_progress_timeout_seconds(phase, command),
+            context_pack=context_pack,
             progress_callback=progress_callback,
         )
         executor = self.executor_registry.get(command.executor)
@@ -12919,7 +13288,10 @@ continuation stage(s) were appended.
         prepare_invocation = getattr(executor, "prepare_invocation", None)
         if prepare_invocation is None:
             return invocation
-        return prepare_invocation(invocation, self._executor_task_context(task))
+        return prepare_invocation(
+            invocation,
+            self._executor_task_context(task, command=command, phase=phase, context_pack=context_pack),
+        )
 
     def _executor_progress_callback(
         self,
@@ -13000,7 +13372,14 @@ continuation stage(s) were appended.
 
         return callback
 
-    def _executor_task_context(self, task: HarnessTask) -> ExecutorTaskContext:
+    def _executor_task_context(
+        self,
+        task: HarnessTask,
+        *,
+        command: AcceptanceCommand | None = None,
+        phase: str | None = None,
+        context_pack: dict[str, Any] | None = None,
+    ) -> ExecutorTaskContext:
         def task_command(command: AcceptanceCommand) -> ExecutorTaskCommand:
             return ExecutorTaskCommand(
                 name=command.name,
@@ -13010,6 +13389,13 @@ continuation stage(s) were appended.
                 spec_refs=command.spec_refs,
             )
 
+        current_command = task_command(command) if command is not None else None
+        relevant_spec_refs = tuple(context_pack.get("spec_refs", [])) if isinstance(context_pack, dict) else task.spec_refs
+        requirement_excerpts = (
+            tuple(context_pack.get("requirements", []))
+            if isinstance(context_pack, dict) and isinstance(context_pack.get("requirements"), list)
+            else ()
+        )
         return ExecutorTaskContext(
             project_root=self.project_root,
             task_id=task.id,
@@ -13020,6 +13406,11 @@ continuation stage(s) were appended.
             file_scope=task.file_scope,
             acceptance=tuple(task_command(item) for item in task.acceptance),
             e2e=tuple(task_command(item) for item in task.e2e),
+            phase=phase,
+            current_command=current_command,
+            relevant_spec_refs=relevant_spec_refs,
+            requirement_excerpts=requirement_excerpts,
+            context_pack=context_pack,
         )
 
     def _run_command(
@@ -13055,11 +13446,20 @@ continuation stage(s) were appended.
             executor_id=executor.metadata.id,
             persist=persist_state,
         )
+        context_pack = None
+        if executor.metadata.kind == "agent" and executor.metadata.input_mode == "prompt":
+            context_pack = self._write_agent_context_pack(
+                task,
+                acceptance,
+                phase=phase,
+                executor_metadata=executor.metadata.as_contract(),
+            )
         invocation = self._executor_invocation(
             acceptance,
             task,
             phase=phase,
             progress_callback=progress_callback,
+            context_pack=context_pack,
         )
         display_command = executor.display_command(invocation)
         result = executor.execute(invocation)
@@ -13076,6 +13476,7 @@ continuation stage(s) were appended.
             executor=executor.metadata.id,
             executor_metadata=executor.metadata.as_contract(),
             result_metadata=result.metadata,
+            context_pack=context_pack or {},
         )
 
     def _finish_task(
@@ -13339,6 +13740,7 @@ continuation stage(s) were appended.
             policy_decision_payload
         )
         safety_audit_payload = safety_audit or self._safety_audit_evidence(policy_decision_payload)
+        context_pack_artifacts = self._context_pack_artifacts_from_runs(runs)
         payload = {
             "schema_version": 1,
             "kind": "engineering-harness.task-run-manifest",
@@ -13366,6 +13768,7 @@ continuation stage(s) were appended.
             "artifacts": [
                 {"kind": "markdown_report", "path": report_relative},
                 {"kind": "json_manifest", "path": manifest_relative},
+                *context_pack_artifacts,
             ],
             "runs": [self._command_run_manifest(task, run) for run in runs],
             "safety": safety_payload,
@@ -13383,6 +13786,26 @@ continuation stage(s) were appended.
             payload["failure_isolation"] = failure_isolation
         write_json(manifest_path, redact_evidence(payload))
 
+    def _context_pack_artifacts_from_runs(self, runs: list[CommandRun]) -> list[dict[str, Any]]:
+        artifacts: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for run in runs:
+            context_pack = run.context_pack
+            if not isinstance(context_pack, dict):
+                continue
+            path = str(context_pack.get("path") or "").strip()
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            artifact = {
+                "kind": "agent_context_pack",
+                "path": path,
+            }
+            if context_pack.get("sha256"):
+                artifact["sha256"] = context_pack.get("sha256")
+            artifacts.append(artifact)
+        return artifacts
+
     def _command_run_manifest(self, task: HarnessTask, run: CommandRun) -> dict[str, Any]:
         metadata = self._configured_command_metadata(task, run)
         stdout_summary = self._stream_summary(run.stdout)
@@ -13392,7 +13815,7 @@ continuation stage(s) were appended.
             or metadata.get("executor_metadata")
             or self.executor_registry.metadata_for(metadata["executor"])
         )
-        return {
+        payload = {
             "phase": run.phase,
             "name": run.name,
             "executor": metadata["executor"],
@@ -13420,6 +13843,10 @@ continuation stage(s) were appended.
                 stderr_summary=stderr_summary,
             ),
         }
+        context_pack = run.context_pack
+        if isinstance(context_pack, dict) and context_pack.get("path"):
+            payload["context_pack"] = context_pack
+        return payload
 
     def _command_run_result_payload(self, task: HarnessTask, run: CommandRun) -> dict[str, Any]:
         manifest_payload = self._command_run_manifest(task, run)
@@ -13437,6 +13864,7 @@ continuation stage(s) were appended.
             "executor_capabilities": manifest_payload.get("executor_capabilities", []),
             "executor_metadata": manifest_payload.get("executor_metadata", {}),
             "executor_result": manifest_payload.get("executor_result", {}),
+            **({"context_pack": manifest_payload.get("context_pack")} if manifest_payload.get("context_pack") else {}),
         }
 
     def _executor_result_contract(
@@ -14156,6 +14584,7 @@ continuation stage(s) were appended.
             requested_capabilities = run_metadata.get("requested_capabilities", [])
             user_experience_gate = run_metadata.get("user_experience_gate", {})
             executor_capabilities = executor_metadata.get("capabilities", []) if isinstance(executor_metadata, dict) else []
+            context_pack = run.context_pack
             lines.extend(
                 [
                     f"### {run.phase}: {run.name}",
@@ -14166,6 +14595,7 @@ continuation stage(s) were appended.
                     f"- Requested capabilities: `{json.dumps(requested_capabilities)}`",
                     f"- User-experience gate: `{str(bool(user_experience_gate)).lower()}`",
                     f"- Executor capabilities: `{json.dumps(executor_capabilities)}`",
+                    f"- Context pack: `{context_pack.get('path')}`" if isinstance(context_pack, dict) and context_pack.get("path") else "- Context pack: `none`",
                     "",
                     "```bash",
                     redact(run.command),

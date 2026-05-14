@@ -86,9 +86,28 @@ Each run also includes normalized executor fields:
   capabilities, and policy/approval flags.
 - `executor_result`: schema version, status, return code, started/finished timestamps, stdout and
   stderr summaries, and optional adapter-specific result metadata.
+- `context_pack` for agent prompt runs, when a bounded local context pack was written.
 
 This keeps reports and manifest readers compatible while giving future adapters a stable place to
 record capabilities and result details.
+
+## Agent Context Packs
+
+Before a real `agent` executor run with prompt input, the harness writes a redacted JSON context pack
+under `.engineering/reports/tasks/agent-context-packs/`. The pack includes bounded task metadata,
+the current command, verification command summaries, relevant `spec_refs`, compact spec index
+metadata, and short requirement excerpts extracted from the configured local spec path or structured
+requirements index.
+
+The Codex and OpenHands prompt templates include:
+
+- the relevant `spec_refs`;
+- bounded requirement excerpts;
+- the context-pack path and digest.
+
+The prompt never embeds the full spec document. Context pack counts and text sizes are capped, and
+sensitive-looking values are redacted before persistence. Task manifests reference the context pack
+from the run-level `context_pack` field and from `artifacts` with kind `agent_context_pack`.
 
 ## Watchdog Results
 

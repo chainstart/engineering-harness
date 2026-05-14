@@ -145,6 +145,7 @@ class ExecutorInvocation:
     environment: dict[str, str] = field(default_factory=dict)
     phase: str | None = None
     no_progress_timeout_seconds: int | None = None
+    context_pack: dict[str, Any] | None = None
     progress_callback: Callable[[dict[str, Any]], None] | None = field(default=None, repr=False, compare=False)
 
     def env(self) -> dict[str, str]:
@@ -183,6 +184,43 @@ class ExecutorTaskContext:
     file_scope: tuple[str, ...]
     acceptance: tuple[ExecutorTaskCommand, ...]
     e2e: tuple[ExecutorTaskCommand, ...]
+    phase: str | None = None
+    current_command: ExecutorTaskCommand | None = None
+    relevant_spec_refs: tuple[str, ...] = ()
+    requirement_excerpts: tuple[dict[str, Any], ...] = ()
+    context_pack: dict[str, Any] | None = None
+
+
+def _format_spec_refs(refs: tuple[str, ...]) -> str:
+    return "\n".join(f"- {ref}" for ref in refs) or "- none declared"
+
+
+def _format_requirement_excerpts(requirements: tuple[dict[str, Any], ...]) -> str:
+    if not requirements:
+        return "- none available"
+    chunks: list[str] = []
+    for requirement in requirements:
+        requirement_id = str(requirement.get("id") or "").strip() or "unknown"
+        title = str(requirement.get("title") or "").strip()
+        source_path = str(requirement.get("source_path") or "").strip()
+        excerpt = str(requirement.get("excerpt") or requirement.get("message") or "").strip()
+        heading = requirement_id if not title else f"{requirement_id}: {title}"
+        chunks.append(f"### {heading}")
+        if source_path:
+            chunks.append(f"Source: {source_path}")
+        chunks.append(excerpt or "No bounded excerpt was found for this requirement.")
+    return "\n\n".join(chunks)
+
+
+def _format_context_pack(context_pack: dict[str, Any] | None) -> str:
+    if not context_pack:
+        return "- not persisted"
+    path = str(context_pack.get("path") or "").strip()
+    if not path:
+        return "- not persisted"
+    sha256 = str(context_pack.get("sha256") or "").strip()
+    suffix = f" (sha256: {sha256})" if sha256 else ""
+    return f"- {path}{suffix}"
 
 
 @dataclass(frozen=True)
@@ -624,7 +662,9 @@ class CodexExecutorAdapter:
         acceptance = "\n".join(f"- {item.name}: {item.summary()}" for item in task_context.acceptance)
         e2e = "\n".join(f"- {item.name}: {item.summary()}" for item in task_context.e2e)
         file_scope = "\n".join(f"- {scope}" for scope in task_context.file_scope) or "- repository-scoped, but keep changes minimal"
-        spec_refs = "\n".join(f"- {ref}" for ref in task_context.spec_refs) or "- none declared"
+        spec_refs = _format_spec_refs(task_context.relevant_spec_refs or task_context.spec_refs)
+        requirement_excerpts = _format_requirement_excerpts(task_context.requirement_excerpts)
+        context_pack = _format_context_pack(task_context.context_pack or invocation.context_pack)
         verification = acceptance if not e2e else f"{acceptance}\n\nE2E/user-experience commands:\n{e2e}"
         expanded_prompt = (
             "You are executing one roadmap task for an autonomous engineering harness.\n\n"
@@ -633,6 +673,10 @@ class CodexExecutorAdapter:
             f"Task: {task_context.task_id} - {task_context.title}\n\n"
             "Spec refs:\n"
             f"{spec_refs}\n\n"
+            "Requirement excerpts:\n"
+            f"{requirement_excerpts}\n\n"
+            "Agent context pack:\n"
+            f"{context_pack}\n\n"
             "Goal:\n"
             f"{prompt}\n\n"
             "Allowed file scope:\n"
@@ -715,12 +759,21 @@ class OpenHandsExecutorAdapter:
         acceptance = "\n".join(f"- {item.name}: {item.summary()}" for item in task_context.acceptance)
         e2e = "\n".join(f"- {item.name}: {item.summary()}" for item in task_context.e2e)
         file_scope = "\n".join(f"- {scope}" for scope in task_context.file_scope) or "- repository-scoped, but keep changes minimal"
+        spec_refs = _format_spec_refs(task_context.relevant_spec_refs or task_context.spec_refs)
+        requirement_excerpts = _format_requirement_excerpts(task_context.requirement_excerpts)
+        context_pack = _format_context_pack(task_context.context_pack or invocation.context_pack)
         verification = acceptance if not e2e else f"{acceptance}\n\nE2E/user-experience commands:\n{e2e}"
         expanded_prompt = (
             "You are executing one roadmap task for an autonomous engineering harness through OpenHands headless mode.\n\n"
             f"Project root: {task_context.project_root}\n"
             f"Milestone: {task_context.milestone_id} - {task_context.milestone_title}\n"
             f"Task: {task_context.task_id} - {task_context.title}\n\n"
+            "Spec refs:\n"
+            f"{spec_refs}\n\n"
+            "Requirement excerpts:\n"
+            f"{requirement_excerpts}\n\n"
+            "Agent context pack:\n"
+            f"{context_pack}\n\n"
             "Goal:\n"
             f"{prompt}\n\n"
             "Allowed file scope:\n"

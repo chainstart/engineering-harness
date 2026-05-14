@@ -20,6 +20,7 @@ from engineering_harness.domain_frontend import (
     build_domain_frontend_plan,
 )
 from engineering_harness.executors import (
+    CodexExecutorAdapter,
     DAGGER_ENABLE_ENV,
     OPENHANDS_BINARY_ENV,
     OPENHANDS_ENABLE_ENV,
@@ -1448,6 +1449,125 @@ def test_spec_refs_are_preserved_in_manifest_policy_input_and_report(tmp_path):
     assert "## Spec Traceability" in report_text
     assert 'Task spec refs: `["EH-SPEC-002", "EH-SPEC-008"]`' in report_text
     assert 'acceptance `spec trace acceptance` spec refs: `["EH-SPEC-007"]`' in report_text
+
+
+def test_agent_prompts_include_bounded_requirement_context_and_manifest_reference(tmp_path):
+    captured: dict[str, str] = {}
+
+    class RecordingCodexExecutor:
+        metadata = ExecutorMetadata(
+            id="codex",
+            name="Recording Codex",
+            kind="agent",
+            adapter="test.recording-codex",
+            input_mode="prompt",
+            capabilities=("agent", "workspace_write", "stdout", "stderr"),
+            requires_agent_approval=True,
+        )
+
+        def prepare_invocation(self, invocation, task_context):
+            return CodexExecutorAdapter().prepare_invocation(invocation, task_context)
+
+        def display_command(self, invocation):
+            return f"recording-codex <task:{invocation.task_id}>"
+
+        def execute(self, invocation):
+            captured["prompt"] = invocation.prompt or ""
+            captured["context_pack_path"] = invocation.context_pack["path"]
+            return ExecutorResult(
+                status="passed",
+                returncode=0,
+                started_at="2024-01-01T00:00:00Z",
+                finished_at="2024-01-01T00:00:01Z",
+                stdout="agent ok",
+                stderr="",
+                metadata={"selected": "codex"},
+            )
+
+    project = tmp_path / "agent-context-project"
+    project.mkdir()
+    init_project(project, "python-agent", name="agent-context-project")
+    (project / "docs").mkdir(exist_ok=True)
+    (project / "docs/spec.md").write_text(
+        "\n".join(
+            [
+                "# Project Spec",
+                "",
+                "### EH-SPEC-004: Executor Abstraction",
+                "",
+                "Executors must declare capabilities and normalize results.",
+                "",
+                "### EH-SPEC-005: Model And Memory Layer",
+                "",
+                "Agent prompts receive bounded task, spec, file-scope, and verification context.",
+                "OPENAI_API_KEY=super-secret-value",
+                "",
+                "### EH-SPEC-010: Policy And Governance",
+                "",
+                "Policy decisions expose agent, secret, network, and filesystem risk.",
+                "",
+                "### EH-SPEC-999: Unrelated Requirement",
+                "",
+                "This unrelated section must not be copied into the agent prompt.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    roadmap_path = project / ".engineering/roadmap.yaml"
+    roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    roadmap["spec"] = {
+        "path": "docs/spec.md",
+        "kind": "markdown",
+    }
+    task = roadmap["milestones"][0]["tasks"][0]
+    task["spec_refs"] = ["EH-SPEC-005"]
+    task["implementation"] = [
+        {
+            "name": "agent implementation",
+            "executor": "codex",
+            "prompt": "Use the requirement excerpts and do not call external services.",
+            "spec_refs": ["EH-SPEC-004"],
+        }
+    ]
+    task["acceptance"][0]["command"] = "python3 -c \"print('agent context acceptance ok')\""
+    task["acceptance"][0]["spec_refs"] = ["EH-SPEC-010"]
+    roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+    harness = Harness(project, executor_registry=ExecutorRegistry((RecordingCodexExecutor(), ShellExecutorAdapter())))
+    result = harness.run_task(harness.next_task(), allow_agent=True)
+    manifest = task_manifest(project, result)
+    context_pack_path = project / captured["context_pack_path"]
+    context_pack = json.loads(context_pack_path.read_text(encoding="utf-8"))
+    prompt = captured["prompt"]
+
+    assert result["status"] == "passed"
+    assert "Spec refs:" in prompt
+    assert "- EH-SPEC-004" in prompt
+    assert "- EH-SPEC-005" in prompt
+    assert "- EH-SPEC-010" in prompt
+    assert "Requirement excerpts:" in prompt
+    assert "EH-SPEC-005: Model And Memory Layer" in prompt
+    assert "Agent context pack:" in prompt
+    assert captured["context_pack_path"] in prompt
+    assert "EH-SPEC-999" not in prompt
+    assert "super-secret-value" not in prompt
+    assert "OPENAI_API_KEY=[REDACTED]" in prompt
+
+    assert context_pack_path.exists()
+    assert context_pack["kind"] == "engineering-harness.agent-context-pack"
+    assert context_pack["spec_refs"] == ["EH-SPEC-005", "EH-SPEC-004", "EH-SPEC-010"]
+    assert [item["id"] for item in context_pack["requirements"]] == [
+        "EH-SPEC-005",
+        "EH-SPEC-004",
+        "EH-SPEC-010",
+    ]
+    assert "super-secret-value" not in context_pack_path.read_text(encoding="utf-8")
+    assert manifest["runs"][0]["context_pack"]["path"] == captured["context_pack_path"]
+    assert manifest["runs"][0]["executor_result"]["metadata"] == {"selected": "codex"}
+    assert any(
+        artifact["kind"] == "agent_context_pack" and artifact["path"] == captured["context_pack_path"]
+        for artifact in manifest["artifacts"]
+    )
 
 
 def test_opa_policy_input_export_shape(tmp_path):
